@@ -12,7 +12,7 @@ import { createConnection } from "node:net";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import sharp from "sharp";
 import { createProviderConnection } from "../server/providers/index.mjs";
 import { OCR_SCHEMA, OCR_PROMPT, validateOcr } from "../shared/ocr.mjs";
@@ -31,11 +31,11 @@ const safeMessage = (error) =>
     .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[已隐藏]")
     .slice(0, 1000);
 
-function selectedUser() {
-  const values = args.filter((arg) => arg.startsWith("--user="));
+export function selectVerificationUser(dataDirectory, requestedArgs = []) {
+  const values = requestedArgs.filter((arg) => arg.startsWith("--user="));
   if (
     values.length > 1 ||
-    args.some(
+    requestedArgs.some(
       (arg) =>
         arg !== "--resume" && arg !== "--help" && !arg.startsWith("--user="),
     )
@@ -46,7 +46,7 @@ function selectedUser() {
     prerequisite("--user 需要填写自己的站内用户名。");
   let database;
   try {
-    database = new DatabaseSync(join(dataDir, "yohaku.sqlite"), {
+    database = new DatabaseSync(join(dataDirectory, "yohaku.sqlite"), {
       readOnly: true,
     });
     const names = database
@@ -89,7 +89,7 @@ function selectedUser() {
       .prepare(
         "SELECT subject FROM provider_bindings WHERE user_id=? AND provider_id='openai'",
       )
-      .all()
+      .all(user.id)
       .map((row) => row.subject);
     if (!subjects.length)
       prerequisite(
@@ -197,7 +197,7 @@ function checkImage(name, draft) {
 }
 
 async function main() {
-  const user = selectedUser();
+  const user = selectVerificationUser(dataDir, args);
   if (await websiteIsRunning())
     prerequisite(
       "检测到本机 4317 服务仍在运行。请先停止网站，再运行此 CLI，避免并发刷新同一授权；--resume 也需要先停网站。",
@@ -451,15 +451,20 @@ async function main() {
   }
 }
 
-if (args.includes("--help")) {
-  console.log(
-    "npm run verify:ai -- [--user=自己的站内用户名] [--resume]\n默认验证首次站内owner。先在网站完成自己的OpenAI订阅绑定，再停止本机4317服务。--resume必须在新的CLI进程运行。不会创建或删除网站材料，不需要密码或Cookie。",
-  );
-} else {
-  try {
-    await main();
-  } catch (error) {
-    console.error(safeMessage(error));
-    process.exitCode = error instanceof PreflightError ? 2 : 1;
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  if (args.includes("--help")) {
+    console.log(
+      "npm run verify:ai -- [--user=自己的站内用户名] [--resume]\n默认验证首次站内owner。先在网站完成自己的OpenAI订阅绑定，再停止本机4317服务。--resume必须在新的CLI进程运行。不会创建或删除网站材料，不需要密码或Cookie。",
+    );
+  } else {
+    try {
+      await main();
+    } catch (error) {
+      console.error(safeMessage(error));
+      process.exitCode = error instanceof PreflightError ? 2 : 1;
+    }
   }
 }
