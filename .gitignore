@@ -13,3 +13,6 @@ artifacts/
 archive/*.zip
 *.log
 .DS_Store
+
+# Private deployment instances and selected-instance symlink.
+/deploy/instances/
