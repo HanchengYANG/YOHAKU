@@ -1,0 +1,482 @@
+:root {
+  --ink: #203b39;
+  --green: #203b39;
+  --green-dark: #17312f;
+  --paper: #fffdf7;
+  --rust: #be6243;
+  --rust-dark: #a64f34;
+  --muted: #627166;
+  --line: #ded8ca;
+  color: var(--ink);
+  background: #f5f1e8;
+}
+body,
+.main-panel {
+  background: #f5f1e8;
+}
+::selection {
+  background: #efd7b8;
+  color: var(--ink);
+}
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+summary:focus-visible {
+  outline-color: var(--rust);
+}
+.button.primary {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+}
+.button.primary:hover:not(:disabled) {
+  background: var(--green-dark);
+  border-color: var(--green-dark);
+}
+.button.secondary {
+  background: #e7ece3;
+  border-color: #cbd5c8;
+  color: #294c41;
+}
+.button.secondary:hover:not(:disabled) {
+  background: #dce6d8;
+  border-color: #b5c7b3;
+}
+.button.subtle,
+.text-button {
+  color: #526d61;
+}
+.button.subtle:hover:not(:disabled) {
+  background: #eae6d9;
+}
+.text-button:hover {
+  color: var(--rust-dark);
+}
+.icon-button {
+  color: #718174;
+}
+.icon-button:hover {
+  color: var(--ink);
+  background: #e9e4d8;
+}
+
+/* A dark bookshelf gives the paper workspace a clear visual edge. */
+.sidebar {
+  color: #f7f0e2;
+  background: var(--ink);
+  border-right-color: var(--green-dark);
+  box-shadow: 8px 0 24px #152b2510;
+}
+.sidebar .brand-mark {
+  background: var(--rust);
+  color: #fff9ef;
+}
+.sidebar .brand strong,
+.sidebar .document-link strong,
+.sidebar .user-menu-header strong {
+  color: #fbf4e6;
+}
+.sidebar .brand small {
+  color: #b6cbbd;
+}
+.sidebar > .button.primary {
+  color: var(--ink);
+  background: #efdec0;
+  border-color: #efdec0;
+}
+.sidebar > .button.primary:hover:not(:disabled) {
+  background: #f8e9ce;
+  border-color: #f8e9ce;
+}
+.sidebar > .button.secondary {
+  color: #eee9dc;
+  background: #ffffff0a;
+  border-color: #ffffff30;
+}
+.sidebar > .button.secondary:hover:not(:disabled),
+.sidebar > .button.subtle:hover:not(:disabled) {
+  background: #ffffff12;
+  border-color: #ffffff40;
+}
+.sidebar > .button.subtle,
+.sidebar .text-button {
+  color: #d3dfd2;
+}
+.sidebar .text-button:hover {
+  color: #f4d3a3;
+}
+.sidebar .shelf-heading {
+  color: #e4e5d8;
+}
+.sidebar .count {
+  color: #f0d2a4;
+}
+.sidebar .search-box {
+  color: #bed1c3;
+  background: #ffffff0a;
+  border-color: #ffffff2b;
+}
+.sidebar .search-box input {
+  color: #f7f0e2;
+}
+.sidebar .search-box input::placeholder {
+  color: #b4c6b9;
+}
+.sidebar .search-box input:focus {
+  outline: none;
+}
+.sidebar .search-box:focus-within {
+  border-color: #e0b38c;
+  box-shadow: 0 0 0 2px #e0b38c30;
+}
+.sidebar .shelf-empty,
+.sidebar .document-link-top {
+  color: #bfd0c1;
+}
+.sidebar .document-link small {
+  color: #adbfaf;
+}
+.sidebar .document-link:hover:not(.active) {
+  background: #2c4944;
+  border-color: #ffffff1c;
+}
+.sidebar .document-link.active {
+  color: var(--ink);
+  background: #f0e5cd;
+  border-color: #e1ceb0;
+  box-shadow: inset 3px 0 var(--rust);
+}
+.sidebar .document-link.active strong {
+  color: var(--ink);
+}
+.sidebar .document-link.active .document-link-top {
+  color: #526a5e;
+}
+.sidebar .document-link.active small {
+  color: #5a6b60;
+}
+.sidebar .kind-dot {
+  background: #9bbfa7;
+}
+.sidebar .kind-dot.book,
+.sidebar .kind-dot.lyrics {
+  background: #d99d72;
+}
+.sidebar .kind-dot.textbook {
+  background: #9bbbc2;
+}
+.sidebar .account-user-menu,
+.sidebar .sidebar-bottom {
+  border-color: #ffffff24;
+}
+.sidebar .sidebar-bottom,
+.sidebar .user-menu-header small {
+  color: #bacdbb;
+}
+.sidebar .sidebar-bottom small,
+.sidebar .version {
+  color: #a9c0ac;
+}
+.sidebar .local-dot {
+  background: #d7ab7e;
+}
+.sidebar .user-menu-error {
+  color: #efb595;
+}
+.sidebar .user-menu-invitation {
+  background: var(--green-dark);
+  border-color: #496358;
+}
+.sidebar .user-menu-invitation label,
+.sidebar .user-menu-invitation > p,
+.sidebar .invite-copy-row small {
+  color: #c0d0c1;
+}
+.sidebar .user-menu-invitation input {
+  background: #f5efdf;
+  border-color: #c7d3c5;
+  color: var(--ink);
+}
+.sidebar :is(button, a, input):focus-visible {
+  outline-color: #edc192;
+}
+.sidebar-backdrop {
+  background: #112a256e;
+}
+
+.topbar {
+  background: #faf7ef;
+  border-bottom-color: var(--line);
+}
+.topbar-title {
+  color: #5b6e63;
+}
+.stage-tag {
+  background: #f1dfd1;
+  color: #9b4c32;
+}
+.eyebrow {
+  color: var(--rust-dark);
+}
+.reader-title-row h1,
+.editor-heading h1,
+.stage2-heading h1,
+.document-chat-heading h2 {
+  color: var(--ink);
+}
+.reading-sheet,
+.editor-workspace,
+.ai-account-card,
+.document-chat,
+.account-gate-card {
+  background: var(--paper);
+  border-color: var(--line);
+  box-shadow: 0 7px 24px #493a2307;
+}
+.source-panel {
+  background: #fbf8f0;
+  border-color: var(--line);
+}
+.preview-panel {
+  background: var(--paper);
+}
+.panel-tabs,
+.preview-heading,
+.ocr-image-controls {
+  border-color: var(--line);
+  background: #f5f0e5;
+  color: #526c5e;
+}
+.panel-tabs > button,
+.ocr-preview-switch > button {
+  color: #5f7161;
+}
+.panel-tabs > button[aria-selected="true"],
+.ocr-preview-switch > button[aria-selected="true"] {
+  color: var(--ink);
+  border-bottom-color: var(--rust);
+}
+.panel-tabs > button > span {
+  color: #64715f;
+  background: #e9e1ce;
+}
+.metadata-form label,
+.stage2-field,
+.account-form-field,
+.panel-hint,
+.empty-rubies,
+.editor-footnote,
+.stage2-description,
+.image-file-hint,
+.image-file-details,
+.image-recognition-note,
+.image-recognition-state,
+.image-preview-empty,
+.image-preview-empty small,
+.ai-model-caption,
+.ai-usage-note,
+.ai-account-state p,
+.chat-document-title,
+.chat-empty,
+.chat-send-row > small,
+.chat-quote-field > span,
+.preview-heading small,
+.ocr-history-hint,
+.ocr-reading-order {
+  color: var(--muted);
+}
+.metadata-form input,
+.metadata-form select,
+.annotation-input-row input,
+.batch-editor input,
+.ruby-edit-row input,
+.stage2-field input,
+.stage2-field select,
+.stage2-field textarea,
+.book-rename input,
+.book-jump select,
+.book-target input,
+.book-target select,
+.account-form-field input,
+.ocr-image-controls select {
+  color: var(--ink);
+  border-color: #d6cfbf;
+  background: var(--paper);
+}
+.source-textarea,
+.japanese-text {
+  color: #293e34;
+}
+.source-textarea:focus {
+  outline-color: #b58961;
+}
+.source-textarea::placeholder,
+.main-panel input::placeholder,
+.main-panel textarea::placeholder,
+.account-gate input::placeholder {
+  color: #657363;
+}
+.japanese-text rt {
+  color: #637468;
+}
+.ruby-edit-row {
+  border-bottom-color: #e8e2d5;
+}
+.ruby-edit-row[data-active="true"],
+.editor-message {
+  color: #476248;
+  background: #e8ecdf;
+}
+.ruby-edit-row .ruby-origin {
+  color: #5d6e50;
+  background: #e9e9dc;
+}
+.ruby-edit-row .ruby-origin.source {
+  color: #506e3f;
+  background: #e4ecd8;
+}
+.ruby-edit-row .ruby-origin.generated {
+  color: #85623c;
+  background: #eee4ce;
+}
+.document-meta,
+.reader-footer,
+.saved-state,
+.font-control,
+.export-actions .text-button {
+  color: var(--muted);
+}
+.kind-label,
+.ruby-toggle.selected {
+  color: #365c47;
+  background: #e7ecdf;
+}
+.font-control input {
+  accent-color: var(--rust);
+}
+.reader-recognition-details,
+.ocr-review-overview {
+  color: #657358;
+  background: #efecdf;
+  border-color: #dcd9c8;
+}
+.ocr-review-overview > strong,
+.ocr-review-details summary,
+.reader-recognition-details summary {
+  color: #51674d;
+}
+.book-navigation,
+.book-empty {
+  background: #eeeadf;
+  border-color: #d8d1bf;
+}
+.book-page-open:hover strong {
+  color: var(--rust-dark);
+}
+.image-import-preview {
+  background: #eee9dd;
+  border-color: #b7beaa;
+}
+.image-import-preview.is-dragging {
+  background: #e4ecdc;
+  border-color: #71906d;
+  outline-color: #c3d2b7;
+}
+.image-file-picker input::file-selector-button {
+  background: #e6eadc;
+  color: #355844;
+}
+.image-file-details strong {
+  color: #4b6753;
+}
+.chat-context {
+  color: #5b654c;
+  background: #f0e8d7;
+  border-left-color: var(--rust);
+}
+.chat-message {
+  color: #304b3c;
+}
+.chat-message.user {
+  background: #e1eadd;
+}
+.chat-message.assistant {
+  background: var(--paper);
+  border-color: var(--line);
+}
+.chat-speaker,
+.chat-pending {
+  color: #60775d;
+}
+.chat-composer {
+  border-top-color: var(--line);
+}
+.stage2-error,
+.error-banner,
+.account-gate-error {
+  color: #914c31;
+  border-color: #dfbea6;
+  background: #f6e7dc;
+}
+.delete-button,
+.book-delete {
+  color: #a15b42;
+}
+.delete-button:hover,
+.book-delete:hover {
+  color: #813b2b;
+  background: #f4e4d9;
+}
+.toast {
+  color: #3d6144;
+  background: #edf1e4;
+  border-color: #c8d5ba;
+}
+
+.account-gate {
+  position: relative;
+  isolation: isolate;
+  background: #eee8dc;
+}
+.account-gate .brand-mark {
+  background: var(--ink);
+}
+.account-gate-brand small,
+.account-gate-description,
+.account-separation-note,
+.account-gate-loading,
+.account-gate-modes button {
+  color: var(--muted);
+}
+.account-gate-modes,
+.account-separation-note {
+  border-color: var(--line);
+}
+.account-gate-modes button.selected {
+  color: var(--ink);
+  border-bottom-color: var(--rust);
+}
+.account-setup-note {
+  color: #637056;
+  background: #f0ead9;
+  border-left-color: #b78a60;
+}
+@media (min-width: 1100px) {
+  .account-gate::before {
+    content: "";
+    position: fixed;
+    inset: 0 0 0 auto;
+    width: 36%;
+    z-index: -1;
+    border-left: 1px solid #d0c4ae;
+    background: url("./assets/reading-room.webp") 58% center / cover;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar,
+  .button {
+    transition: none;
+  }
+}

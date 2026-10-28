@@ -13,6 +13,9 @@ import { kinds } from "../constants.mjs";
 import api from "../api.mjs";
 import Icon from "./Icon.jsx";
 import RubyText from "./RubyText.jsx";
+import ImportProgress from "./ImportProgress.jsx";
+
+const annotationSteps = [{ id: "annotate", label: "生成注音", copy: "正在参考原图补全缺失读音，正文和已有读音保持不变。" }];
 
 export default function Editor({ initial, onSave, onCancel, onDirty, saving, books = [], onCreateBook }) {
   const [value, setValue] = useState(() => ({
@@ -62,6 +65,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
     initial.autoAnnotationCompleted === true,
   );
   const [annotationError, setAnnotationError] = useState(initial.annotationError || "");
+  const [annotationStartedAt, setAnnotationStartedAt] = useState(null);
   const [annotationElapsedMs, setAnnotationElapsedMs] = useState(null);
   const [annotationPaint, setAnnotationPaint] = useState(null);
   const [imageRotation, setImageRotation] = useState(0);
@@ -270,6 +274,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
       ),
     );
     const startedAt = performance.now();
+    setAnnotationStartedAt(startedAt);
     setAnnotating(true);
     setAnnotationError("");
     setAnnotationElapsedMs(null);
@@ -565,6 +570,10 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
                   </button>
                 )}
                 {annotating && <p role="status">正在参考原图生成缺失注音，正文保持不变。</p>}
+                {annotationStartedAt !== null && (annotating || annotationError) && (
+                  <ImportProgress phase="annotate" startedAt={annotationStartedAt}
+                    steps={annotationSteps} failed={!annotating && !!annotationError} />
+                )}
                 {annotationError && <p role="alert">{annotationError}</p>}
                 {annotationElapsedMs !== null && (
                   <p role="status" data-annotation-elapsed-ms={annotationElapsedMs}>

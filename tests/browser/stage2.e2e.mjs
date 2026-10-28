@@ -618,6 +618,8 @@ test("自动注音失败保留正文，重试只重发注音不重复上传或�
   await openImageImport(page);
   await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(imagePath);
   let uploads = 0, recognitions = 0, annotations = 0;
+  let releaseRetry;
+  const retryGate = new Promise((resolve) => { releaseRetry = resolve; });
   page.on("request", (request) => {
     const pathname = new URL(request.url()).pathname;
     if (request.method() !== "POST") return;
@@ -627,6 +629,7 @@ test("自动注音失败保留正文，重试只重发注音不重复上传或�
   await page.route("**/api/images/*/annotate", async (route) => {
     annotations++;
     if (annotations === 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "测试故障：注音暂时失败。" }) });
+    await retryGate;
     return route.continue();
   });
   await page.getByRole("button", { name: "识别并注音", exact: true }).click();
@@ -635,10 +638,26 @@ test("自动注音失败保留正文，重试只重发注音不重复上传或�
   await expect(page.getByLabel("日语正文", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "重试注音", exact: true })).toBeEnabled();
   expect([uploads, recognitions, annotations]).toEqual([1, 1, 1]);
-  await page.getByRole("button", { name: "重试注音", exact: true }).click();
-  await expect(page.getByLabel("日语正文", { exact: true })).toHaveValue(ocrText);
-  await expect(page.locator("[data-import-elapsed-ms]")).toBeVisible();
-  expect([uploads, recognitions, annotations]).toEqual([1, 1, 2]);
+  const progress = page.getByRole("region", { name: "图片处理进度", exact: true });
+  await expect(progress).toHaveAttribute("data-phase", "annotate");
+  await expect(progress).toHaveAttribute("data-failed", "true");
+  await expect(progress.locator('[data-step="upload"]')).toHaveAttribute("data-state", "complete");
+  await expect(progress.locator('[data-step="recognize"]')).toHaveAttribute("data-state", "complete");
+  await expect(progress.locator('[data-step="annotate"]')).toHaveAttribute("data-state", "failed");
+  try {
+    await page.getByRole("button", { name: "重试注音", exact: true }).click();
+    await expect(progress).toHaveAttribute("data-failed", "false");
+    await expect(progress.locator('[data-step="annotate"]')).toHaveAttribute("data-state", "current");
+    await expect.poll(() => annotations).toBe(2);
+    expect([uploads, recognitions]).toEqual([1, 1]);
+    expect(await progress.getByRole("progressbar", { name: "生成注音进度", exact: true }).getAttribute("aria-valuenow")).toBeNull();
+    releaseRetry();
+    await expect(page.getByLabel("日语正文", { exact: true })).toHaveValue(ocrText);
+    await expect(page.locator("[data-import-elapsed-ms]")).toBeVisible();
+    expect([uploads, recognitions, annotations]).toEqual([1, 1, 2]);
+  } finally {
+    releaseRetry();
+  }
 });
 
 test("自动注音失败可先校对正文，手动重试继续保留已完成结果", async ({ page }) => {
@@ -660,9 +679,25 @@ test("自动注音失败可先校对正文，手动重试继续保留已完成�
   await expect(page.locator("[data-ocr-elapsed-ms]")).toBeVisible();
   await expect(page.locator("[data-import-elapsed-ms]")).toHaveCount(0);
   await page.unroute("**/api/images/*/annotate");
+  let releaseManual;
+  const manualGate = new Promise((resolve) => { releaseManual = resolve; });
+  await page.route("**/api/images/*/annotate", async (route) => {
+    await manualGate;
+    await route.continue();
+  });
   const reply = page.waitForResponse((response) => /\/api\/images\/[^/]+\/annotate$/.test(new URL(response.url()).pathname));
-  await page.getByRole("button", { name: "生成缺失注音", exact: true }).click();
-  expect((await reply).ok()).toBe(true);
+  try {
+    await page.getByRole("button", { name: "生成缺失注音", exact: true }).click();
+    const progress = page.getByRole("region", { name: "图片处理进度", exact: true });
+    await expect(progress).toHaveAttribute("data-phase", "annotate");
+    expect(await progress.getByRole("progressbar", { name: "生成注音进度", exact: true }).getAttribute("aria-valuenow")).toBeNull();
+    await expect(page.getByRole("button", { name: "正在生成注音…", exact: true })).toBeDisabled();
+    releaseManual();
+    expect((await reply).ok()).toBe(true);
+    await expect(progress).toHaveCount(0);
+  } finally {
+    releaseManual();
+  }
   await expect(page.locator("[data-annotation-elapsed-ms]")).toBeVisible();
   await expect(page.getByLabel("日语正文", { exact: true })).toHaveValue(ocrText);
   await expect(page.getByText("正文与注音已完成，请一起校对正文和读音后保存。", { exact: true })).toBeVisible();
@@ -882,8 +917,27 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
   await chat
     .getByRole("textbox", { name: "向 AI 提问", exact: true })
     .fill("背中在这里是什么意思？");
-  await chat.getByRole("button", { name: "发送问题", exact: true }).click();
-  await expect(chat.locator(".chat-message.assistant")).toHaveCount(1);
+  let releaseAnswer;
+  const answerGate = new Promise((resolve) => { releaseAnswer = resolve; });
+  const answerRoute = `**/api/documents/${documentId}/conversations`;
+  await page.route(answerRoute, async (route) => {
+    if (route.request().method() === "POST") await answerGate;
+    await route.continue();
+  });
+  try {
+    await chat.getByRole("button", { name: "发送问题", exact: true }).click();
+    const progress = chat.getByRole("region", { name: "AI回答进度", exact: true });
+    await expect(progress).toHaveAttribute("data-phase", "reply");
+    expect(await progress.getByRole("progressbar", { name: "生成回答进度", exact: true }).getAttribute("aria-valuenow")).toBeNull();
+    await expect(chat.getByRole("button", { name: "关闭 AI 讨论", exact: true })).toBeDisabled();
+    await page.screenshot({ path: `artifacts/design-2026-10-28/answer-progress-${info.project.name}.png`, fullPage: true, animations: "disabled" });
+    releaseAnswer();
+    await expect(chat.locator(".chat-message.assistant")).toHaveCount(1);
+    await expect(progress).toHaveCount(0);
+  } finally {
+    releaseAnswer();
+    await page.unroute(answerRoute);
+  }
   await expect(chat.locator(".chat-message.assistant")).toContainText(
     "【浏览器测试替身，不是真实 AI 回答】",
   );
@@ -1742,5 +1796,84 @@ test("校对既有独立材料时新建并选择书籍，书名回车不提前�
       }
     }
     await page.request.post("/api/ai/logout");
+  }
+});
+
+test("图片处理进度随真实三阶段切换，模型不报虚假百分比且支持减少动态效果", async ({ page }, info) => {
+  await enableTestAccount(page);
+  await openImageImport(page);
+  await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(imagePath);
+  let releaseUpload, releaseRecognition, releaseAnnotation;
+  const uploadGate = new Promise((resolve) => { releaseUpload = resolve; });
+  const recognitionGate = new Promise((resolve) => { releaseRecognition = resolve; });
+  const annotationGate = new Promise((resolve) => { releaseAnnotation = resolve; });
+  await page.route("**/api/images", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    await uploadGate;
+    await route.continue();
+  });
+  await page.route("**/api/images/*/recognize", async (route) => {
+    await recognitionGate;
+    await route.continue();
+  });
+  await page.route("**/api/images/*/annotate", async (route) => {
+    await annotationGate;
+    await route.continue();
+  });
+  const progress = page.getByRole("region", { name: "图片处理进度", exact: true });
+  const step = (id) => progress.locator(`[data-step="${id}"]`);
+  try {
+    await page.getByRole("button", { name: "识别并注音", exact: true }).click();
+    await expect(progress).toHaveAttribute("data-phase", "upload");
+    await expect(progress).toBeInViewport({ ratio: 0.9 });
+    await expect(step("upload")).toHaveAttribute("data-state", "current");
+    await expect(step("recognize")).toHaveAttribute("data-state", "pending");
+    await expect(step("annotate")).toHaveAttribute("data-state", "pending");
+    const uploadBar = progress.getByRole("progressbar", { name: "上传图片进度", exact: true });
+    await expect(uploadBar).toBeVisible();
+    await expect(uploadBar).toHaveAttribute("aria-valuenow", /^(?:100|[1-9]?\d)$/);
+    const uploadPercent = Number(await uploadBar.getAttribute("aria-valuenow"));
+    expect(uploadPercent).toBeGreaterThanOrEqual(0);
+    expect(uploadPercent).toBeLessThanOrEqual(100);
+    await expect(page.getByRole("region", { name: "图片导入", exact: true })).toHaveAttribute("aria-busy", "true");
+    await page.screenshot({ path: `artifacts/design-2026-10-28/import-upload-${info.project.name}.png`, fullPage: true, animations: "disabled" });
+
+    releaseUpload();
+    await expect(progress).toHaveAttribute("data-phase", "recognize");
+    await expect(step("upload")).toHaveAttribute("data-state", "complete");
+    await expect(step("recognize")).toHaveAttribute("data-state", "current");
+    const recognizeBar = progress.getByRole("progressbar", { name: "识别正文进度", exact: true });
+    await expect(recognizeBar).toBeVisible();
+    expect(await recognizeBar.getAttribute("aria-valuenow")).toBeNull();
+    await expect(recognizeBar).toHaveAttribute("aria-valuetext", "正在等待模型结果，完成比例未知");
+    const elapsed = progress.locator("[data-elapsed-ms]");
+    const firstElapsed = Number(await elapsed.getAttribute("data-elapsed-ms"));
+    await expect.poll(async () => Number(await elapsed.getAttribute("data-elapsed-ms"))).toBeGreaterThan(firstElapsed);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await expect.poll(() => recognizeBar.evaluate((element) =>
+      element.getAnimations({ subtree: true }).filter((animation) => animation.playState === "running").length,
+    )).toBe(0);
+    await page.screenshot({ path: `artifacts/design-2026-10-28/import-recognize-${info.project.name}.png`, fullPage: true, animations: "disabled" });
+
+    releaseRecognition();
+    await expect(progress).toHaveAttribute("data-phase", "annotate");
+    await expect(step("upload")).toHaveAttribute("data-state", "complete");
+    await expect(step("recognize")).toHaveAttribute("data-state", "complete");
+    await expect(step("annotate")).toHaveAttribute("data-state", "current");
+    const annotateBar = progress.getByRole("progressbar", { name: "生成注音进度", exact: true });
+    await expect(annotateBar).toBeVisible();
+    expect(await annotateBar.getAttribute("aria-valuenow")).toBeNull();
+    await expect(page.getByRole("button", { name: "保存并阅读", exact: true })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: `artifacts/design-2026-10-28/import-progress-${info.project.name}.png`, fullPage: true, animations: "disabled" });
+    releaseAnnotation();
+    await expect(page.getByLabel("日语正文", { exact: true })).toHaveValue(ocrText);
+    await expect(progress).toHaveCount(0);
+    await expect(page.locator("[data-import-elapsed-ms]")).toBeVisible();
+    await expect(page.getByRole("button", { name: "保存并阅读", exact: true })).toBeEnabled();
+  } finally {
+    releaseUpload();
+    releaseRecognition();
+    releaseAnnotation();
   }
 });

@@ -369,3 +369,72 @@ test("假名锚点只让汉字显示注音，前后缀与多汉字整词保存�
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await deleteDocument(page, initial.id);
 });
+
+test("首页图片实际加载，最近阅读使用已保存书籍和材料并能正确打开", async ({ page }, info) => {
+  const suffix = info.project.name;
+  let documentId;
+  let bookId;
+  const browserErrors = [];
+  page.on("pageerror", (error) => browserErrors.push(error.message));
+  try {
+    const documentResponse = await page.request.post("/api/documents", {
+      data: { title: `首页真实材料-${suffix}`, kind: "article", orientation: "horizontal", content: "午後に{本|ほん}を{読む|よむ}。" },
+    });
+    expect(documentResponse.status()).toBe(201);
+    const document = await documentResponse.json();
+    documentId = document.id;
+    const bookResponse = await page.request.post("/api/books", { data: { title: `首页真实书籍-${suffix}` } });
+    expect(bookResponse.status()).toBe(201);
+    const book = await bookResponse.json();
+    bookId = book.id;
+    const pageResponse = await page.request.post("/api/documents", {
+      data: { bookId, title: "首页书籍第一页", kind: "book", orientation: "horizontal", content: "これは{最初|さいしょ}のページです。" },
+    });
+    expect(pageResponse.status()).toBe(201);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: /从一段想读的/ })).toBeVisible();
+    for (const alt of ["午后书桌上的书页与茶", "书本与书签的阅读静物"]) {
+      const asset = page.getByAltText(alt, { exact: true });
+      await expect(asset).toBeVisible();
+      await asset.scrollIntoViewIfNeeded();
+      await expect.poll(() => asset.evaluate((image) => image.complete && image.naturalWidth > 0)).toBe(true);
+      expect(await asset.getAttribute("src")).toMatch(/\.webp(?:\?.*)?$/);
+    }
+    await page.evaluate(() => window.scrollTo(0, 0));
+    const recent = page.getByRole("region", { name: "最近阅读", exact: true });
+    await expect(recent).toBeVisible();
+    await expect(recent.getByRole("button", { name: `打开书籍：${book.title}`, exact: true })).toBeVisible();
+    await expect(recent.getByRole("button", { name: `继续阅读：${document.title}`, exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({
+      path: `artifacts/design-2026-10-28/homepage-${suffix}.png`,
+      fullPage: true,
+      animations: "disabled",
+    });
+    await recent.getByRole("button", { name: `打开书籍：${book.title}`, exact: true }).click();
+    await expect(page.getByRole("heading", { name: book.title, exact: true })).toBeVisible();
+    expect(await page.evaluate(() => location.hash)).toBe(`#book/${bookId}`);
+    await expect(page.getByLabel("书籍页面列表", { exact: true }).getByRole("listitem")).toHaveCount(1);
+    await page.goto("/");
+    await recent.getByRole("button", { name: `继续阅读：${document.title}`, exact: true }).click();
+    await expect(page.getByRole("heading", { name: document.title, exact: true })).toBeVisible();
+    expect(await page.evaluate(() => location.hash)).toBe(`#${documentId}`);
+    await expect(page.getByRole("article", { name: "日语原文", exact: true }).locator("rt")).toHaveText(["ほん", "よ"]);
+    await expect(page.getByRole("navigation", { name: "书页导航", exact: true })).toHaveCount(0);
+    await page.goto("/");
+    await page.getByRole("button", { name: "创建一本书", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "新建书籍", exact: true })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "书籍名称", exact: true })).toBeVisible();
+    expect(browserErrors).toEqual([]);
+  } finally {
+    if (documentId) await deleteDocument(page, documentId);
+    if (bookId) {
+      const response = await page.request.get(`/api/books/${bookId}`);
+      if (response.ok()) {
+        const book = await response.json();
+        expect((await page.request.delete(`/api/books/${bookId}`, { data: { revision: book.revision } })).status()).toBe(204);
+      }
+    }
+  }
+});

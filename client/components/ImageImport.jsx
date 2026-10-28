@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { plainText } from "../../shared/document.mjs";
 import api from "../api.mjs";
+import uploadImage from "../upload-image.mjs";
 import Icon from "./Icon.jsx";
+import ImportProgress from "./ImportProgress.jsx";
 
 const allowedTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
 const maxBytes = 12 * 1024 * 1024;
@@ -13,12 +15,21 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
   const [image, setImage] = useState(null);
   const [recognizedDraft, setRecognizedDraft] = useState(null);
   const [phase, setPhase] = useState("");
+  const [failedPhase, setFailedPhase] = useState("");
+  const [uploadPercent, setUploadPercent] = useState(null);
+  const [progressStartedAt, setProgressStartedAt] = useState(null);
   const [error, setError] = useState("");
   const [dragActive, setDragActive] = useState(false);
   const fileInput = useRef(null);
   const pending = useRef(null);
   const importStartedAt = useRef(null);
+  const progressPanel = useRef(null);
   const mounted = useRef(true);
+
+  useEffect(() => {
+    if (progressStartedAt !== null)
+      progressPanel.current?.scrollIntoView({ block: "nearest", behavior: "auto" });
+  }, [progressStartedAt]);
 
   useEffect(() => {
     mounted.current = true;
@@ -63,6 +74,9 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
       setFile(selected);
       setImage(null);
       setRecognizedDraft(null);
+      setFailedPhase("");
+      setUploadPercent(null);
+      setProgressStartedAt(null);
       importStartedAt.current = null;
       setPreviewError(false);
       onDirty?.(true);
@@ -108,11 +122,15 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
     const controller = new AbortController();
     pending.current = controller;
     setError("");
+    setFailedPhase("");
+    setProgressStartedAt(performance.now());
     let uploaded = image;
     let draft = recognizedDraft;
+    let activePhase = draft ? "annotate" : uploaded ? "recognize" : "upload";
     try {
       if (!uploaded) {
         setPhase("upload");
+        setUploadPercent(0);
         const body = new FormData();
         const extension =
           file.type === "image/jpeg"
@@ -121,19 +139,12 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
               ? "webp"
               : "png";
         body.append("image", file, file.name || `粘贴的图片.${extension}`);
-        const response = await fetch("/api/images", {
-          method: "POST",
-          body,
+        uploaded = await uploadImage(body, {
           signal: controller.signal,
+          onProgress: (percentage) => {
+            if (mounted.current && !controller.signal.aborted) setUploadPercent(percentage);
+          },
         });
-        const result = await response
-          .json()
-          .catch(() => ({ error: "图片上传未完成，请重试。" }));
-        if (!response.ok)
-          throw new Error(result.error || "图片上传未完成，请重试。");
-        if (typeof result.id !== "string")
-          throw new Error("图片上传结果无效，请重试。");
-        uploaded = result;
         if (mounted.current) setImage(uploaded);
       }
       if (!mounted.current || controller.signal.aborted) return;
@@ -142,6 +153,7 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
         performance.mark("yohaku:ocr-upload-complete");
       }
       if (!draft) {
+        activePhase = "recognize";
         setPhase("recognize");
         draft = await api(
           `/images/${encodeURIComponent(uploaded.id)}/recognize`,
@@ -154,6 +166,7 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
         if (!mounted.current || controller.signal.aborted) return;
         setRecognizedDraft(draft);
       }
+      activePhase = "annotate";
       setPhase("annotate");
       const annotationStartedAt = performance.now();
       const annotated = await api(`/images/${encodeURIComponent(uploaded.id)}/annotate`, {
@@ -171,12 +184,14 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
           autoAnnotationCompleted: true });
       }
     } catch (e) {
-      if (mounted.current && e.name !== "AbortError")
+      if (mounted.current && e.name !== "AbortError") {
+        setFailedPhase(activePhase);
         setError(
           e instanceof TypeError
             ? "无法连接本机服务，所选图片已保留，请重试。"
             : e.message,
         );
+      }
     } finally {
       if (pending.current === controller) pending.current = null;
       if (mounted.current) setPhase("");
@@ -222,6 +237,13 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
       <p className="stage2-description">
         截图可直接粘贴，也可拖入图片或从设备选择照片。识别与注音会自动连续完成，再对照原图校对并保存到书架。
       </p>
+      {(phase || failedPhase) && (
+        <div ref={progressPanel}>
+          <ImportProgress phase={phase || failedPhase} startedAt={progressStartedAt}
+            uploadPercent={uploadPercent} failed={!phase && !!failedPhase}
+            completedSteps={recognizedDraft ? ["upload", "recognize"] : image ? ["upload"] : []} />
+        </div>
+      )}
       {error && (
         <div className="stage2-error" role="alert">
           {error}

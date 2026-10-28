@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import api from "../api.mjs";
 import Icon from "./Icon.jsx";
+import ImportProgress from "./ImportProgress.jsx";
+
+const answerSteps = [{ id: "reply", label: "生成回答", copy: "正在结合原文整理解释，回答完成后会自动显示。" }];
 
 function readConversation(value) {
   if (
@@ -23,6 +26,7 @@ export default function DocumentChat({ document, onClose, onDirty }) {
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [answerStartedAt, setAnswerStartedAt] = useState(null);
   const [error, setError] = useState("");
   const bottom = useRef(null);
   const pending = useRef(null);
@@ -38,6 +42,7 @@ export default function DocumentChat({ document, onClose, onDirty }) {
     setQuote("");
     setQuestion("");
     setSending(false);
+    setAnswerStartedAt(null);
     setError("");
     api(`/documents/${encodeURIComponent(document.id)}/conversations`, {
       signal: controller.signal,
@@ -94,6 +99,7 @@ export default function DocumentChat({ document, onClose, onDirty }) {
     pending.current = controller;
     const current = generation.current;
     setSending(true);
+    setAnswerStartedAt(performance.now());
     setError("");
     try {
       const result = await api(
@@ -217,9 +223,7 @@ export default function DocumentChat({ document, onClose, onDirty }) {
           </div>
         )}
         {sending && (
-          <p className="chat-pending" role="status">
-            AI 正在阅读上下文并整理解释…
-          </p>
+          <ImportProgress label="AI回答进度" phase="reply" steps={answerSteps} startedAt={answerStartedAt} />
         )}
         <div ref={bottom} />
       </div>

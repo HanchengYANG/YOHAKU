@@ -90,6 +90,7 @@ function BookCreate({ initialTitle, promoting, busy, onSave, onCancel, onDirty }
 
 function Workspace({ user, onLoggedOut }) {
   const [documents, setDocuments] = useState([]);
+  const [libraryDocuments, setLibraryDocuments] = useState([]);
   const [books, setBooks] = useState([]);
   const [shelfBooks, setShelfBooks] = useState([]);
   const [activeId, setActiveId] = useState(() => window.location.hash.slice(1));
@@ -129,9 +130,11 @@ function Workspace({ user, onLoggedOut }) {
           api(`/documents?q=${encodeURIComponent(query)}`, { signal: controller.signal }),
           api(`/books?q=${encodeURIComponent(query)}`, { signal: controller.signal }),
           query ? api("/books", { signal: controller.signal }) : null,
+          query ? api("/documents", { signal: controller.signal }) : null,
         ])
-          .then(([data, shelf, all]) => {
+          .then(([data, shelf, all, allDocuments]) => {
             setDocuments(data.documents);
+            setLibraryDocuments(allDocuments?.documents || data.documents);
             setShelfBooks(shelf.books);
             setBooks(all?.books || shelf.books);
             setShelfError("");
@@ -718,6 +721,12 @@ function Workspace({ user, onLoggedOut }) {
             onImport={() => beginNew()}
             onSample={() => beginNew(sample)}
             onImage={() => openPanel("image")}
+            onCreateBook={() => openPanel("newBook")}
+            onOpenBook={openBook}
+            onOpenDocument={openDocument}
+            books={books}
+            documents={libraryDocuments}
+            loading={loading}
           />
         )}
       </main>
