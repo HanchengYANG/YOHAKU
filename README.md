@@ -45,6 +45,11 @@ npm start
 
 ```bash
 npm run check
+npm run test:browser
 ```
+
+浏览器测试使用独立的 `artifacts/e2e-data/`，不会写入你的 `data/`。默认使用 `/usr/bin/google-chrome`；其他安装路径可用 `CHROME_PATH=/path/to/chrome npm run test:browser` 指定。手机验证使用 Chrome 的触屏及 390px 视口模拟，尚未在真实手机上测试。
+
+第一阶段的操作与验收见 [阶段一验收说明](docs/stage-1.md)。
 
 源代码与测试样本进入 Git，学习数据不进入 Git。
