@@ -302,7 +302,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
               )}
               {!warnings.length && !nonBody.length && (
                 <p className="ocr-history-hint">
-                  识别未单独标出疑点，仍请对照原图检查细小假名和特殊读法。
+                  识别未单独标出疑点，仍请检查正文和按语境生成的读音，特别留意人名与特殊读法。
                 </p>
               )}
             </details>

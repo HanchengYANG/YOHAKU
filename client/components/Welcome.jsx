@@ -45,7 +45,7 @@ export default function Welcome({ onImport, onSample, onImage }) {
         </div>
         <RubyText blocks={preview} fontSize={24} />
         <div className="sheet-footnote">
-          读音在字词上方，送假名留在原文里。
+          日式注音排版，可按完整词校正读音。
           <span>
             例：
             <ruby>

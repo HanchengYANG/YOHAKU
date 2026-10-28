@@ -263,7 +263,7 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
           <div className="image-recognition-note">
             <p>识别正文，并根据语境生成假名；书上的小号注音可忽略。</p>
             <p>手写批注和页码单独保存，人名与特殊读法可在下一步校正。</p>
-            <p>照片的阴影、弯曲和细小注音可能影响识别，请在下一步逐项确认。</p>
+            <p>照片的阴影、弯曲、反光和模糊可能影响正文识别，请在下一步确认。</p>
           </div>
           <button
             className="button primary"
