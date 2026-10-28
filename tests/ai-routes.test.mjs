@@ -1184,7 +1184,7 @@ async function actorRequest(url, cookie, path, method = "GET", body) {
   };
 }
 
-test("真实网站账户隔离：朋友不能读取主人的材料、原图、草稿、聊天或使用主人订阅（AI替身）", async (t) => {
+test("共享AI：成员可使用拥有者授权，但不能配置AI或访问别人的材料与讨论（AI替身）", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "yohaku-owner-boundary-"));
   const connections = new Map();
   let ownerId;
@@ -1256,7 +1256,7 @@ test("真实网站账户隔离：朋友不能读取主人的材料、原图、�
     { quote: "背中", question: "主人自己的讨论" },
   );
   assert.equal(discussion.status, 201);
-  const ownerCalls = ownerConnection.state.calls.length;
+  let ownerCalls = ownerConnection.state.calls.length;
 
   const invitation = await request(running.url, "/api/invitations", "POST", {});
   assert.equal(invitation.status, 201);
@@ -1328,10 +1328,25 @@ test("真实网站账户隔离：朋友不能读取主人的材料、原图、�
     "/api/ai/status",
   );
   assert.equal(friendStatus.status, 200);
-  assert.equal(friendStatus.data.connected, false);
-  const friendConnection = connections.get(friend.id);
-  assert.ok(friendConnection);
-  assert.notEqual(friendConnection, ownerConnection);
+  assert.equal(friendStatus.data.connected, true);
+  assert.equal(friendStatus.data.shared, true);
+  assert.equal(friendStatus.data.canManageAI, false);
+  assert.equal(ownerStatus.data.canManageAI, true);
+  assert.equal(connections.has(friend.id), false);
+  for (const key of ["email", "subject", "clientId", "accounts", "activeAccountId", "pending"])
+    assert.equal(friendStatus.data[key], undefined);
+  for (const [path, body] of [
+    ["/api/ai/login", {}], ["/api/ai/logout", {}],
+    ["/api/ai/account", { id: "account-b" }],
+    ["/api/ai/claim-existing", {}],
+    ["/api/providers/active", { providerId: "openai" }],
+  ]) {
+    assert.equal((await actorRequest(running.url, friendCookie, path, "POST",
+      { ...body, userId: owner.id, isAdmin: true })).status, 403, path);
+  }
+  assert.equal(ownerConnection.state.connected, true);
+  assert.equal(ownerConnection.state.activeId, "account-a");
+  assert.equal(ownerConnection.state.authStarts.length, 0);
   const friendCreated = await actorRequest(
     running.url,
     friendCookie,
@@ -1356,11 +1371,13 @@ test("真实网站账户隔离：朋友不能读取主人的材料、原图、�
     friendCookie,
     `/api/documents/${friendDocument.id}/conversations`,
     "POST",
-    { question: "不能借用主人的订阅", userId: owner.id, ownerId: owner.id },
+    { question: "使用共享AI阅读自己的资料", userId: owner.id, ownerId: owner.id },
   );
-  assert.equal(ungranted.status, 503);
+  assert.equal(ungranted.status, 201);
+  ownerCalls++;
   assert.equal(ownerConnection.state.calls.length, ownerCalls);
-  assert.equal(friendConnection.state.calls.length, 0);
+  assert.equal(ownerConnection.state.calls.at(-1).expectedSubject, `${owner.id}:test-a`);
+  assert.equal(ownerConnection.state.calls.at(-1).threadId, null);
   assert.deepEqual(
     (
       await actorRequest(running.url, friendCookie, "/api/documents")
@@ -1374,31 +1391,7 @@ test("真实网站账户隔离：朋友不能读取主人的材料、原图、�
     [document.id],
   );
 
-  // A friend's attempt to select the same verified AI identity must fail closed.
-  friendConnection.state.connected = true;
-  const distinctFriendStatus = friendConnection.auth.status;
-  friendConnection.auth.status = async () => ({
-    ...(await distinctFriendStatus()),
-    subject: (await ownerConnection.auth.status()).subject,
-  });
-  const identityCollision = await actorRequest(
-    running.url,
-    friendCookie,
-    `/api/documents/${friendDocument.id}/conversations`,
-    "POST",
-    { question: "不能共用同一个AI身份" },
-  );
-  assert.equal(identityCollision.status, 409);
-  assert.equal(
-    (await actorRequest(running.url, friendCookie, "/api/ai/status")).data
-      .connected,
-    false,
-  );
-  assert.equal(friendConnection.state.calls.length, 0);
-  assert.equal(ownerConnection.state.calls.length, ownerCalls);
-  friendConnection.auth.status = distinctFriendStatus;
-  // This explicitly simulates a distinct grant for the friend, so subsequent
-  // 404 assertions exercise ownership rather than merely failing authorization.
+  // Sharing credentials never shares website-owned materials or threads.
   for (const path of [
     `/api/documents/${document.id}`,
     `/api/documents/${document.id}/export?format=json`,
@@ -1487,18 +1480,31 @@ test("真实网站账户隔离：朋友不能读取主人的材料、原图、�
     404,
   );
   assert.equal(ownerConnection.state.calls.length, ownerCalls);
-  assert.equal(friendConnection.state.calls.length, 0);
+  assert.equal(connections.has(friend.id), false);
 
   const ownDiscussion = await actorRequest(
     running.url,
     friendCookie,
     `/api/documents/${friendDocument.id}/conversations`,
     "POST",
-    { question: "用朋友自己的授权讨论自己的资料", userId: owner.id },
+    { question: "用共享AI讨论自己的资料", userId: owner.id },
   );
   assert.equal(ownDiscussion.status, 201);
-  assert.equal(friendConnection.state.calls.length, 1);
+  ownerCalls++;
   assert.equal(ownerConnection.state.calls.length, ownerCalls);
+  assert.equal(ownerConnection.state.calls.at(-1).threadId, null);
+  assert.equal(connections.size, 1);
+  const continued = await actorRequest(running.url, friendCookie,
+    `/api/conversations/${ownDiscussion.data.id}/messages`, "POST", { question: "继续自己的讨论" });
+  assert.equal(continued.status, 200);
+  assert.equal(ownerConnection.state.calls.at(-1).threadId, `fixture-thread-${ownerCalls}`);
+  assert.notEqual(ownerConnection.state.calls.at(-1).threadId, "fixture-thread-2");
+  assert.equal((await actorRequest(running.url, ownerCookie,
+    `/api/conversations/${ownDiscussion.data.id}/messages`, "POST", { question: "越权续聊" })).status, 404);
+  assert.equal((await actorRequest(running.url, ownerCookie, "/api/ai/logout", "POST", {})).status, 200);
+  assert.equal((await actorRequest(running.url, friendCookie, "/api/ai/status")).data.connected, false);
+  assert.equal((await actorRequest(running.url, friendCookie,
+    `/api/documents/${friendDocument.id}/conversations`, "POST", { question: "授权已断开" })).status, 503);
   assert.equal(
     (
       await actorRequest(
@@ -1545,7 +1551,7 @@ test("真实网站账户隔离：朋友不能读取主人的材料、原图、�
   );
 });
 
-test("读图期间同账号OAuth回调与授权操作互斥，冲突回调不能让识别消耗别人的身份", async (t) => {
+test("共享AI全站互斥：成员读图时拥有者不能切换授权，回调可在任务后重试", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "yohaku-identity-race-"));
   const connections = new Map();
   let ownerId,
@@ -1636,7 +1642,7 @@ test("读图期间同账号OAuth回调与授权操作互斥，冲突回调不能
   const { image } = await upload(running.url, friendCookie);
   const login = await actorRequest(
     running.url,
-    friendCookie,
+    ownerCookie,
     "/api/ai/login",
     "POST",
     { newAccount: true },
@@ -1686,11 +1692,11 @@ test("读图期间同账号OAuth回调与授权操作互斥，冲突回调不能
     ["/api/providers/active", { providerId: "openai" }],
   ])
     assert.equal(
-      (await actorRequest(running.url, friendCookie, path, "POST", body))
+      (await actorRequest(running.url, ownerCookie, path, "POST", body))
         .status,
       409,
     );
-  // A different website user is not blocked by the friend's per-provider lock.
+  // The shared provider lock also covers inference from other website users.
   const ownerDocument = await createDocument(running.url);
   assert.equal(
     (
@@ -1698,24 +1704,23 @@ test("读图期间同账号OAuth回调与授权操作互斥，冲突回调不能
         running.url,
         `/api/documents/${ownerDocument.id}/conversations`,
         "POST",
-        { question: "主人自己的独立任务" },
+        { question: "拥有者也不能并行使用共享运行时" },
       )
     ).status,
-    201,
+    409,
   );
   releaseRead();
   assert.equal((await recognition).status, 200);
-  assert.equal(connections.get(friend.id).state.calls.length, 1);
+  assert.equal(connections.get(owner.id).state.calls.length, 1);
   assert.equal(wrongRuns, 0);
-  const pinned = connections.get(friend.id).state.calls[0];
+  const pinned = connections.get(owner.id).state.calls[0];
   assert.equal(pinned.expectedAccountId, "account-a");
-  assert.equal(pinned.expectedSubject, `${friend.id}:test-a`);
+  assert.equal(pinned.expectedSubject, `${owner.id}:test-a`);
   fsPromises.readFile = originalRead;
   syncBuiltinESMExports();
-  // The same pending callback remains usable, then its conflicting grant is
-  // cleared and the prior legitimate friend account is restored.
+  // The owner's pending callback remains usable once the member's task ends.
   const collision = await fetch(callbackURL, { redirect: "manual" });
-  assert.equal(collision.status, 409);
+  assert.equal(collision.status, 303);
   assert.equal(callbackCount, 1);
   assert.equal((await collision.text()).includes("TEST-ONLY-RACE-CODE"), false);
   const restored = await actorRequest(
@@ -1724,10 +1729,11 @@ test("读图期间同账号OAuth回调与授权操作互斥，冲突回调不能
     "/api/ai/status",
   );
   assert.equal(restored.data.connected, true);
-  assert.equal(restored.data.activeAccountId, "account-a");
-  assert.equal(restored.data.subject, `${friend.id}:test-a`);
-  assert.equal(connections.get(friend.id).state.calls.length, 1);
+  assert.equal(restored.data.activeAccountId, undefined);
+  assert.equal(restored.data.subject, undefined);
+  assert.equal(connections.get(owner.id).state.calls.length, 1);
   assert.equal(wrongRuns, 0);
+  assert.equal(connections.size, 1);
   assert.equal(
     (await actorRequest(running.url, ownerCookie, "/api/ai/status")).data
       .subject,

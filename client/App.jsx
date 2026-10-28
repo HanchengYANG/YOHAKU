@@ -116,7 +116,7 @@ function Workspace({ user, onLoggedOut }) {
   const [showRuby, setShowRuby] = useState(true);
   const [fontSize, setFontSize] = useState(26);
   const [panel, setPanel] = useState(() =>
-    new URLSearchParams(window.location.search).get("chatgpt") === "connected"
+    user.isAdmin && new URLSearchParams(window.location.search).get("chatgpt") === "connected"
       ? "settings"
       : null,
   );
@@ -293,6 +293,7 @@ function Workspace({ user, onLoggedOut }) {
     }
   };
   const openPanel = (name) => {
+    if (name === "settings" && !user.isAdmin) return;
     if (!mayLeave()) return;
     setDraft(null);
     setPanel(name);
@@ -491,14 +492,16 @@ function Workspace({ user, onLoggedOut }) {
         >
           导入图片
         </button>
-        <button
-          className="button subtle"
-          disabled={saving}
-          onClick={() => openPanel("settings")}
-          style={{ marginBottom: 18 }}
-        >
-          AI 设置
-        </button>
+        {user.isAdmin && (
+          <button
+            className="button subtle"
+            disabled={saving}
+            onClick={() => openPanel("settings")}
+            style={{ marginBottom: 18 }}
+          >
+            AI 设置
+          </button>
+        )}
         <button
           className="button secondary"
           disabled={saving || bookBusy}
@@ -617,7 +620,7 @@ function Workspace({ user, onLoggedOut }) {
             onCancel={closePanel}
             onDirty={setDirty}
           />
-        ) : panel === "settings" ? (
+        ) : panel === "settings" && user.isAdmin ? (
           <AISettings onClose={closePanel} />
         ) : panel === "image" ? (
           <ImageImport

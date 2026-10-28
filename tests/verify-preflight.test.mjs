@@ -83,15 +83,15 @@ async function fixture(t) {
     await rm(directory, { recursive: true, force: true });
   });
   db.exec(
-    "CREATE TABLE users(id TEXT, username TEXT, username_key TEXT); CREATE TABLE app_settings(key TEXT,value TEXT); CREATE TABLE provider_bindings(user_id TEXT,provider_id TEXT,subject TEXT); CREATE TABLE user_providers(user_id TEXT,provider_id TEXT);",
+    "CREATE TABLE users(id TEXT, username TEXT, username_key TEXT, is_admin INTEGER, created_at INTEGER); CREATE TABLE app_settings(key TEXT,value TEXT); CREATE TABLE provider_bindings(user_id TEXT,provider_id TEXT,subject TEXT); CREATE TABLE user_providers(user_id TEXT,provider_id TEXT);",
   );
-  db.prepare("INSERT INTO users VALUES(?,?,?)").run(owner, "Owner", "owner");
-  db.prepare("INSERT INTO users VALUES(?,?,?)").run(friend, "Friend", "friend");
+  db.prepare("INSERT INTO users VALUES(?,?,?,?,?)").run(owner, "Owner", "owner", 1, 1);
+  db.prepare("INSERT INTO users VALUES(?,?,?,?,?)").run(friend, "Friend", "friend", 0, 2);
   db.prepare("INSERT INTO app_settings VALUES(?,?)").run("legacy_owner", owner);
   return { directory, db };
 }
 
-test("真实验证脚本使用所选网站用户的持久绑定，不误报已绑定用户或借用其他人的绑定", async (t) => {
+test("真实验证脚本只允许拥有者管理共享授权，不采用成员旧授权", async (t) => {
   const { directory, db } = await fixture(t);
   db.prepare("INSERT INTO provider_bindings VALUES(?,?,?)").run(
     owner,
@@ -105,16 +105,16 @@ test("真实验证脚本使用所选网站用户的持久绑定，不误报已�
   assert.equal(selectVerificationUser(directory, ["--user=OWNER"]).id, owner);
   assert.throws(
     () => selectVerificationUser(directory, ["--user=Friend"]),
-    /自己的订阅授权或显式认领/,
+    /只有网站拥有者/,
   );
   db.prepare("INSERT INTO provider_bindings VALUES(?,?,?)").run(
     friend,
     "openai",
     "friend-subject",
   );
-  assert.deepEqual(
-    selectVerificationUser(directory, ["--user=Friend"]).subjects,
-    ["friend-subject"],
+  assert.throws(
+    () => selectVerificationUser(directory, ["--user=Friend"]),
+    /只有网站拥有者/,
   );
   assert.deepEqual((await readdir(directory)).sort(), ["yohaku.sqlite"]);
 });

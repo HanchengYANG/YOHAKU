@@ -109,15 +109,23 @@ export default function AISettings({ onClose, onChanged }) {
     perform("claim", async () => {
       await api("/ai/claim-existing", { method: "POST" });
       await refresh();
-      setNotice("原本机授权已绑定到当前网站账号；其他账号无法使用。");
+      setNotice("原本机授权已绑定为网站共享 AI，所有账号均可使用。");
     });
+
+  if (status && !status.canManageAI) return (
+    <section className="stage2-page ai-settings" aria-label="AI 授权设置">
+      <h1>网站共享 AI</h1>
+      <p>AI 由网站拥有者统一配置，你可以在自己的材料中使用。</p>
+      <button className="button subtle" onClick={onClose}>返回</button>
+    </section>
+  );
 
   return (
     <section className="stage2-page ai-settings" aria-label="AI 授权设置">
       <div className="stage2-heading">
         <div>
           <span className="eyebrow">阅读助手</span>
-          <h1>连接你的 ChatGPT</h1>
+          <h1>配置网站共享 AI</h1>
         </div>
         <button
           type="button"
@@ -129,8 +137,8 @@ export default function AISettings({ onClose, onChanged }) {
         </button>
       </div>
       <p className="stage2-description">
-        当前网站账号只使用自己绑定的 AI 授权。OpenAI
-        订阅授权在官方页面完成，不会共用其他用户的额度。
+        网站拥有者统一连接 ChatGPT，所有网站账号共用这份 AI 授权和额度。
+        各账号的书架、图片与讨论仍各自独立。
       </p>
       <label className="stage2-field account-picker">
         AI 提供方
@@ -171,7 +179,7 @@ export default function AISettings({ onClose, onChanged }) {
           <div className="stage2-notice">
             <p>
               本机有一份此前为余白完成的 ChatGPT
-              授权。你可以把它明确绑定到这个网站账号。
+              授权。你可以把它认领为网站共享授权。
             </p>
             <button
               className="button secondary"
@@ -198,7 +206,7 @@ export default function AISettings({ onClose, onChanged }) {
             <p>
               {status?.email ||
                 (connected
-                  ? "已连接当前 ChatGPT 账户。"
+                  ? "已连接网站共享 ChatGPT 账户。"
                   : "图片识别和 AI 问答需要先连接账户。")}
             </p>
           </div>
@@ -278,7 +286,7 @@ export default function AISettings({ onClose, onChanged }) {
         <div>
           <p>识别图片与讨论内容会发送给所连接账户的 AI 服务。</p>
           <p>
-            这里使用订阅授权，不接入收费 API key。用量达到限制时会显示实际错误。
+            所有网站账号的 AI 请求均消耗网站拥有者配置的订阅额度，用量达到限制时会显示实际错误。
           </p>
           <a
             className="text-button"

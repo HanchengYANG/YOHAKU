@@ -61,16 +61,16 @@ export function selectVerificationUser(dataDirectory, requestedArgs = []) {
       )
     )
       prerequisite("请先打开网站完成账号设置和 AI 绑定。");
-    const legacyOwner = database
-      .prepare("SELECT value FROM app_settings WHERE key='legacy_owner'")
-      .get()?.value;
+    const owner = database.prepare(
+      "SELECT id,username FROM users WHERE is_admin=1 ORDER BY created_at,id LIMIT 1",
+    ).get();
     const user = username
       ? database
           .prepare("SELECT id,username FROM users WHERE username_key=?")
           .get(username.toLowerCase())
       : database
           .prepare("SELECT id,username FROM users WHERE id=?")
-          .get(legacyOwner || "");
+          .get(owner?.id || "");
     if (
       !user ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
@@ -80,6 +80,8 @@ export function selectVerificationUser(dataDirectory, requestedArgs = []) {
       prerequisite(
         "未找到已完成设置的网站账号；先设置账号，或用 --user=自己的用户名选择。",
       );
+    if (user.id !== owner?.id)
+      prerequisite("只有网站拥有者可以验证和管理共享 AI 授权。");
     const providerId = names.includes("user_providers")
       ? database
           .prepare("SELECT provider_id FROM user_providers WHERE user_id=?")
@@ -95,7 +97,7 @@ export function selectVerificationUser(dataDirectory, requestedArgs = []) {
       .map((row) => row.subject);
     if (!subjects.length)
       prerequisite(
-        "请先登录该网站账号，在 AI 设置完成自己的订阅授权或显式认领。",
+        "请先由网站拥有者在 AI 设置完成共享订阅授权或显式认领。",
       );
     return { ...user, subjects, providerId };
   } catch (error) {
@@ -194,7 +196,7 @@ async function main() {
       !user.subjects.includes(status.subject)
     )
       prerequisite(
-        "此网站账号尚未连接自己的已绑定 OpenAI 订阅。请先回网站完成绑定，勿向聊天提供密码或 Cookie。",
+        "网站拥有者尚未连接共享 OpenAI 订阅。请先回网站完成绑定，勿向聊天提供密码或 Cookie。",
       );
     const identity = createHash("sha256")
       .update(
@@ -434,7 +436,7 @@ if (
 ) {
   if (args.includes("--help")) {
     console.log(
-      "npm run verify:ai -- [--user=自己的站内用户名] [--resume]\n默认验证首次站内owner。先在网站完成自己的OpenAI订阅绑定，再停止本机4317服务。--resume必须在新的CLI进程运行。不会创建或删除网站材料，不需要密码或Cookie。",
+      "npm run verify:ai -- [--user=网站拥有者用户名] [--resume]\n仅验证网站拥有者的共享AI。先在网站完成共享OpenAI订阅绑定，再停止本机4317服务。--resume必须在新的CLI进程运行。不会创建或删除网站材料，不需要密码或Cookie。",
     );
   } else {
     try {

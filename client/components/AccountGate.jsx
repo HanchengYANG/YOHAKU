@@ -107,14 +107,13 @@ export default function AccountGate({ session, onAuthenticated }) {
           <p className="account-gate-description">
             {setup
               ? "先为余白设置一个网站账号，之后阅读材料、笔记和对话都会归属到各自账号。"
-              : "用余白的网站账号登录，再连接属于你自己的 AI 授权。"}
+              : "用余白的网站账号登录，使用自己的书架和网站共享的 AI。"}
           </p>
           {setup && (
             <div className="account-setup-note">
               <p>已有的本机阅读资料将归这个首次创建的账号所有。</p>
               <p>
-                已有 ChatGPT 授权需要之后在「AI
-                设置」中认领绑定，不会默认共享给朋友。
+                首个账号是网站拥有者，负责配置所有账号共用的 AI 授权。
               </p>
             </div>
           )}

@@ -164,7 +164,7 @@ async function credentialFixture(directory, host) {
   return registration;
 }
 
-test("真实provider与网站会话：旧SIWC显式认领保留主机及注册，绑定持久且朋友不能继承", async (t) => {
+test("真实provider与网站会话：拥有者认领旧SIWC后全站共享，重启保留绑定并忽略成员旧授权", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "yohaku-legacy-bindings-"));
   const host = { ext_agent_host_id: `urn:uuid:${randomUUID()}` };
   const legacyDir = join(dataDir, "ai");
@@ -267,7 +267,10 @@ test("真实provider与网站会话：旧SIWC显式认领保留主机及注册�
     friend.cookie,
     "/api/ai/status",
   );
-  assert.equal(friendAfter.data.connected, false);
+  assert.equal(friendAfter.data.connected, true);
+  assert.equal(friendAfter.data.canManageAI, false);
+  for (const key of ["email", "subject", "clientId", "accounts", "activeAccountId"])
+    assert.equal(friendAfter.data[key], undefined);
   noCredentials(friendAfter);
   const document = await request(
     running.url,
@@ -282,27 +285,21 @@ test("真实provider与网站会话：旧SIWC显式认领保留主机及注册�
     },
   );
   assert.equal(document.status, 201);
-  assert.equal(
-    (
-      await request(
-        running.url,
-        friend.cookie,
-        `/api/documents/${document.data.id}/conversations`,
-        "POST",
-        { question: "不能调用主人的订阅" },
-      )
-    ).status,
-    503,
-  );
 
   await running.stop();
   assert.deepEqual(bindingRows(dataDir), expectedBinding);
-  // A copied fixture registration must not defeat the persisted website binding.
+  // A member's old credential file is retained but never selected as shared AI.
   // These are exclusively test credentials, never a copy of any real session.
   await credentialFixture(
     join(dataDir, "users", friend.user.id, "providers", "openai"),
     { ext_agent_host_id: `urn:uuid:${randomUUID()}` },
   );
+  const oldDatabase = new DatabaseSync(join(dataDir, "yohaku.sqlite"));
+  oldDatabase.prepare("INSERT INTO user_providers(user_id,provider_id) VALUES(?,?)")
+    .run(friend.user.id, "claude");
+  // The owner's verified grant takes precedence over an obsolete member binding.
+  oldDatabase.prepare("UPDATE provider_bindings SET user_id=?").run(friend.user.id);
+  oldDatabase.close();
   running = await start(dataDir);
   assert.deepEqual(
     (await request(running.url, owner.cookie, "/api/session")).data.user,
@@ -312,30 +309,18 @@ test("真实provider与网站会话：旧SIWC显式认领保留主机及注册�
     (await request(running.url, friend.cookie, "/api/session")).data.user,
     friend.user,
   );
-  assert.deepEqual(bindingRows(dataDir), expectedBinding);
   const ownerReopened = await request(
     running.url,
     owner.cookie,
     "/api/ai/status",
   );
   assert.equal(ownerReopened.data.connected, true);
+  assert.deepEqual(bindingRows(dataDir), expectedBinding);
   noCredentials(ownerReopened);
   const collision = await request(running.url, friend.cookie, "/api/ai/status");
-  assert.equal(collision.data.connected, false);
-  assert.match(collision.data.lastError, /另一个网站账号/);
+  assert.equal(collision.data.connected, true);
+  assert.equal(collision.data.email, undefined);
   noCredentials(collision);
-  assert.equal(
-    (
-      await request(
-        running.url,
-        friend.cookie,
-        `/api/documents/${document.data.id}/conversations`,
-        "POST",
-        { question: "相同ChatGPT身份仍不能跨网站账号使用" },
-      )
-    ).status,
-    409,
-  );
   assert.equal(externalRequests, 0);
   await assert.rejects(
     access(invocationMarker),
@@ -432,10 +417,9 @@ test("真实登录与OAuth替身：无Cookie回调按pending state绑定发起�
     { newAccount: true },
   );
   assert.equal(ownerLogin.status, 200);
-  assert.equal(friendLogin.status, 200);
+  assert.equal(friendLogin.status, 403);
   const ownerState = new URL(ownerLogin.data.url).searchParams.get("state");
-  const friendState = new URL(friendLogin.data.url).searchParams.get("state");
-  assert.notEqual(ownerState, friendState);
+  assert.equal(records.size, 1);
   const callbackPath = `/auth/callback?state=${encodeURIComponent(ownerState)}&code=TEST-ONLY-OAUTH-CODE`;
   // No Cookie deliberately simulates SameSite=Strict on an external redirect.
   const callback = await request(
@@ -451,7 +435,7 @@ test("真实登录与OAuth替身：无Cookie回调按pending state绑定发起�
   assert.equal(callback.headers.get("referrer-policy"), "no-referrer");
   assert.ok(!callback.text.includes("TEST-ONLY-OAUTH-CODE"));
   assert.deepEqual(records.get(owner.user.id).state.callbacks, [ownerState]);
-  assert.deepEqual(records.get(friend.user.id).state.callbacks, []);
+  assert.equal(records.has(friend.user.id), false);
   const ownerStatus = await request(
     running.url,
     owner.cookie,
@@ -463,8 +447,10 @@ test("真实登录与OAuth替身：无Cookie回调按pending state绑定发起�
     "/api/ai/status",
   );
   assert.equal(ownerStatus.data.connected, true);
-  assert.equal(friendStatus.data.connected, false);
-  assert.equal(friendStatus.data.pending, true);
+  assert.equal(friendStatus.data.connected, true);
+  assert.equal(friendStatus.data.canManageAI, false);
+  assert.equal(friendStatus.data.pending, undefined);
+  assert.equal(friendStatus.data.email, undefined);
   assert.deepEqual(bindingRows(dataDir), [
     {
       provider_id: "openai",
@@ -496,6 +482,6 @@ test("真实登录与OAuth替身：无Cookie回调按pending state绑定发起�
     );
   }
   assert.equal(records.get(owner.user.id).state.runs, 0);
-  assert.equal(records.get(friend.user.id).state.runs, 0);
+  assert.equal(records.has(friend.user.id), false);
   assert.deepEqual(records.get(owner.user.id).state.callbacks, [ownerState]);
 });

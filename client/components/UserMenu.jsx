@@ -140,7 +140,7 @@ export default function UserMenu({ user, onLoggedOut, onBeforeLogout }) {
                   {copied ? "已复制" : "复制"}
                 </button>
               </div>
-              <p>朋友注册后，保存自己的资料，并单独连接自己的 AI 授权。</p>
+              <p>朋友注册后，保存自己的资料，并使用网站共享的 AI。</p>
             </div>
           )}
         </div>

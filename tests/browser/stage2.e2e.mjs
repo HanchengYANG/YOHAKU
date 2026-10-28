@@ -100,12 +100,12 @@ async function openSettings(page) {
   }
   await page.getByRole("button", { name: "AI 设置", exact: true }).click();
   await expect(
-    page.getByRole("heading", { name: "连接你的 ChatGPT", exact: true }),
+    page.getByRole("heading", { name: "配置网站共享 AI", exact: true }),
   ).toBeVisible();
 }
 
 async function enableTestAccount(page) {
-  // Per-user provider callbacks must originate from a real website session and
+  // Owner provider callbacks must originate from a real website session and
   // a recorded login attempt; the test double only replaces upstream OAuth.
   const started = await page.request.post("/api/ai/login", { data: {} });
   expect(started.ok()).toBe(true);
@@ -1484,6 +1484,10 @@ test(accountFlowTitle, async ({ page, playwright, baseURL }, info) => {
     await expect(
       menu.getByRole("button", { name: "生成朋友的邀请码", exact: true }),
     ).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "AI 设置", exact: true })).toHaveCount(0);
+    expect((await page.request.post("/api/ai/login", { data: {} })).status()).toBe(403);
+    const aiStatus = await page.request.get("/api/ai/status");
+    expect((await aiStatus.json()).canManageAI).toBe(false);
     const library = await page.request.get("/api/documents");
     expect(library.status()).toBe(200);
     expect((await library.json()).documents).toEqual([]);
