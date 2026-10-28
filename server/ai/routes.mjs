@@ -20,7 +20,8 @@ export function attachAIRoutes({
   services,
 } = {}) {
   const connections = new Map(),
-    pendingLogins = new Map();
+    pendingLogins = new Map(),
+    operations = new Set();
   const images = createImageStore({ storageDir: join(storageDir, "images") });
   database.exec(`
     CREATE TABLE IF NOT EXISTS image_drafts (image_id TEXT PRIMARY KEY, draft_json TEXT NOT NULL, user_id TEXT);
@@ -84,31 +85,56 @@ export function attachAIRoutes({
     }
     return connections.get(key);
   }
+  async function withProvider(userId, providerId, work) {
+    const key = `${userId}:${providerId}`;
+    const provider = connection(userId, providerId);
+    if (operations.has(key) || provider.runtime.status().busy)
+      throw fail(409, "AI 正在处理请求，请完成后重试。");
+    operations.add(key);
+    try {
+      return await work(provider);
+    } finally {
+      operations.delete(key);
+    }
+  }
+  function forgetPending(userId, providerId) {
+    for (const [state, attempt] of pendingLogins) {
+      if (attempt.userId === userId && attempt.providerId === providerId)
+        pendingLogins.delete(state);
+    }
+  }
   function ensureBinding(userId, providerId, status) {
     if (!status.connected)
       throw fail(503, "请先在 AI 设置中授权你自己的 ChatGPT 订阅。");
-    const subject = status.subject || status.id || status.activeAccountId;
-    if (!subject) throw fail(503, "无法确认授权身份，请重新授权。");
-    const binding = database
-      .prepare(
-        "SELECT user_id FROM provider_bindings WHERE provider_id=? AND subject=?",
-      )
-      .get(providerId, subject);
-    if (binding && binding.user_id !== userId)
-      throw fail(409, "这个 AI 身份已绑定另一个网站账号，请使用自己的授权。");
+    const subject = status.subject,
+      accountId = status.activeAccountId || status.id;
+    if (
+      typeof subject !== "string" ||
+      !subject ||
+      typeof accountId !== "string" ||
+      !accountId
+    )
+      throw fail(503, "无法确认授权身份，请重新授权。");
     database
       .prepare(
         "INSERT OR IGNORE INTO provider_bindings(provider_id,subject,user_id) VALUES(?,?,?)",
       )
       .run(providerId, subject, userId);
-    return status.activeAccountId || status.id;
+    const binding = database
+      .prepare(
+        "SELECT user_id FROM provider_bindings WHERE provider_id=? AND subject=?",
+      )
+      .get(providerId, subject);
+    if (!binding || binding.user_id !== userId)
+      throw fail(409, "这个 AI 身份已绑定另一个网站账号，请使用自己的授权。");
+    return accountId;
   }
-  async function identity(req) {
-    const provider = connection(req.user.id);
+  async function identity(req, provider) {
     const account = await provider.auth.status();
     return {
       provider,
       accountId: ensureBinding(req.user.id, provider.id, account),
+      expectedSubject: account.subject,
     };
   }
   async function statusForUser(userId) {
@@ -184,35 +210,39 @@ export function attachAIRoutes({
     const next = req.body?.providerId;
     if (!PROVIDERS.some((p) => p.id === next && p.enabled))
       throw fail(501, "这个提供方仅预留接口，目前尚未实现。");
-    if (connection(req.user.id).runtime.status().busy)
-      throw fail(409, "AI 正在处理请求，请稍后切换。");
-    database
-      .prepare(
-        "INSERT INTO user_providers(user_id,provider_id) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET provider_id=excluded.provider_id",
-      )
-      .run(req.user.id, next);
-    res.json(await statusForUser(req.user.id));
+    await withProvider(req.user.id, preferred(req.user.id), async () => {
+      database
+        .prepare(
+          "INSERT INTO user_providers(user_id,provider_id) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET provider_id=excluded.provider_id",
+        )
+        .run(req.user.id, next);
+      res.json(await statusForUser(req.user.id));
+    });
   });
   app.get("/api/ai/status", async (req, res) =>
     res.json(await statusForUser(req.user.id)),
   );
   app.post("/api/ai/login", async (req, res) => {
-    const provider = connection(req.user.id);
-    if (provider.runtime.status().busy)
-      throw fail(409, "AI 正在处理请求，请稍后授权。");
-    const result = await provider.auth.start({
-      newAccount: req.body?.newAccount === true,
-    });
-    const state = new URL(result.url).searchParams.get("state");
-    if (!state) throw fail(503, "授权状态无效，请重新开始。");
-    for (const [key, attempt] of pendingLogins)
-      if (attempt.expiresAt < Date.now()) pendingLogins.delete(key);
-    pendingLogins.set(state, {
-      userId: req.user.id,
-      providerId: provider.id,
-      expiresAt: Date.now() + 600000,
-    });
-    res.json(result);
+    await withProvider(
+      req.user.id,
+      preferred(req.user.id),
+      async (provider) => {
+        forgetPending(req.user.id, provider.id);
+        const result = await provider.auth.start({
+          newAccount: req.body?.newAccount === true,
+        });
+        const state = new URL(result.url).searchParams.get("state");
+        if (!state) throw fail(503, "授权状态无效，请重新开始。");
+        for (const [key, attempt] of pendingLogins)
+          if (attempt.expiresAt < Date.now()) pendingLogins.delete(key);
+        pendingLogins.set(state, {
+          userId: req.user.id,
+          providerId: provider.id,
+          expiresAt: Date.now() + 600000,
+        });
+        res.json(result);
+      },
+    );
   });
   app.get("/auth/callback", async (req, res) => {
     res.set("Cache-Control", "no-store");
@@ -220,86 +250,152 @@ export function attachAIRoutes({
     const params = new URL(req.originalUrl, callbackUri).searchParams,
       state = params.get("state");
     const attempt = pendingLogins.get(state);
-    pendingLogins.delete(state);
     try {
       if (!attempt || attempt.expiresAt < Date.now())
         throw fail(400, "授权请求已过期。");
-      const provider = connection(attempt.userId, attempt.providerId);
-      await provider.auth.callback(params);
-      ensureBinding(attempt.userId, provider.id, await provider.auth.status());
-      provider.runtime.stop();
-      res.redirect(303, "/?chatgpt=connected");
-    } catch {
+      await withProvider(
+        attempt.userId,
+        attempt.providerId,
+        async (provider) => {
+          if (
+            pendingLogins.get(state) !== attempt ||
+            attempt.expiresAt < Date.now()
+          )
+            throw fail(400, "授权请求已过期。");
+          pendingLogins.delete(state);
+          const previous = await provider.auth.status();
+          let accepted = false;
+          provider.runtime.stop();
+          try {
+            await provider.auth.callback(params);
+            accepted = true;
+            ensureBinding(
+              attempt.userId,
+              provider.id,
+              await provider.auth.status(),
+            );
+          } catch (cause) {
+            provider.runtime.stop();
+            if (accepted) {
+              // A successful OAuth identity must still satisfy the website binding.
+              // Revoke/clear a conflicting new grant before restoring a valid old one.
+              await provider.auth.disconnect().catch(() => {});
+              const oldOwner =
+                previous.subject &&
+                database
+                  .prepare(
+                    "SELECT user_id FROM provider_bindings WHERE provider_id=? AND subject=?",
+                  )
+                  .get(provider.id, previous.subject);
+              if (
+                previous.connected &&
+                oldOwner?.user_id === attempt.userId &&
+                previous.activeAccountId
+              )
+                await provider.auth
+                  .select(previous.activeAccountId)
+                  .catch(() => {});
+            }
+            throw cause;
+          }
+          provider.runtime.stop();
+          res.redirect(303, "/?chatgpt=connected");
+        },
+      );
+    } catch (cause) {
       res
-        .status(400)
+        .status(cause.status === 409 ? 409 : 400)
         .type("html")
         .send(
-          '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>余白 · 授权未完成</title><body><h1>授权未完成</h1><p>请回到发起授权的网站账号，在 AI 设置查看状态并重新登录。</p><a href="/">回到余白</a></body></html>',
+          cause.status === 409 && pendingLogins.has(state)
+            ? '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>余白 · AI 正忙</title><body><h1>AI 正在处理请求</h1><p>授权尚未使用。请等待当前任务完成后刷新此页面。</p><a href="/">回到余白</a></body></html>'
+            : '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>余白 · 授权未完成</title><body><h1>授权未完成</h1><p>请回到发起授权的网站账号，在 AI 设置查看状态并重新登录。</p><a href="/">回到余白</a></body></html>',
         );
     }
   });
   app.post("/api/ai/claim-existing", async (req, res) => {
     if (req.user.id !== legacyOwner())
       throw fail(403, "只有首次创建的网站账号能认领原本机授权。");
-    const provider = connection(req.user.id, "openai"),
-      current = await provider.auth.status();
-    if (current.connected || current.pending || provider.runtime.status().busy)
-      throw fail(409, "当前账号已有授权或任务，请先结束后再认领。");
-    const legacy = join(storageDir, "ai"),
-      target = join(storageDir, "users", req.user.id, "providers", "openai");
-    if (!existsSync(join(legacy, "chatgpt-accounts.json")))
-      throw fail(404, "本机没有待认领的旧授权。");
-    provider.close();
-    connections.delete(`${req.user.id}:openai`);
-    const backup = `${target}.before-claim-${randomUUID()}`;
-    await mkdir(join(storageDir, "users", req.user.id, "providers"), {
-      recursive: true,
-      mode: 0o700,
+    await withProvider(req.user.id, "openai", async (provider) => {
+      const current = await provider.auth.status();
+      if (
+        current.connected ||
+        current.pending ||
+        provider.runtime.status().busy
+      )
+        throw fail(409, "当前账号已有授权或任务，请先结束后再认领。");
+      const legacy = join(storageDir, "ai"),
+        target = join(storageDir, "users", req.user.id, "providers", "openai");
+      if (!existsSync(join(legacy, "chatgpt-accounts.json")))
+        throw fail(404, "本机没有待认领的旧授权。");
+      provider.close();
+      const backup = `${target}.before-claim-${randomUUID()}`;
+      await mkdir(join(storageDir, "users", req.user.id, "providers"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      await rename(target, backup);
+      try {
+        await rename(legacy, target);
+      } catch (cause) {
+        await rename(backup, target);
+        throw cause;
+      }
+      connections.delete(`${req.user.id}:openai`);
+      const claimed = connection(req.user.id, "openai");
+      try {
+        ensureBinding(req.user.id, "openai", await claimed.auth.status());
+      } catch (cause) {
+        claimed.close();
+        await rename(target, legacy);
+        await rename(backup, target);
+        connections.set(`${req.user.id}:openai`, provider);
+        throw cause;
+      }
+      res.json(await statusForUser(req.user.id));
     });
-    await rename(target, backup);
-    try {
-      await rename(legacy, target);
-    } catch (cause) {
-      await rename(backup, target);
-      throw cause;
-    }
-    const claimed = connection(req.user.id, "openai");
-    ensureBinding(req.user.id, "openai", await claimed.auth.status());
-    res.json(await statusForUser(req.user.id));
   });
   app.post("/api/ai/logout", async (req, res) => {
-    const provider = connection(req.user.id);
-    if (provider.runtime.status().busy)
-      throw fail(409, "AI 正在处理请求，请稍后断开。");
-    const account = await provider.auth.status();
-    provider.runtime.stop();
-    const result = await provider.auth.disconnect();
-    if (account.subject)
-      database
-        .prepare(
-          "DELETE FROM provider_bindings WHERE provider_id=? AND subject=? AND user_id=?",
-        )
-        .run(provider.id, account.subject, req.user.id);
-    res.json(result);
+    await withProvider(
+      req.user.id,
+      preferred(req.user.id),
+      async (provider) => {
+        forgetPending(req.user.id, provider.id);
+        const account = await provider.auth.status();
+        provider.runtime.stop();
+        const result = await provider.auth.disconnect();
+        if (account.subject)
+          database
+            .prepare(
+              "DELETE FROM provider_bindings WHERE provider_id=? AND subject=? AND user_id=?",
+            )
+            .run(provider.id, account.subject, req.user.id);
+        res.json(result);
+      },
+    );
   });
   app.post("/api/ai/account", async (req, res) => {
-    const provider = connection(req.user.id);
-    if (provider.runtime.status().busy)
-      throw fail(409, "AI 正在处理请求，请稍后切换。");
-    const accounts = await provider.auth.accounts();
-    const selected = accounts.accounts.find((a) => a.id === req.body?.id);
-    if (selected?.subject) {
-      const owner = database
-        .prepare(
-          "SELECT user_id FROM provider_bindings WHERE provider_id=? AND subject=?",
-        )
-        .get(provider.id, selected.subject);
-      if (owner && owner.user_id !== req.user.id)
-        throw fail(409, "这个 AI 身份已绑定另一个网站账号。");
-    }
-    await provider.auth.select(req.body?.id);
-    provider.runtime.stop();
-    res.json(await statusForUser(req.user.id));
+    await withProvider(
+      req.user.id,
+      preferred(req.user.id),
+      async (provider) => {
+        const accounts = await provider.auth.accounts();
+        const selected = accounts.accounts.find((a) => a.id === req.body?.id);
+        if (selected?.subject) {
+          const owner = database
+            .prepare(
+              "SELECT user_id FROM provider_bindings WHERE provider_id=? AND subject=?",
+            )
+            .get(provider.id, selected.subject);
+          if (owner && owner.user_id !== req.user.id)
+            throw fail(409, "这个 AI 身份已绑定另一个网站账号。");
+        }
+        await provider.auth.select(req.body?.id);
+        forgetPending(req.user.id, provider.id);
+        provider.runtime.stop();
+        res.json(await statusForUser(req.user.id));
+      },
+    );
   });
   app.post("/api/images", upload.single("image"), async (req, res) => {
     if (!req.file) throw fail(400, "请选择一张 PNG、JPEG 或 WebP 图片。");
@@ -320,36 +416,46 @@ export function attachAIRoutes({
   });
   app.post("/api/images/:id/recognize", async (req, res) => {
     const image = await getImage(req.user.id, req.params.id);
-    const { provider } = await identity(req);
-    const pixels = await images.read(image.id, { normalizeOrientation: true });
-    const result = await provider.runtime.run({
-      prompt: OCR_PROMPT,
-      image: `data:${image.mimeType};base64,${pixels.toString("base64")}`,
-      schema: OCR_SCHEMA,
-    });
-    if (result.completed !== true)
-      throw fail(502, "AI 识别未完成，未保存部分输出。");
-    let draft;
-    try {
-      draft = validateOcr(JSON.parse(result.text));
-    } catch {
-      throw fail(502, "AI 返回的识别草稿格式不完整，请重试；原图仍保留。");
-    }
-    draft = {
-      ...draft,
-      content: serializeBlocks(draft.blocks),
-      sourceImageId: image.id,
-      sourceImage: publicImage(image),
-      recognizedAt: new Date().toISOString(),
-      model: result.model,
-      providerId: provider.id,
-    };
-    database
-      .prepare(
-        "INSERT INTO image_drafts(image_id,draft_json,user_id) VALUES(?,?,?) ON CONFLICT(image_id) DO UPDATE SET draft_json=excluded.draft_json,user_id=excluded.user_id",
-      )
-      .run(image.id, JSON.stringify(draft), req.user.id);
-    res.json(draft);
+    await withProvider(
+      req.user.id,
+      preferred(req.user.id),
+      async (provider) => {
+        const { accountId, expectedSubject } = await identity(req, provider);
+        const pixels = await images.read(image.id, {
+          normalizeOrientation: true,
+        });
+        const result = await provider.runtime.run({
+          prompt: OCR_PROMPT,
+          image: `data:${image.mimeType};base64,${pixels.toString("base64")}`,
+          schema: OCR_SCHEMA,
+          expectedAccountId: accountId,
+          expectedSubject,
+        });
+        if (result.completed !== true)
+          throw fail(502, "AI 识别未完成，未保存部分输出。");
+        let draft;
+        try {
+          draft = validateOcr(JSON.parse(result.text));
+        } catch {
+          throw fail(502, "AI 返回的识别草稿格式不完整，请重试；原图仍保留。");
+        }
+        draft = {
+          ...draft,
+          content: serializeBlocks(draft.blocks),
+          sourceImageId: image.id,
+          sourceImage: publicImage(image),
+          recognizedAt: new Date().toISOString(),
+          model: result.model,
+          providerId: provider.id,
+        };
+        database
+          .prepare(
+            "INSERT INTO image_drafts(image_id,draft_json,user_id) VALUES(?,?,?) ON CONFLICT(image_id) DO UPDATE SET draft_json=excluded.draft_json,user_id=excluded.user_id",
+          )
+          .run(image.id, JSON.stringify(draft), req.user.id);
+        res.json(draft);
+      },
+    );
   });
   app.get("/api/documents/:id/conversations", async (req, res) => {
     getDocument(req.user.id, req.params.id);
@@ -405,12 +511,13 @@ export function attachAIRoutes({
       },
     )}`;
   }
-  async function answer(req, row, record, question, provider) {
+  async function answer(req, row, record, question, provider, expected) {
     const prompt = promptFor(row, record.quote, question);
     try {
       const result = await provider.runtime.run({
         prompt,
         threadId: record.thread_id,
+        ...expected,
       });
       if (result.completed !== true)
         throw fail(502, "AI 回答未完成，未把部分输出存成答案。");
@@ -446,61 +553,78 @@ export function attachAIRoutes({
     }
   }
   app.post("/api/documents/:id/conversations", async (req, res) => {
-    const row = getDocument(req.user.id, req.params.id),
-      { provider, accountId } = await identity(req);
-    const question = questionInput(req.body),
-      quote = req.body?.quote || "";
-    if (typeof quote !== "string" || quote.length > 6000)
-      throw fail(400, "引用片段最多 6000 字。");
-    promptFor(row, quote, question);
-    const id = randomUUID(),
-      now = new Date().toISOString();
-    database
-      .prepare(
-        "INSERT INTO conversations(id,document_id,account_id,thread_id,quote,document_revision,messages_json,created_at,updated_at,user_id,provider_id) VALUES(?,?,?,NULL,?,?,?,?,?,?,?)",
-      )
-      .run(
-        id,
-        row.id,
-        accountId,
-        quote,
-        row.revision,
-        "[]",
-        now,
-        now,
-        req.user.id,
-        provider.id,
-      );
-    res
-      .status(201)
-      .json(
-        await answer(
-          req,
-          row,
-          database
-            .prepare("SELECT * FROM conversations WHERE id=? AND user_id=?")
-            .get(id, req.user.id),
-          question,
-          provider,
-        ),
-      );
+    await withProvider(
+      req.user.id,
+      preferred(req.user.id),
+      async (provider) => {
+        const row = getDocument(req.user.id, req.params.id),
+          { accountId, expectedSubject } = await identity(req, provider);
+        const question = questionInput(req.body),
+          quote = req.body?.quote || "";
+        if (typeof quote !== "string" || quote.length > 6000)
+          throw fail(400, "引用片段最多 6000 字。");
+        promptFor(row, quote, question);
+        const id = randomUUID(),
+          now = new Date().toISOString();
+        database
+          .prepare(
+            "INSERT INTO conversations(id,document_id,account_id,thread_id,quote,document_revision,messages_json,created_at,updated_at,user_id,provider_id) VALUES(?,?,?,NULL,?,?,?,?,?,?,?)",
+          )
+          .run(
+            id,
+            row.id,
+            accountId,
+            quote,
+            row.revision,
+            "[]",
+            now,
+            now,
+            req.user.id,
+            provider.id,
+          );
+        res
+          .status(201)
+          .json(
+            await answer(
+              req,
+              row,
+              database
+                .prepare("SELECT * FROM conversations WHERE id=? AND user_id=?")
+                .get(id, req.user.id),
+              question,
+              provider,
+              { expectedAccountId: accountId, expectedSubject },
+            ),
+          );
+      },
+    );
   });
   app.post("/api/conversations/:id/messages", async (req, res) => {
-    const record = database
-      .prepare("SELECT * FROM conversations WHERE id=? AND user_id=?")
-      .get(req.params.id, req.user.id);
-    if (!record) throw fail(404, "找不到你账号下的讨论。");
-    const { provider, accountId } = await identity(req);
-    if (record.provider_id !== provider.id || record.account_id !== accountId)
-      throw fail(404, "请先切换到创建这个讨论的 AI 授权。");
-    res.json(
-      await answer(
-        req,
-        getDocument(req.user.id, record.document_id),
-        record,
-        questionInput(req.body),
-        provider,
-      ),
+    await withProvider(
+      req.user.id,
+      preferred(req.user.id),
+      async (provider) => {
+        const record = database
+          .prepare("SELECT * FROM conversations WHERE id=? AND user_id=?")
+          .get(req.params.id, req.user.id);
+        if (!record) throw fail(404, "找不到你账号下的讨论。");
+        const { accountId, expectedSubject } = await identity(req, provider);
+        if (
+          record.provider_id !== provider.id ||
+          record.account_id !== accountId
+        )
+          throw fail(404, "请先切换到创建这个讨论的 AI 授权。");
+        res.json(
+          await answer(
+            req,
+            getDocument(req.user.id, record.document_id),
+            record,
+            questionInput(req.body),
+            provider,
+            { expectedAccountId: accountId, expectedSubject },
+          ),
+        );
+      },
     );
   });
   return {
@@ -508,6 +632,7 @@ export function attachAIRoutes({
     statusForUser,
     close: () => {
       pendingLogins.clear();
+      operations.clear();
       for (const provider of connections.values()) provider.close();
       connections.clear();
     },

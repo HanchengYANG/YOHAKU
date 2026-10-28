@@ -509,3 +509,65 @@ test("非已验证的 CLI 版本或不支持 environments 的接口安全失败�
     false,
   );
 });
+
+test("业务固定的授权账号与subject必须在取token前后和发turn前保持一致", async (t) => {
+  let tokenReads = 0;
+  const expected = {
+    expectedAccountId: "expected-account",
+    expectedSubject: "expected-subject",
+  };
+  const initial = await fixture(t, {
+    auth: {
+      status: async () => ({
+        connected: true,
+        id: "other-account",
+        subject: "other-subject",
+      }),
+      accessToken: async () => {
+        tokenReads++;
+        return "unused-fixture-token";
+      },
+    },
+  });
+  await assert.rejects(
+    initial.runtime.run({ prompt: "路由已固定另一个账号", ...expected }),
+    (error) => error.status === 409,
+  );
+  assert.equal(tokenReads, 0);
+  assert.equal(initial.children.length, 0);
+  for (const changedAt of [2, 3]) {
+    let reads = 0;
+    const f = await fixture(t, {
+      auth: {
+        status: async () => ({
+          connected: true,
+          id: ++reads >= changedAt ? "other-account" : "expected-account",
+          subject: reads >= changedAt ? "other-subject" : "expected-subject",
+        }),
+      },
+    });
+    await assert.rejects(
+      f.runtime.run({ prompt: "检查授权快照", ...expected }),
+      (error) => error.status === 409,
+    );
+    assert.equal(
+      f.requests.some((request) => request.method === "turn/start"),
+      false,
+    );
+    assert.equal(f.runtime.status().running, false);
+  }
+  const subjectOnly = await fixture(t, {
+    auth: {
+      status: async () => ({
+        connected: true,
+        id: "expected-account",
+        subject: "wrong-subject",
+      }),
+    },
+  });
+  await assert.rejects(
+    subjectOnly.runtime.run({ prompt: "相同注册ID但subject不符", ...expected }),
+    (error) => error.status === 409,
+  );
+  assert.equal(subjectOnly.children.length, 0);
+});

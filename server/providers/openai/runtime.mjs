@@ -36,6 +36,16 @@ export function createCodexRuntime({
     account.activeAccountId ||
     account.id ||
     `${account.clientId}:${account.subject}`;
+  function requireExpected(account, expected = {}) {
+    if (
+      (expected.expectedAccountId &&
+        accountIdentity(account) !== expected.expectedAccountId) ||
+      (expected.expectedSubject && account.subject !== expected.expectedSubject)
+    ) {
+      stop();
+      throw failure("AI 授权身份已变化，请重新发起请求。", 409);
+    }
+  }
 
   function redact(message) {
     return String(message || "")
@@ -182,13 +192,15 @@ export function createCodexRuntime({
     generation++;
     dispose();
   }
-  async function ensure() {
+  async function ensure(expected) {
     const currentGeneration = generation;
     const account = await auth.status();
     if (!account.connected)
       throw failure("请先在 AI 设置中使用 ChatGPT 订阅授权。", 401);
+    requireExpected(account, expected);
     const nextToken = await auth.accessToken();
     const checked = await auth.status();
+    requireExpected(checked, expected);
     if (
       !checked.connected ||
       accountIdentity(checked) !== accountIdentity(account)
@@ -197,10 +209,15 @@ export function createCodexRuntime({
     if (generation !== currentGeneration)
       throw failure("AI 请求已中断，请重试。");
     const nextIdentity = accountIdentity(checked);
-    if (proc && token === nextToken && identity === nextIdentity) return;
+    const verified = {
+      expectedAccountId: nextIdentity,
+      expectedSubject: checked.subject || null,
+    };
+    if (proc && token === nextToken && identity === nextIdentity)
+      return verified;
     if (starting) {
       await starting;
-      return ensure();
+      return ensure(expected);
     }
     starting = (async () => {
       dispose();
@@ -358,15 +375,31 @@ export function createCodexRuntime({
     } finally {
       starting = null;
     }
+    return verified;
   }
-  async function run({ prompt, image, threadId = null, schema } = {}) {
+  async function run({
+    prompt,
+    image,
+    threadId = null,
+    schema,
+    expectedAccountId,
+    expectedSubject,
+  } = {}) {
     if (busy) throw failure("AI 正在处理另一项请求，请稍后重试。", 409);
     if (typeof prompt !== "string" || !prompt.trim())
       throw failure("请提供需要解释或识别的内容。", 400);
+    if (
+      (expectedAccountId !== undefined &&
+        (typeof expectedAccountId !== "string" || !expectedAccountId)) ||
+      (expectedSubject !== undefined &&
+        (typeof expectedSubject !== "string" || !expectedSubject))
+    ) {
+      throw failure("AI 授权身份校验参数无效。", 400);
+    }
     busy = true;
     const currentGeneration = generation;
     try {
-      await ensure();
+      const verified = await ensure({ expectedAccountId, expectedSubject });
       if (generation !== currentGeneration)
         throw failure("AI 请求已中断，请重试。");
       const settings = {
@@ -387,6 +420,14 @@ export function createCodexRuntime({
         await rpc("thread/resume", { ...settings, threadId });
         loadedThreads.add(threadId);
       }
+      const beforeTurn = await auth.status();
+      requireExpected(beforeTurn, verified);
+      if (!beforeTurn.connected) {
+        stop();
+        throw failure("ChatGPT 授权已断开，请重新授权。", 401);
+      }
+      if (generation !== currentGeneration)
+        throw failure("AI 请求已中断，请重试。");
       const input = [{ type: "text", text: prompt }];
       if (image) input.push({ type: "image", url: image });
       return await new Promise((resolve, reject) => {
