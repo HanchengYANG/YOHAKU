@@ -439,8 +439,12 @@ export function attachAIRoutes({
         } catch {
           throw fail(502, "AI 返回的识别草稿格式不完整，请重试；原图仍保留。");
         }
+        for (const block of draft.blocks)
+          for (const segment of block.segments)
+            if (segment.reading !== null) segment.origin = "generated";
         draft = {
           ...draft,
+          readingPolicy: "ai_context",
           content: serializeBlocks(draft.blocks),
           sourceImageId: image.id,
           sourceImage: publicImage(image),

@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import fsPromises from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
+import { DatabaseSync } from "node:sqlite";
 import sharp from "sharp";
 import { createApp } from "../server/app.mjs";
 import {
@@ -52,6 +53,7 @@ function services() {
     connected: true,
     activeId: "account-a",
     mode: "success",
+    ocrResult: null,
     busy: false,
     calls: [],
     authStarts: [],
@@ -121,7 +123,7 @@ function services() {
       const text = input.schema
         ? state.mode === "invalid-ocr"
           ? "{broken"
-          : JSON.stringify(recognizedFixture())
+          : JSON.stringify(state.ocrResult || recognizedFixture())
         : `接口测试答案 ${state.calls.length}（非真实AI）`;
       return {
         text,
@@ -277,7 +279,7 @@ test("AI替身接口集成：multipart原图保留，未授权也可上传，识
   assert.deepEqual(Buffer.from(await reopened.arrayBuffer()), buffer);
 });
 
-test("AI替身接口集成：识别成功只生成草稿，人工保存后原图及注音来源持久关联", async (t) => {
+test("AI替身接口集成：新图读音统一为上下文生成，保存重开保留来源，手工读音仍为manual", async (t) => {
   const app = await setup(t);
   const { image } = await upload(app.url);
   const response = await request(
@@ -290,13 +292,18 @@ test("AI替身接口集成：识别成功只生成草稿，人工保存后原图
   const draft = response.data;
   assert.equal(draft.sourceImageId, image.id);
   assert.equal(Object.hasOwn(draft.sourceImage, "path"), false);
-  assert.equal(draft.blocks[0].segments[0].origin, "source");
+  // The upstream double deliberately claims source; new OCR cannot retain it.
+  assert.equal(recognizedFixture().blocks[0].segments[0].origin, "source");
+  assert.equal(draft.readingPolicy, "ai_context");
+  for (const segment of draft.blocks.flatMap((block) => block.segments))
+    assert.equal(segment.origin, segment.reading === null ? null : "generated");
   assert.equal(draft.blocks[0].segments[2].origin, "generated");
   assert.deepEqual(draft.nonBody, recognizedFixture().nonBody);
   assert.deepEqual(draft.warnings, recognizedFixture().warnings);
   assert.deepEqual((await request(app.url, "/api/documents")).data, {
     documents: [],
   });
+  assert.equal(app.state.calls.length, 1);
   const input = app.state.calls[0];
   assert.equal(input.expectedAccountId, "account-a");
   assert.equal(input.expectedSubject, "test-a");
@@ -314,9 +321,11 @@ test("AI替身接口集成：识别成功只生成草稿，人工保存后原图
   assert.equal(saved.status, 201);
   const document = saved.data;
   assert.equal(document.sourceImageId, image.id);
-  assert.equal(document.blocks[0].segments[0].origin, "source");
+  assert.equal(document.blocks[0].segments[0].origin, "generated");
   assert.equal(document.blocks[0].segments[2].origin, "generated");
   assert.deepEqual(document.recognition.nonBody, draft.nonBody);
+  assert.equal(document.recognition.readingPolicy, "ai_context");
+  assert.equal(document.recognition.blocks[0].segments[0].origin, "generated");
   await app.restart();
   const reopened = await request(app.url, `/api/documents/${document.id}`);
   assert.deepEqual(reopened.data, document);
@@ -332,9 +341,160 @@ test("AI替身接口集成：识别成功只生成草稿，人工保存后原图
   );
   assert.equal(updated.status, 200);
   assert.equal(updated.data.sourceImageId, image.id);
-  assert.equal(updated.data.blocks[0].segments[0].origin, "source");
+  assert.equal(updated.data.blocks[0].segments[0].origin, "generated");
   assert.equal(updated.data.blocks[0].segments[2].origin, "generated");
   assert.deepEqual(updated.data.recognition.nonBody, draft.nonBody);
+  const manuallyEdited = await request(
+    app.url,
+    `/api/documents/${document.id}`,
+    "PUT",
+    {
+      ...updated.data,
+      content: updated.data.content.replace(
+        "{背中|せなか}",
+        "{背中|はいちゅう}",
+      ),
+      manualReadings: [
+        {
+          blockId: updated.data.blocks[0].id,
+          rubyIndex: 0,
+          text: "背中",
+          reading: "はいちゅう",
+        },
+      ],
+    },
+  );
+  assert.equal(manuallyEdited.status, 200);
+  assert.equal(manuallyEdited.data.blocks[0].segments[0].origin, "manual");
+  assert.equal(manuallyEdited.data.blocks[0].segments[2].origin, "generated");
+  assert.deepEqual(manuallyEdited.data.recognition, document.recognition);
+  await app.restart();
+  assert.deepEqual(
+    (await request(app.url, `/api/documents/${document.id}`)).data,
+    manuallyEdited.data,
+  );
+});
+
+test("AI替身接口集成：完整词与同字不同读音逐处持久，手改一处不影响另一处", async (t) => {
+  const app = await setup(t);
+  const segments = [
+    { text: "中国語の", reading: null, origin: null },
+    { text: "名字", reading: "ミンツー", origin: "generated" },
+    { text: "、日本語の", reading: null, origin: null },
+    { text: "名字", reading: "みょうじ", origin: "generated" },
+    { text: "。", reading: null, origin: null },
+  ];
+  const wholeWord = [{ text: "食べる", reading: "たべる", origin: "generated" }];
+  app.state.ocrResult = {
+    ...recognizedFixture(),
+    blocks: [segments, wholeWord].map((items) => ({
+      confidence: "high",
+      sourcePage: "single",
+      segments: items,
+    })),
+    warnings: [],
+    nonBody: [],
+  };
+  const { image } = await upload(app.url);
+  const recognized = await request(
+    app.url,
+    `/api/images/${image.id}/recognize`,
+    "POST",
+    {},
+  );
+  assert.equal(recognized.status, 200);
+  assert.deepEqual(recognized.data.blocks[0].segments, segments);
+  assert.deepEqual(recognized.data.blocks[1].segments, wholeWord);
+  assert.equal(app.state.calls.length, 1);
+  const saved = await request(app.url, "/api/documents", "POST", recognized.data);
+  assert.equal(saved.status, 201);
+  assert.deepEqual(saved.data.blocks[0].segments, segments);
+  assert.deepEqual(saved.data.blocks[1].segments, wholeWord);
+  await app.restart();
+  const reopened = await request(app.url, `/api/documents/${saved.data.id}`);
+  assert.deepEqual(reopened.data, saved.data);
+  const edited = await request(
+    app.url,
+    `/api/documents/${saved.data.id}`,
+    "PUT",
+    {
+      ...reopened.data,
+      content: reopened.data.content.replace("{名字|ミンツー}", "{名字|なまえ}"),
+      manualReadings: [
+        {
+          blockId: reopened.data.blocks[0].id,
+          rubyIndex: 0,
+          text: "名字",
+          reading: "なまえ",
+        },
+      ],
+    },
+  );
+  assert.equal(edited.status, 200);
+  assert.deepEqual(
+    edited.data.blocks[0].segments.filter((segment) => segment.text === "名字"),
+    [
+      { text: "名字", reading: "なまえ", origin: "manual" },
+      { text: "名字", reading: "みょうじ", origin: "generated" },
+    ],
+  );
+  assert.deepEqual(edited.data.blocks[1].segments, wholeWord);
+  assert.deepEqual(edited.data.recognition, saved.data.recognition);
+  await app.restart();
+  assert.deepEqual(
+    (await request(app.url, `/api/documents/${saved.data.id}`)).data,
+    edited.data,
+  );
+});
+
+test("AI替身接口集成：历史source识别记录及手工读音不被新识别政策迁移", async (t) => {
+  const app = await setup(t);
+  const { image } = await upload(app.url);
+  const draft = (
+    await request(app.url, `/api/images/${image.id}/recognize`, "POST", {})
+  ).data;
+  const saved = await request(app.url, "/api/documents", "POST", draft);
+  assert.equal(saved.status, 201);
+  const document = saved.data;
+  const legacyBlocks = structuredClone(document.blocks);
+  legacyBlocks[0].segments[0].origin = "source";
+  legacyBlocks[0].segments[2].origin = "manual";
+  const legacyRecognition = structuredClone(document.recognition);
+  delete legacyRecognition.readingPolicy;
+  legacyRecognition.blocks[0].segments[0].origin = "source";
+  const database = new DatabaseSync(join(app.dataDir, "yohaku.sqlite"));
+  try {
+    database
+      .prepare("UPDATE documents SET blocks_json=?,recognition_json=? WHERE id=?")
+      .run(
+        JSON.stringify(legacyBlocks),
+        JSON.stringify(legacyRecognition),
+        document.id,
+      );
+    database
+      .prepare("UPDATE image_drafts SET draft_json=? WHERE image_id=?")
+      .run(JSON.stringify(legacyRecognition), image.id);
+  } finally {
+    database.close();
+  }
+  await app.restart();
+  const reopened = (await request(app.url, `/api/documents/${document.id}`)).data;
+  assert.deepEqual(reopened.blocks, legacyBlocks);
+  assert.deepEqual(reopened.recognition, legacyRecognition);
+  const updated = await request(app.url, `/api/documents/${document.id}`, "PUT", {
+    ...reopened,
+    title: "旧材料只改标题",
+  });
+  assert.equal(updated.status, 200);
+  assert.deepEqual(updated.data.blocks, legacyBlocks);
+  assert.deepEqual(updated.data.recognition, legacyRecognition);
+  const savedFromLegacyDraft = await request(app.url, "/api/documents", "POST", {
+    ...draft,
+    title: "沿用旧识别记录",
+  });
+  assert.equal(savedFromLegacyDraft.status, 201);
+  assert.equal(savedFromLegacyDraft.data.blocks[0].segments[0].origin, "source");
+  assert.deepEqual(savedFromLegacyDraft.data.recognition, legacyRecognition);
 });
 
 test("AI替身接口集成：上游失败或非法识别结果不生成可保存草稿，原图保留", async (t) => {

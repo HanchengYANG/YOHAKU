@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   parseText,
   plainText,
@@ -6,6 +6,8 @@ import {
   stats,
   annotateBlocks,
   editPlainText,
+  findTextOccurrences,
+  annotateOccurrences,
 } from "../../shared/document.mjs";
 import { kinds } from "../constants.mjs";
 import Icon from "./Icon.jsx";
@@ -20,6 +22,10 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
   const [reading, setReading] = useState("");
   const [message, setMessage] = useState("");
   const [tab, setTab] = useState("text");
+  const [batchTerm, setBatchTerm] = useState("");
+  const [batchSearch, setBatchSearch] = useState(null);
+  const [batchSelected, setBatchSelected] = useState([]);
+  const [batchReading, setBatchReading] = useState("");
   const sourceImageId =
     initial.sourceImageId || initial.recognition?.sourceImage?.id;
   const recognition = initial.recognition || initial;
@@ -31,6 +37,10 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
     sourceImageId ? "image" : "reading",
   );
   const [imageError, setImageError] = useState(false);
+  const [imageSize, setImageSize] = useState(null);
+  const [imageRotation, setImageRotation] = useState(0);
+  const [imageZoom, setImageZoom] = useState(100);
+  const imageSideways = imageRotation % 2 === 1;
   const imageUrl = sourceImageId
     ? `/api/images/${encodeURIComponent(sourceImageId)}/raw`
     : null;
@@ -38,6 +48,13 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
   const readingInput = useRef(null);
   const body = plainText(blocks);
   const counts = stats(blocks);
+  const batchResults = useMemo(
+    () => (batchSearch ? findTextOccurrences(blocks, batchSearch.query) : []),
+    [blocks, batchSearch],
+  );
+  const batchAvailable = batchResults.filter((item) => item.canAnnotate);
+  const allBatchSelected =
+    batchAvailable.length > 0 && batchSelected.length === batchAvailable.length;
   const update = (patch) => {
     setValue((old) => ({ ...old, ...patch }));
     onDirty();
@@ -45,7 +62,38 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
   const updateBlocks = (next) => {
     setBlocks(next);
     setSelection(null);
+    setBatchSelected([]);
+    setBatchSearch((old) => old && { query: old.query, blocks: next });
     onDirty();
+  };
+  const findBatch = (query = batchTerm) => {
+    const term = query.trim();
+    try {
+      findTextOccurrences(blocks, term);
+      setBatchTerm(term);
+      setBatchSelected([]);
+      setBatchSearch({ query: term, blocks });
+      setMessage("");
+    } catch (error) {
+      setMessage(error.message);
+    }
+  };
+  const applyBatch = () => {
+    try {
+      if (!batchSearch || batchSearch.blocks !== blocks)
+        throw new Error("正文已变化，请重新查找并选择要修改的位置。");
+      const count = batchSelected.length;
+      const next = annotateOccurrences(
+        blocks,
+        batchSearch.query,
+        batchSelected,
+        batchReading,
+      );
+      updateBlocks(next);
+      setMessage(`已为选中的 ${count} 处设置手动注音，其余位置保持原样。`);
+    } catch (error) {
+      setMessage(error.message);
+    }
   };
   const editBody = (text) => {
     const result = editPlainText(blocks, text);
@@ -230,7 +278,8 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                 </div>
               )}
               {nonBody.length > 0 && (
-                <div className="ocr-nonbody-list">
+                <details className="ocr-nonbody-list">
+                  <summary>与正文分开的内容 · {nonBody.length} 条</summary>
                   <h3>与正文分开的内容</h3>
                   {nonBody.map((item, index) => (
                     <div className="ocr-nonbody-item" key={index}>
@@ -249,7 +298,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                       <p>{item.text}</p>
                     </div>
                   ))}
-                </div>
+                </details>
               )}
               {!warnings.length && !nonBody.length && (
                 <p className="ocr-history-hint">
@@ -281,6 +330,16 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                 onClick={() => setTab("ruby")}
               >
                 注音校正 <span>{counts.rubyCount}</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tab === "batch"}
+                aria-controls="batch-editor-panel"
+                id="batch-editor-tab"
+                onClick={() => setTab("batch")}
+              >
+                批量注音
               </button>
             </div>
             {tab === "text" ? (
@@ -323,6 +382,20 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                     ) : (
                       <span>在上方选中字词，为它标注读音</span>
                     )}
+                    {selection &&
+                      !selection.text.includes("\n") &&
+                      selection.text.length <= 100 && (
+                        <button
+                          type="button"
+                          className="text-button"
+                          onClick={() => {
+                            findBatch(selection.text);
+                            setTab("batch");
+                          }}
+                        >
+                          批量标注这个词
+                        </button>
+                      )}
                   </div>
                   <div className="annotation-input-row">
                     <input
@@ -351,7 +424,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                   </div>
                 </div>
               </div>
-            ) : (
+            ) : tab === "ruby" ? (
               <div
                 className="ruby-editor"
                 id="ruby-editor-panel"
@@ -359,7 +432,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                 aria-labelledby="ruby-editor-tab"
               >
                 <p className="panel-hint">
-                  按词组校正读音。送假名留在正文中，例如「生まれた」只给「生」标注「う」。
+                  按完整词校正，例如「食べる」标注「たべる」。同词不同位置可有不同读音。
                 </p>
                 {incompleteRuby && (
                   <p className="panel-hint">
@@ -384,7 +457,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                         >
                           {{
                             source: "原有",
-                            generated: "补充",
+                            generated: "AI 注音",
                             manual: "手动",
                           }[r.origin] || "手动"}
                         </small>
@@ -409,6 +482,156 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                     </button>
                   </div>
                 ))}
+              </div>
+            ) : (
+              <div
+                className="batch-editor"
+                id="batch-editor-panel"
+                role="tabpanel"
+                aria-labelledby="batch-editor-tab"
+              >
+                <p className="panel-hint">
+                  查找完整词，再勾选要修改的位置。只有点击应用后，选中的位置才会改变。
+                </p>
+                <div className="batch-search-row">
+                  <label>
+                    要标注的词语
+                    <input
+                      aria-label="要标注的词语"
+                      lang="ja"
+                      value={batchTerm}
+                      maxLength={100}
+                      placeholder="例如：名字、食べる"
+                      onChange={(event) => {
+                        setBatchTerm(event.target.value);
+                        setBatchSearch(null);
+                        setBatchSelected([]);
+                        setMessage("");
+                      }}
+                      onKeyDown={(event) => {
+                        if (
+                          event.key === "Enter" &&
+                          !event.nativeEvent.isComposing
+                        ) {
+                          event.preventDefault();
+                          findBatch();
+                        }
+                      }}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="button secondary"
+                    onClick={() => findBatch()}
+                    disabled={!batchTerm.trim()}
+                  >
+                    查找位置
+                  </button>
+                </div>
+                {batchSearch && (
+                  <>
+                    <div className="batch-result-heading">
+                      <span role="status">
+                        找到 {batchResults.length} 处 · 已选{" "}
+                        {batchSelected.length} 处
+                      </span>
+                      <button
+                        type="button"
+                        className="text-button"
+                        disabled={!batchAvailable.length}
+                        onClick={() =>
+                          setBatchSelected(
+                            allBatchSelected
+                              ? []
+                              : batchAvailable.map((item) => item.key),
+                          )
+                        }
+                      >
+                        {allBatchSelected ? "取消全选" : "全选可修改的位置"}
+                      </button>
+                    </div>
+                    <div
+                      className="batch-results"
+                      role="group"
+                      aria-label="要批量标注的位置"
+                    >
+                      {batchResults.map((item, index) => (
+                        <label
+                          className={`batch-occurrence ${item.canAnnotate ? "" : "unavailable"}`}
+                          key={item.key}
+                        >
+                          <input
+                            type="checkbox"
+                            aria-label={`选择第${index + 1}处${batchSearch.query}（第${item.blockIndex + 1}行）`}
+                            checked={batchSelected.includes(item.key)}
+                            disabled={!item.canAnnotate}
+                            onChange={(event) =>
+                              setBatchSelected((old) =>
+                                event.target.checked
+                                  ? [...old, item.key]
+                                  : old.filter((key) => key !== item.key),
+                              )
+                            }
+                          />
+                          <span className="batch-occurrence-content">
+                            <small>
+                              第 {item.blockIndex + 1} 行 · 当前读音：
+                              {item.currentReading ||
+                                (item.canAnnotate ? "未标注" : "包含已有注音")}
+                            </small>
+                            <span lang="ja">
+                              {item.before}
+                              <mark>{batchSearch.query}</mark>
+                              {item.after}
+                            </span>
+                            {!item.canAnnotate && (
+                              <small className="batch-occurrence-reason">
+                                {item.reason}
+                              </small>
+                            )}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                    {batchAvailable.length < batchResults.length && (
+                      <p className="panel-hint">
+                        有 {batchResults.length - batchAvailable.length}{" "}
+                        处只匹配了已有注音的一部分，不能勾选。请改查完整词后修改。
+                      </p>
+                    )}
+                    {batchResults.length === 0 && (
+                      <p className="panel-hint">
+                        没有找到这个词语，请检查正文或换一个完整词。
+                      </p>
+                    )}
+                    <div className="batch-apply-row">
+                      <label>
+                        选中位置的假名读音
+                        <input
+                          aria-label="批量假名读音"
+                          lang="ja"
+                          value={batchReading}
+                          onChange={(event) =>
+                            setBatchReading(event.target.value)
+                          }
+                          maxLength={120}
+                          placeholder="例如：みょうじ"
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") event.preventDefault();
+                          }}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        className="button secondary"
+                        disabled={!batchSelected.length || !batchReading.trim()}
+                        onClick={applyBatch}
+                      >
+                        应用到选中的 {batchSelected.length} 处
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             )}
             {message && (
@@ -470,24 +693,77 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
               )}
             </div>
             {previewMode === "image" ? (
-              <div className="ocr-original-image">
-                {imageError ? (
-                  <p role="alert">原图暂时无法载入，请尝试打开完整原图。</p>
-                ) : (
-                  <a
-                    href={imageUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    aria-label="打开完整原始图片"
+              <>
+                <div
+                  className="ocr-image-controls"
+                  role="group"
+                  aria-label="原图显示调整"
+                >
+                  <button
+                    type="button"
+                    className="text-button"
+                    disabled={!imageSize || imageError}
+                    onClick={() => setImageRotation((turns) => (turns + 1) % 4)}
                   >
-                    <img
-                      src={imageUrl}
-                      alt="用于校对正文和注音的日语原图"
-                      onError={() => setImageError(true)}
-                    />
-                  </a>
-                )}
-              </div>
+                    向左旋转90°
+                  </button>
+                  <label>
+                    缩放
+                    <select
+                      aria-label="原图缩放"
+                      value={imageZoom}
+                      disabled={!imageSize || imageError}
+                      onChange={(event) =>
+                        setImageZoom(Number(event.target.value))
+                      }
+                    >
+                      <option value={100}>适合宽度（100%）</option>
+                      <option value={150}>150%</option>
+                      <option value={200}>200%</option>
+                      <option value={300}>300%</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="ocr-original-image">
+                  {imageError ? (
+                    <p role="alert">原图暂时无法载入，请尝试打开完整原图。</p>
+                  ) : (
+                    <a
+                      className="ocr-image-frame"
+                      href={imageUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      aria-label="打开完整原始图片"
+                      style={{
+                        width: `${imageZoom}%`,
+                        aspectRatio: imageSize
+                          ? imageSideways
+                            ? `${imageSize.height} / ${imageSize.width}`
+                            : `${imageSize.width} / ${imageSize.height}`
+                          : "1 / 1",
+                      }}
+                    >
+                      <img
+                        src={imageUrl}
+                        alt="用于校对正文和注音的日语原图"
+                        style={{
+                          width:
+                            imageSideways && imageSize
+                              ? `${(imageSize.width / imageSize.height) * 100}%`
+                              : "100%",
+                          transform: `translate(-50%, -50%) rotate(${-imageRotation * 90}deg)`,
+                        }}
+                        onLoad={(event) => {
+                          const { naturalWidth: width, naturalHeight: height } =
+                            event.currentTarget;
+                          if (width && height) setImageSize({ width, height });
+                        }}
+                        onError={() => setImageError(true)}
+                      />
+                    </a>
+                  )}
+                </div>
+              </>
             ) : (
               <div className="preview-content">
                 {body.trim() ? (

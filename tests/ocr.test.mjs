@@ -18,10 +18,9 @@ const result = () => ({
       confidence: "high",
       sourcePage: "single",
       segments: [
-        { text: "背中", reading: "せなか", origin: "source" },
+        { text: "背中", reading: "せなか", origin: "generated" },
         { text: "を", reading: null, origin: null },
-        { text: "撫", reading: "な", origin: "generated" },
-        { text: "でる", reading: null, origin: null },
+        { text: "撫でる", reading: "なでる", origin: "generated" },
       ],
     },
     { confidence: "high", sourcePage: "single", segments: [] },
@@ -29,8 +28,8 @@ const result = () => ({
       confidence: "uncertain",
       sourcePage: "single",
       segments: [
-        { text: "生", reading: "う", origin: "source" },
-        { text: "まれた□", reading: null, origin: null },
+        { text: "生まれた", reading: "うまれた", origin: "generated" },
+        { text: "□", reading: null, origin: null },
       ],
     },
   ],
@@ -43,15 +42,15 @@ const result = () => ({
   ],
 });
 
-test("结构化识别保留正文分行、词组注音和来源，批注与页码独立", () => {
+test("新识别草稿保留正文分行与生成词组注音，批注与页码独立", () => {
   const raw = result();
   const parsed = validateOcr(raw);
   assert.equal(plainText(parsed.blocks), "背中を撫でる\n\n生まれた□");
   assert.equal(
     serializeBlocks(parsed.blocks),
-    "{背中|せなか}を{撫|な}でる\n\n{生|う}まれた□",
+    "{背中|せなか}を{撫でる|なでる}\n\n{生まれた|うまれた}□",
   );
-  assert.equal(parsed.blocks[0].segments[0].origin, "source");
+  assert.equal(parsed.blocks[0].segments[0].origin, "generated");
   assert.equal(parsed.blocks[0].segments[2].origin, "generated");
   assert.equal(parsed.blocks[2].confidence, "uncertain");
   assert.deepEqual(parsed.nonBody, raw.nonBody);
@@ -61,7 +60,7 @@ test("结构化识别保留正文分行、词组注音和来源，批注与页�
   assert.equal(Object.hasOwn(raw.blocks[0], "id"), false);
 });
 
-test("竖排双页顺序信息不会被重排，原有特殊读音不被词典替换", () => {
+test("历史source草稿继续保留特殊读音和竖排页序，不改写旧来源", () => {
   const raw = result();
   raw.orientation = "vertical";
   raw.readingOrder = "先右页、再左页；每页列从右到左，每列从上到下。";
@@ -74,7 +73,10 @@ test("竖排双页顺序信息不会被重排，原有特殊读音不被词典�
     {
       confidence: "high",
       sourcePage: "left",
-      segments: [{ text: "左頁", reading: null, origin: null }],
+      segments: [
+        { text: "生", reading: "う", origin: "source" },
+        { text: "まれた", reading: null, origin: null },
+      ],
     },
   ];
   raw.warnings = [];
@@ -85,7 +87,56 @@ test("竖排双页顺序信息不会被重排，原有特殊读音不被词典�
     ["right", "left"],
   );
   assert.equal(parsed.blocks[0].segments[0].reading, "そら");
+  assert.equal(parsed.blocks[0].segments[0].origin, "source");
+  assert.deepEqual(raw.blocks[0].segments[0], {
+    text: "宇宙",
+    reading: "そら",
+    origin: "source",
+  });
+  assert.deepEqual(parsed.blocks[1].segments, raw.blocks[1].segments);
   assert.match(OCR_PROMPT, /先读右页、再读左页/);
+});
+
+test("按语境提供的同词不同读音与含送假名的完整词形不会被全局替换或拆分", () => {
+  const raw = result();
+  raw.blocks = [{
+    confidence: "high",
+    sourcePage: "single",
+    segments: [
+      { text: "中国語の", reading: null, origin: null },
+      { text: "名字", reading: "ミンツー", origin: "generated" },
+      { text: "と日本語の", reading: null, origin: null },
+      { text: "名字", reading: "みょうじ", origin: "generated" },
+      { text: "。", reading: null, origin: null },
+      { text: "食べる", reading: "たべる", origin: "generated" },
+      { text: "。", reading: null, origin: null },
+      { text: "生まれた", reading: "うまれた", origin: "generated" },
+      { text: "。", reading: null, origin: null },
+    ],
+  }];
+  raw.warnings = [];
+  const parsed = validateOcr(raw);
+  assert.deepEqual(parsed.blocks[0].segments, raw.blocks[0].segments);
+  assert.deepEqual(
+    parsed.blocks[0].segments.filter((s) => s.text === "名字").map((s) => s.reading),
+    ["ミンツー", "みょうじ"],
+  );
+  assert.deepEqual(
+    parsed.blocks[0].segments.filter((s) => ["食べる", "生まれた"].includes(s.text)),
+    [
+      { text: "食べる", reading: "たべる", origin: "generated" },
+      { text: "生まれた", reading: "うまれた", origin: "generated" },
+    ],
+  );
+});
+
+test("新请求Schema仅允许生成注音或无注音，不再请求原图source读音", () => {
+  const schema = OCR_SCHEMA.properties.blocks.items.properties.segments.items;
+  assert.deepEqual(schema.properties.origin.enum, ["generated", null]);
+  assert.equal(schema.properties.origin.enum.includes("source"), false);
+  for (const segment of result().blocks.flatMap((block) => block.segments)) {
+    assert.ok(schema.properties.origin.enum.includes(segment.origin));
+  }
 });
 
 test("不确定行缺少模型说明时增加校对提示，模型下标必须有效", () => {

@@ -205,6 +205,104 @@ export function annotateBlocks(blocks, start, end, reading) {
   throw new Error("选区已变化，请重新选择字词。");
 }
 
+export function findTextOccurrences(blocks, query) {
+  if (typeof query !== "string" || !query.trim())
+    throw new Error("请填写要查找的字词，不能只含空白。");
+  if (/[\r\n\u2028\u2029]/.test(query))
+    throw new Error("查找字词不能跨行，请一次填写同一行的文字。");
+  if ([...query].length > 100)
+    throw new Error("查找字词最多100个字符。");
+  const matches = [];
+  let offset = 0;
+  blocks.forEach((block, blockIndex) => {
+    const text = block.segments.map((segment) => segment.text).join("");
+    let position = 0;
+    const ranges = block.segments
+      .map((segment) => {
+        const start = position;
+        position += segment.text.length;
+        return { start, end: position, reading: segment.reading };
+      })
+      .filter((range) => range.end > range.start);
+    let cursor = 0,
+      rangeIndex = 0,
+      from;
+    while ((from = text.indexOf(query, cursor)) !== -1) {
+      const to = from + query.length;
+      while (ranges[rangeIndex].end <= from) rangeIndex++;
+      let lastIndex = rangeIndex;
+      while (ranges[lastIndex].end < to) lastIndex++;
+      const first = ranges[rangeIndex],
+        last = ranges[lastIndex];
+      const canAnnotate = !(
+        (first.reading && from > first.start) ||
+        (last.reading && to < last.end)
+      );
+      const currentReading =
+        rangeIndex === lastIndex && from === first.start && to === first.end
+          ? first.reading
+          : null;
+      const start = offset + from,
+        end = offset + to;
+      matches.push({
+        key: JSON.stringify([
+          query, block.id, blockIndex, start, end, currentReading,
+        ]),
+        blockId: block.id,
+        blockIndex,
+        start,
+        end,
+        before: [...text.slice(Math.max(0, from - 24), from)].slice(-12).join(""),
+        after: [...text.slice(to, to + 24)].slice(0, 12).join(""),
+        currentReading,
+        canAnnotate,
+        reason: canAnnotate
+          ? ""
+          : "选区包含部分已有注音，请选择完整词组，或在注音列表中修改。",
+      });
+      cursor = to;
+    }
+    offset += text.length + 1;
+  });
+  return matches;
+}
+
+export function annotateOccurrences(blocks, query, selectedKeys, reading) {
+  const matches = new Map(
+    findTextOccurrences(blocks, query).map((match) => [match.key, match]),
+  );
+  if (!Array.isArray(selectedKeys) || !selectedKeys.length)
+    throw new Error("请先勾选要修改的位置。");
+  if (typeof reading !== "string" || !reading.trim())
+    throw new Error("请填写要应用的假名读音。");
+  if (/[\r\n\u2028\u2029]/.test(reading) || [...reading.trim()].length > 200)
+    throw new Error("读音不能换行，最多200个字符。");
+  const selected = selectedKeys.map((key) => matches.get(key));
+  if (
+    new Set(selectedKeys).size !== selectedKeys.length ||
+    selected.some((match) => !match)
+  )
+    throw new Error("选择的位置已变化，请重新查找并勾选。");
+  const blocked = selected.find((match) => !match.canAnnotate);
+  if (blocked) throw new Error(blocked.reason);
+  let offset = 0;
+  const offsets = blocks.map((block) => {
+    const start = offset;
+    offset += plainText([block]).length + 1;
+    return start;
+  });
+  const next = blocks.slice();
+  for (const match of selected) {
+    next[match.blockIndex] = annotateBlocks(
+      [next[match.blockIndex]],
+      match.start - offsets[match.blockIndex],
+      match.end - offsets[match.blockIndex],
+      reading.trim(),
+    )[0];
+  }
+  return next;
+}
+
 // Keep readings in unchanged regions. Ambiguous or edited words lose their
 // reading explicitly, so a pronunciation cannot drift onto a different word.
 export function editPlainText(blocks, text) {

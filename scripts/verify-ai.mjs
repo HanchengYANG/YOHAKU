@@ -154,29 +154,31 @@ async function completed(runtime, input) {
   return result;
 }
 
-function checkImage(name, draft) {
+export function checkImage(name, draft) {
   const text = plainText(draft.blocks).replace(/\s/g, "");
   const segments = draft.blocks.flatMap((block) => block.segments);
+  const readings = segments.filter((segment) => segment.reading);
+  const generated =
+    readings.length > 0 &&
+    readings.every((segment) => segment.origin === "generated");
+  const phonetic = segments
+    .map((segment) => segment.reading || segment.text)
+    .join("")
+    .replace(/\s/g, "");
   if (name === "01-lyrics")
     return [
+      generated,
       text.includes("僕が生まれた日の空"),
       text.includes("背中を撫でる声"),
-      segments.some(
-        (s) =>
-          s.text === "背中" && s.reading === "せなか" && s.origin === "source",
-      ),
-      segments.some((s) => s.text === "生" && s.reading === "う"),
+      phonetic.includes("せなか"),
+      phonetic.includes("うまれた"),
     ];
   if (name === "02-textbook")
     return [
+      generated,
       text.includes("中国語"),
       text.includes("明治時代"),
-      segments.some(
-        (s) =>
-          s.text === "名字" &&
-          s.reading === "ミンツー" &&
-          s.origin === "source",
-      ),
+      phonetic.includes("めいじじだい"),
       draft.nonBody.some((item) => item.type === "handwriting"),
       draft.nonBody.some(
         (item) => item.type === "page_number" && item.text.includes("62"),
@@ -184,6 +186,7 @@ function checkImage(name, draft) {
     ];
   if (name === "03-vertical")
     return [
+      generated,
       draft.orientation === "vertical",
       text.indexOf("お花見") >= 0 &&
         text.indexOf("お花見") < text.indexOf("梅雨"),
@@ -191,8 +194,10 @@ function checkImage(name, draft) {
       draft.blocks.some((block) => block.sourcePage === "left"),
     ];
   return [
+    generated,
     text === "今日は図書館で日本語を勉強します。",
-    !segments.some((s) => s.origin === "source"),
+    phonetic.includes("としょかん"),
+    phonetic.includes("にほんご"),
   ];
 }
 
@@ -228,7 +233,7 @@ async function main() {
         ]),
       )
       .digest("hex");
-    const output = join(root, "artifacts", "ai-verification", user.id);
+    const output = join(root, "artifacts", "ai-verification", user.id, "ai-context");
     await mkdir(output, { recursive: true, mode: 0o700 });
     await chmod(output, 0o700);
     console.log(
@@ -306,6 +311,7 @@ async function main() {
       userId: user.id,
       username: user.username,
       providerId: "openai",
+      readingPolicy: "ai_context",
       authPath: "本应用独立 SIWC + Codex app-server",
       realInference: false,
       scope:
@@ -410,6 +416,7 @@ async function main() {
           ...draft,
           completed: true,
           model: result.model,
+          readingPolicy: "ai_context",
         });
         report.images.push({
           name,

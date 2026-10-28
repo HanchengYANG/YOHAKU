@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import api from "../api.mjs";
 import Icon from "./Icon.jsx";
 
@@ -12,6 +12,8 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
   const [image, setImage] = useState(null);
   const [phase, setPhase] = useState("");
   const [error, setError] = useState("");
+  const [dragActive, setDragActive] = useState(false);
+  const fileInput = useRef(null);
   const pending = useRef(null);
   const mounted = useRef(true);
 
@@ -33,30 +35,67 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
     return () => URL.revokeObjectURL(objectUrl);
   }, [file]);
 
-  const chooseFile = (event) => {
-    const selected = event.target.files?.[0];
-    if (!selected) return;
-    setError("");
-    if (!allowedTypes.has(selected.type)) {
-      setError("请选择 PNG、JPEG 或 WebP 图片。");
-      setFile(null);
+  const chooseFiles = useCallback(
+    (fileList, fromPicker = false) => {
+      const files = Array.from(fileList || []);
+      if (!files.length) return;
+      if (pending.current) {
+        setError("正在上传或识别，请完成后再更换图片。");
+        return false;
+      }
+      if (files.length !== 1) {
+        setError("一次只支持一张图片，请分开导入。当前图片未更换。");
+        return false;
+      }
+      const selected = files[0];
+      if (!allowedTypes.has(selected.type)) {
+        setError("请选择 PNG、JPEG 或 WebP 图片。当前图片未更换。");
+        return false;
+      }
+      if (!selected.size || selected.size > maxBytes) {
+        setError("图片需要有内容，且大小不超过 12 MB。当前图片未更换。");
+        return false;
+      }
+      setError("");
+      setFile(selected);
       setImage(null);
-      onDirty?.(false);
-      event.target.value = "";
-      return;
-    }
-    if (!selected.size || selected.size > maxBytes) {
-      setError("图片需要有内容，且大小不超过 12 MB。");
-      setFile(null);
-      setImage(null);
-      onDirty?.(false);
-      event.target.value = "";
-      return;
-    }
-    setFile(selected);
-    setImage(null);
-    setPreviewError(false);
-    onDirty?.(true);
+      setPreviewError(false);
+      onDirty?.(true);
+      if (fileInput.current && !fromPicker) fileInput.current.value = "";
+      return true;
+    },
+    [onDirty],
+  );
+
+  useEffect(() => {
+    const paste = (event) => {
+      const data = event.clipboardData;
+      if (!data) return;
+      const files = data.files.length
+        ? Array.from(data.files)
+        : Array.from(data.items)
+            .filter((item) => item.kind === "file")
+            .map((item) => item.getAsFile())
+            .filter(Boolean);
+      if (!files.length) return;
+      event.preventDefault();
+      chooseFiles(files);
+    };
+    window.addEventListener("paste", paste);
+    return () => window.removeEventListener("paste", paste);
+  }, [chooseFiles]);
+
+  const dragOver = (event) => {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = pending.current ? "none" : "copy";
+    setDragActive(!pending.current);
+  };
+  const drop = (event) => {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    setDragActive(false);
+    chooseFiles(event.dataTransfer.files);
   };
 
   const recognize = async () => {
@@ -69,7 +108,13 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
       if (!uploaded) {
         setPhase("upload");
         const body = new FormData();
-        body.append("image", file);
+        const extension =
+          file.type === "image/jpeg"
+            ? "jpg"
+            : file.type === "image/webp"
+              ? "webp"
+              : "png";
+        body.append("image", file, file.name || `粘贴的图片.${extension}`);
         const response = await fetch("/api/images", {
           method: "POST",
           body,
@@ -100,7 +145,12 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
         onReady({ ...draft, sourceImageId: uploaded.id });
       }
     } catch (e) {
-      if (mounted.current && e.name !== "AbortError") setError(e.message);
+      if (mounted.current && e.name !== "AbortError")
+        setError(
+          e instanceof TypeError
+            ? "无法连接本机服务，所选图片已保留，请重试。"
+            : e.message,
+        );
     } finally {
       if (pending.current === controller) pending.current = null;
       if (mounted.current) setPhase("");
@@ -110,7 +160,17 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
   const busy = !!phase;
 
   return (
-    <section className="stage2-page image-import-page" aria-label="图片导入">
+    <section
+      className="stage2-page image-import-page"
+      aria-label="图片导入"
+      aria-busy={busy}
+      onDragOver={dragOver}
+      onDrop={drop}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget))
+          setDragActive(false);
+      }}
+    >
       <div className="stage2-heading">
         <div>
           <span className="eyebrow">从原图开始</span>
@@ -126,49 +186,73 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
         </button>
       </div>
       <p className="stage2-description">
-        识别后先对照原图校对正文、分行和注音，再保存到书架。原图会保留。
+        截图可直接粘贴，也可拖入图片或从设备选择照片。识别后先对照原图校对，再保存到书架。
       </p>
       {error && (
         <div className="stage2-error" role="alert">
           {error}
-          {image && <p>原图已上传，重试会继续使用这张图片。</p>}
+          {image ? (
+            <p>原图已上传，重试会继续使用这张图片。</p>
+          ) : (
+            file && <p>所选图片已保留，无需重新选择。</p>
+          )}
         </div>
       )}
       <div className="image-import-workspace">
-        <div className="image-import-preview">
-          {preview && !previewError ? (
-            <img
-              src={preview}
-              alt="待识别的日语原图"
-              onError={() => setPreviewError(true)}
-            />
-          ) : (
-            <div className="image-preview-empty">
-              <Icon name="book" size={32} />
-              <p>
-                {previewError
-                  ? "这张图片暂时无法预览"
-                  : "选择一张想读的日语图片"}
-              </p>
-              <small>截图、横排教材或竖排书页</small>
-            </div>
-          )}
+        <div
+          className={`image-import-preview ${dragActive ? "is-dragging" : ""}`}
+        >
+          <button
+            className="image-preview-picker"
+            type="button"
+            aria-label="点击选择或更换图片"
+            aria-describedby="image-input-help"
+            disabled={busy}
+            onClick={() => {
+              if (!pending.current) fileInput.current?.click();
+            }}
+          >
+            {preview && !previewError ? (
+              <img
+                src={preview}
+                alt="待识别的日语原图"
+                onError={() => setPreviewError(true)}
+              />
+            ) : (
+              <span className="image-preview-empty">
+                <Icon name="book" size={32} />
+                <span className="image-preview-message">
+                  {previewError ? "这张图片暂时无法预览" : "点击选择一张图片"}
+                </span>
+                <small>也可拖放图片，或按 Ctrl / Cmd + V 粘贴截图</small>
+              </span>
+            )}
+            {preview && !previewError && (
+              <span className="image-preview-change">点击更换图片</span>
+            )}
+          </button>
         </div>
         <div className="image-import-controls">
           <label className="stage2-field image-file-picker">
-            原始图片
+            从设备选择图片
             <input
               aria-label="选择日语图片"
+              ref={fileInput}
               type="file"
               accept="image/png,image/jpeg,image/webp"
               disabled={busy}
-              onChange={chooseFile}
+              onChange={(event) => {
+                if (!chooseFiles(event.target.files, true))
+                  event.target.value = "";
+              }}
             />
           </label>
-          <p className="image-file-hint">PNG、JPEG 或 WebP，最大 12 MB。</p>
+          <p className="image-file-hint" id="image-input-help">
+            一次一张，PNG、JPEG 或 WebP，最大 12 MB。
+          </p>
           {file && (
             <div className="image-file-details">
-              <strong>{file.name}</strong>
+              <strong>{file.name || "粘贴的截图"}</strong>
               <span>
                 {(file.size / 1024 / 1024).toFixed(2)} MB
                 {image ? ` · ${image.width} × ${image.height}` : ""}
@@ -177,7 +261,8 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
             </div>
           )}
           <div className="image-recognition-note">
-            <p>会尝试分别识别正文、原有注音、手写批注和页码。</p>
+            <p>识别正文，并根据语境生成假名；书上的小号注音可忽略。</p>
+            <p>手写批注和页码单独保存，人名与特殊读法可在下一步校正。</p>
             <p>照片的阴影、弯曲和细小注音可能影响识别，请在下一步逐项确认。</p>
           </div>
           <button
@@ -190,14 +275,14 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
             {phase === "upload"
               ? "正在上传原图…"
               : phase === "recognize"
-                ? "正在识别正文与注音…"
+                ? "正在识别正文并生成注音…"
                 : image
-                  ? "重新识别这张图片"
+                  ? "重试识别"
                   : "识别图片"}
           </button>
           <p className="image-recognition-state" role="status">
             {phase === "recognize"
-              ? "AI 正在读取原图，请稍候。完成后会打开可编辑的校对草稿。"
+              ? "AI 正在识别正文并按语境生成假名。完成后会打开可编辑的校对草稿。"
               : "此步骤不会自动把识别结果存为最终原文。"}
           </p>
         </div>

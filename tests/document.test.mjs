@@ -6,6 +6,8 @@ import {
   serializeBlocks,
   stats,
   annotateBlocks,
+  findTextOccurrences,
+  annotateOccurrences,
   editPlainText,
 } from "../shared/document.mjs";
 
@@ -120,4 +122,98 @@ test("annotating plain selections changes only that span and rejects splitting a
     serializeBlocks(annotateBlocks(next, 2, 4, "")),
     "あの背中を{見|み}た",
   );
+});
+
+test("batch annotations find literal non-overlapping occurrences by line and preserve text and IDs", () => {
+  const blocks = parseText("名字名字\n名字.*名字\nあああ");
+  const snapshot = structuredClone(blocks);
+  const matches = findTextOccurrences(blocks, "名字");
+  assert.deepEqual(matches.map(({ start, end, blockIndex }) => [start, end, blockIndex]), [
+    [0, 2, 0], [2, 4, 0], [5, 7, 1], [9, 11, 1],
+  ]);
+  assert.equal(new Set(matches.map((match) => match.key)).size, 4);
+  assert.equal(matches.every((match) => match.canAnnotate), true);
+  assert.deepEqual(matches.map((match) => match.currentReading), [null, null, null, null]);
+  assert.equal(findTextOccurrences(blocks, ".*").length, 1);
+  assert.equal(findTextOccurrences(blocks, "ああ").length, 1);
+  assert.deepEqual(findTextOccurrences(blocks, "不存在"), []);
+  const changed = annotateOccurrences(blocks, "名字", matches.map((match) => match.key), "みょうじ");
+  assert.equal(plainText(changed), plainText(blocks));
+  assert.deepEqual(changed.map((block) => block.id), blocks.map((block) => block.id));
+  assert.deepEqual(findTextOccurrences(changed, "名字").map((match) => match.currentReading),
+    ["みょうじ", "みょうじ", "みょうじ", "みょうじ"]);
+  assert.equal(changed.flatMap((block) => block.segments).filter((segment) => segment.reading)
+    .every((segment) => segment.origin === "manual"), true);
+  assert.deepEqual(blocks, snapshot);
+});
+
+test("batch annotations apply two readings to explicit subsets without replacing other occurrences", () => {
+  const blocks = parseText("{名字|ミンツー}と{名字|みょうじ}\n{名字|ミンツー}と{名字|みょうじ}と{空|そら}");
+  for (const segment of blocks.flatMap((block) => block.segments))
+    if (segment.reading) segment.origin = "generated";
+  blocks[1].segments.at(-1).origin = "source";
+  const matches = findTextOccurrences(blocks, "名字");
+  const first = annotateOccurrences(blocks, "名字", [matches[0].key, matches[2].key], "みょうじ");
+  assert.equal(first[0].segments[2].reading, "みょうじ");
+  assert.equal(first[0].segments[2].origin, "generated");
+  const remaining = findTextOccurrences(first, "名字");
+  const second = annotateOccurrences(first, "名字", [remaining[1].key, remaining[3].key], "ミンツー");
+  assert.deepEqual(findTextOccurrences(second, "名字").map((match) => match.currentReading),
+    ["みょうじ", "ミンツー", "みょうじ", "ミンツー"]);
+  assert.deepEqual(second[1].segments.at(-1), blocks[1].segments.at(-1));
+  assert.equal(plainText(second), plainText(blocks));
+  assert.deepEqual(second.map((block) => block.id), blocks.map((block) => block.id));
+});
+
+test("batch annotations atomically reject partial ruby boundaries and can merge complete words", () => {
+  const blocks = parseText("食と{食べる|たべる}\n{生|う}まれた");
+  const snapshot = structuredClone(blocks);
+  const matches = findTextOccurrences(blocks, "食");
+  assert.deepEqual(matches.map((match) => match.canAnnotate), [true, false]);
+  assert.match(matches[1].reason, /完整词组/);
+  assert.throws(() => annotateOccurrences(blocks, "食", matches.map((match) => match.key), "しょく"), /完整词组/);
+  assert.deepEqual(blocks, snapshot);
+  const whole = findTextOccurrences(blocks, "食べる");
+  assert.equal(whole[0].currentReading, "たべる");
+  const changed = annotateOccurrences(blocks, "食べる", [whole[0].key], "たべる");
+  assert.equal(changed[0].segments.at(-1).text, "食べる");
+  const merged = findTextOccurrences(changed, "生まれた");
+  assert.equal(merged[0].canAnnotate, true);
+  const final = annotateOccurrences(changed, "生まれた", [merged[0].key], "うまれた");
+  assert.deepEqual(final[1].segments, [{ text: "生まれた", reading: "うまれた", origin: "manual" }]);
+  assert.equal(plainText(final), plainText(blocks));
+});
+
+test("batch annotations reject stale, foreign-query, duplicate and invalid selections before applying", () => {
+  const blocks = parseText("名字と名字");
+  const matches = findTextOccurrences(blocks, "名字");
+  const snapshot = structuredClone(blocks);
+  for (const keys of [[matches[0].key, "unknown"], [matches[0].key, matches[0].key]]) {
+    assert.throws(() => annotateOccurrences(blocks, "名字", keys, "みょうじ"), /重新查找/);
+    assert.deepEqual(blocks, snapshot);
+  }
+  assert.throws(() => annotateOccurrences(blocks, "と", [matches[0].key], "と"), /重新查找/);
+  const edited = editPlainText(blocks, "あの名字と名字").blocks;
+  assert.throws(() => annotateOccurrences(edited, "名字", [matches[0].key], "みょうじ"), /重新查找/);
+  assert.throws(() => annotateOccurrences(blocks, "名字", [], "みょうじ"), /勾选/);
+  for (const reading of ["", "  ", null, "みょ\nうじ", "あ".repeat(201)])
+    assert.throws(() => annotateOccurrences(blocks, "名字", [matches[0].key], reading), /读音/);
+  for (const query of ["", "  ", null, "名字\n食", "名字\r食", "あ".repeat(101)])
+    assert.throws(() => findTextOccurrences(blocks, query), /查找/);
+  assert.deepEqual(blocks, snapshot);
+});
+
+test("batch annotations use UTF-16 offsets with intact Unicode context", () => {
+  const blocks = parseText("😀名字.*名字\n𠮷野と😀名字");
+  const matches = findTextOccurrences(blocks, "名字");
+  assert.deepEqual(matches.map((match) => [match.start, match.end]), [[2, 4], [6, 8], [15, 17]]);
+  assert.equal(matches[0].before, "😀");
+  assert.equal(matches[2].before, "𠮷野と😀");
+  assert.equal(matches.every((match) => plainText(blocks).slice(match.start, match.end) === "名字"), true);
+  const emoji = findTextOccurrences(blocks, "😀");
+  const changed = annotateOccurrences(blocks, "😀", [emoji[1].key], "えがお");
+  assert.equal(serializeBlocks(changed), "😀名字.*名字\n𠮷野と{😀|えがお}名字");
+  const longContext = findTextOccurrences(parseText("😀".repeat(20) + "名字" + "𠮷".repeat(20)), "名字")[0];
+  assert.equal(longContext.before, "😀".repeat(12));
+  assert.equal(longContext.after, "𠮷".repeat(12));
 });
