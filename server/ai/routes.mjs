@@ -5,10 +5,27 @@ import { randomUUID } from "node:crypto";
 import multer from "multer";
 import { PROVIDERS, createProviderConnection } from "../providers/index.mjs";
 import { createImageStore } from "./images.mjs";
+import { createMangaOcr } from "../ocr/manga.mjs";
+import { createNdlOcr } from "../ocr/ndl.mjs";
 import {
-  OCR_SCHEMA, OCR_PROMPT, OCR_REASONING_EFFORT, validateOcr, normalizeNewOcrDraft,
+  CORRECTION_SCHEMA,
+  expandOcrCorrection,
+  buildOcrCorrectionPrompt,
+  groupOcrCorrectionRegions,
+  ANNOTATION_SCHEMA,
+  buildOcrAnnotationPrompt,
+  applyOcrAnnotations,
+  ocrAnnotationTargetCount,
+} from "../../shared/ocr-correction.mjs";
+import {
+  OCR_BODY_SCHEMA,
+  expandOcrBody,
+  OCR_TRANSCRIPTION_PROMPT,
+  OCR_REASONING_EFFORT,
+  validateOcr,
+  splitOcrTextSegments,
 } from "../../shared/ocr.mjs";
-import { plainText, serializeBlocks } from "../../shared/document.mjs";
+import { plainText, serializeBlocks, parseText } from "../../shared/document.mjs";
 
 const fail = (status, message) =>
   Object.assign(new Error(message), { status, expose: true });
@@ -20,6 +37,8 @@ export function attachAIRoutes({
   storageDir,
   callbackUri,
   services,
+  mangaOcr = createMangaOcr(),
+  ndlOcr = createNdlOcr(),
 } = {}) {
   const connections = new Map(),
     pendingLogins = new Map(),
@@ -429,29 +448,51 @@ export function attachAIRoutes({
     res.json(publicImage(image));
   });
   app.post("/api/images/:id/recognize", async (req, res) => {
+    const engine = req.body?.engine ?? "llm";
+    if (!["llm", "manga", "ndl"].includes(engine))
+      throw fail(400, "请选择有效的识别方式。");
     const image = await getImage(req.user.id, req.params.id);
     await withProvider(
       req.user.id,
       preferred(req.user.id),
       async (provider) => {
         const { accountId, expectedSubject } = await identity(req, provider);
-        const pixels = await images.read(image.id, {
-          normalizeOrientation: true,
-          revision: image.revision,
-        });
+        const started = performance.now();
+        let localResult;
+        let pixels;
+        if (engine !== "llm") {
+          localResult = await (engine === "ndl" ? ndlOcr : mangaOcr).recognize(image.path);
+        } else {
+          pixels = await images.read(image.id, {
+            normalizeOrientation: true,
+            revision: image.revision,
+          });
+        }
+        const llmStarted = performance.now();
         const result = await provider.runtime.run({
-          prompt: OCR_PROMPT,
+          prompt: localResult ? buildOcrCorrectionPrompt(localResult) : OCR_TRANSCRIPTION_PROMPT,
           reasoningEffort: OCR_REASONING_EFFORT,
-          image: `data:${image.mimeType};base64,${pixels.toString("base64")}`,
-          schema: OCR_SCHEMA,
+          ...(pixels ? { image: `data:${image.mimeType};base64,${pixels.toString("base64")}` } : {}),
+          schema: localResult ? CORRECTION_SCHEMA : OCR_BODY_SCHEMA,
           expectedAccountId: accountId,
           expectedSubject,
         });
+        const llmMs = Math.round(performance.now() - llmStarted);
         if (result.completed !== true)
           throw fail(502, "AI 识别未完成，未保存部分输出。");
+        if ((await getImage(req.user.id, image.id)).revision !== image.revision)
+          throw fail(409, "识别期间原图方向已变化，请按当前方向重新识别。");
         let draft;
         try {
-          draft = normalizeNewOcrDraft(validateOcr(JSON.parse(result.text)));
+          const raw = JSON.parse(result.text);
+          draft = validateOcr(localResult
+            ? expandOcrCorrection(raw, localResult)
+            : expandOcrBody(raw));
+          if (localResult) {
+            draft.warnings.push({ blockIndex: null, message: "本地 OCR 后仅按文字上下文纠正文；AI 未查看原图，请核对专名、漏字与读序。注音另行执行。" });
+            for (const warning of localResult.warnings || [])
+              draft.warnings.push({ blockIndex: null, message: warning });
+          }
         } catch {
           throw fail(502, "AI 返回的识别草稿格式不完整，请重试；原图仍保留。");
         }
@@ -459,7 +500,19 @@ export function attachAIRoutes({
           ...draft,
           sourceOrientation: draft.orientation,
           orientation: "horizontal",
-          readingPolicy: "image_first_context_fallback",
+          readingPolicy: localResult ? "local_ocr_correction_only" : "image_ocr_correction_only",
+          engine,
+          processing: {
+            serverMs: Math.round(performance.now() - started),
+            llmMs,
+            ...(!localResult ? { bodyFormat: "text_only" } : {}),
+            ...(localResult ? {
+              correctionMs: llmMs,
+              correctionFormat: "texts_only",
+              correctionGroups: groupOcrCorrectionRegions(localResult).map((group) => group.regionIndexes),
+              localOcr: localResult,
+            } : {}),
+          },
           content: serializeBlocks(draft.blocks),
           sourceImageId: image.id,
           sourceImage: publicImage(image),
@@ -476,6 +529,89 @@ export function attachAIRoutes({
         res.json(draft);
       },
     );
+  });
+  app.post("/api/images/:id/annotate", async (req, res) => {
+    const image = await getImage(req.user.id, req.params.id);
+    await withProvider(req.user.id, preferred(req.user.id), async (provider) => {
+      const { accountId, expectedSubject } = await identity(req, provider);
+      const row = database.prepare("SELECT draft_json FROM image_drafts WHERE image_id=? AND user_id=?")
+        .get(req.params.id, req.user.id);
+      if (!row) throw fail(400, "请先完成正文识别与校对，再单独生成注音。");
+      const draft = JSON.parse(row.draft_json);
+      const { content, manualReadings = [] } = req.body || {};
+      if (typeof content !== "string" || !content.trim() || content.length > 600000)
+        throw fail(400, "请提供有效的待注音正文。");
+      let blocks;
+      try {
+        const previousBlocks = draft.annotation?.blocks || draft.blocks;
+        blocks = parseText(content, previousBlocks);
+        const previous = new Map(previousBlocks.map((block) => [block.id, block]));
+        blocks = blocks.map((block) => ({ ...block,
+          type: block.type || "paragraph",
+          sourcePage: previous.get(block.id)?.sourcePage || "unknown",
+          confidence: previous.get(block.id)?.confidence || "high",
+          segments: block.segments.flatMap((segment) => segment.reading
+            ? [segment] : splitOcrTextSegments(segment.text)),
+        }));
+        if (!Array.isArray(manualReadings) || manualReadings.length > 20000)
+          throw new Error("手动注音记录无效。");
+        for (const edited of manualReadings) {
+          if (!edited || !Number.isSafeInteger(edited.blockIndex) || edited.blockIndex < 0 ||
+              !Number.isSafeInteger(edited.rubyIndex) || edited.rubyIndex < 0 ||
+              typeof edited.text !== "string" || typeof edited.reading !== "string")
+            throw new Error("手动注音记录无效。");
+          const segment = blocks[edited.blockIndex]?.segments.filter((item) => item.reading)[edited.rubyIndex];
+          if (!segment || segment.text !== edited.text || segment.reading !== edited.reading)
+            throw new Error("手动注音与当前正文不一致，请重试。");
+          segment.origin = "manual";
+        }
+        validateOcr({ title: draft.title, kind: draft.kind, orientation: "horizontal", readingOrder: "保持正文。",
+          blocks: blocks.map(({ type, sourcePage, confidence, segments }) => ({ type, sourcePage, confidence,
+            segments: segments.map((s) => ({ ...s, origin: s.origin === "manual" ? "source" : s.origin })),
+          })), warnings: [], nonBody: [] });
+      } catch (error) {
+        throw fail(400, error.message || "待注音正文格式无效。");
+      }
+      const started = performance.now();
+      let result;
+      if (ocrAnnotationTargetCount(blocks)) {
+        const pixels = await images.read(image.id, {
+          normalizeOrientation: true,
+          revision: image.revision,
+        });
+        result = await provider.runtime.run({
+          prompt: buildOcrAnnotationPrompt(blocks), schema: ANNOTATION_SCHEMA,
+          image: `data:${image.mimeType};base64,${pixels.toString("base64")}`,
+          reasoningEffort: OCR_REASONING_EFFORT,
+          expectedAccountId: accountId, expectedSubject,
+        });
+        if (result.completed !== true) throw fail(502, "注音未完成，正文和已有读音保持原样。");
+        if ((await getImage(req.user.id, image.id)).revision !== image.revision)
+          throw fail(409, "注音期间原图方向已变化，请按当前图片重试；正文和已有读音保持原样。");
+        try {
+          blocks = applyOcrAnnotations(JSON.parse(result.text), blocks);
+        } catch {
+          throw fail(502, "注音结果改动了正文或格式不完整，未应用；请重试注音。");
+        }
+      }
+      const elapsedMs = Math.round(performance.now() - started);
+      const annotation = { blocks, content: serializeBlocks(blocks), elapsedMs,
+        model: result?.model ?? null, reasoningEffort: result?.reasoningEffort ?? null,
+        imageReference: result ? { imageId: image.id, revision: image.revision } : null,
+        readingPolicy: result ? "image_reference" : "existing_only",
+        createdAt: new Date().toISOString(),
+      };
+      const annotated = { ...draft, annotation,
+        processing: { ...draft.processing, annotationMs: elapsedMs },
+      };
+      const changed = database.prepare("UPDATE image_drafts SET draft_json=? WHERE image_id=? AND user_id=? AND draft_json=?")
+        .run(JSON.stringify(annotated), req.params.id, req.user.id, row.draft_json);
+      if (changed.changes !== 1) throw fail(409, "正文草稿已变化，请重新打开当前草稿后再注音。");
+      res.json({ ...annotated, blocks, content: annotation.content,
+        annotationElapsedMs: elapsedMs, annotationModel: annotation.model,
+        annotationReasoningEffort: annotation.reasoningEffort,
+      });
+    });
   });
   app.get("/api/documents/:id/conversations", async (req, res) => {
     getDocument(req.user.id, req.params.id);
@@ -654,6 +790,8 @@ export function attachAIRoutes({
       pendingLogins.clear();
       operations.clear();
       for (const provider of connections.values()) provider.close();
+      mangaOcr.close();
+      ndlOcr.close();
       connections.clear();
     },
   };

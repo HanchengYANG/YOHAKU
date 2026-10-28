@@ -17,7 +17,7 @@ const imagePath = fileURLToPath(
 const callback =
   "/auth/callback?state=ui-test-state&code=ui-test-code&client_id=ui-test-client";
 const ocrText = "僕が生まれた日の空は\n\n背中を撫でる\n用語（原文）\nアキックス：「ここで食べる。」";
-const ocrTypes = ["paragraph", "paragraph", "paragraph", "heading", "list_item"];
+const ocrTypes = Array(5).fill("paragraph");
 
 async function renderedText(locator) {
   return locator.locator(".text-line").evaluateAll((lines) =>
@@ -39,9 +39,9 @@ async function importDraft(page) {
   await openImageImport(page);
   await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(imagePath);
   const reply = page.waitForResponse((res) =>
-    /\/api\/images\/[^/]+\/recognize$/.test(new URL(res.url()).pathname),
+    /\/api\/images\/[^/]+\/annotate$/.test(new URL(res.url()).pathname),
   );
-  await page.getByRole("button", { name: "识别图片", exact: true }).click();
+  await page.getByRole("button", { name: "识别并注音", exact: true }).click();
   const response = await reply;
   expect(response.ok()).toBe(true);
   return response.json();
@@ -106,6 +106,7 @@ async function openImageImport(page) {
   await expect(
     page.getByRole("heading", { name: "导入照片或截图", exact: true }),
   ).toBeVisible();
+  await expect(page.getByLabel("识别方式", { exact: true })).toHaveCount(0);
 }
 
 async function transferImages(page, action, files) {
@@ -322,7 +323,7 @@ test("图片入口支持截图粘贴、拖放及键盘选图，拒绝无效或�
     "01-lyrics-ruby.png",
   );
   await expect(
-    page.getByRole("button", { name: "识别图片", exact: true }),
+    page.getByRole("button", { name: "识别并注音", exact: true }),
   ).toBeEnabled();
   await page.screenshot({
     path: `artifacts/stage2-image-input-${info.project.name}.png`,
@@ -374,7 +375,7 @@ test("上传和识别失败可保留图片重试，忙时不能替换且识别�
     await route.continue();
   });
   try {
-    await page.getByRole("button", { name: "识别图片", exact: true }).click();
+    await page.getByRole("button", { name: "识别并注音", exact: true }).click();
     await expect(page.getByRole("alert")).toContainText("上传暂时失败");
     await expect(
       page.getByAltText("待识别的日语原图", { exact: true }),
@@ -382,7 +383,7 @@ test("上传和识别失败可保留图片重试，忙时不能替换且识别�
     await expect(page.locator(".image-file-details > strong")).toHaveText(
       original.name,
     );
-    await page.getByRole("button", { name: "识别图片", exact: true }).click();
+    await page.getByRole("button", { name: "识别并注音", exact: true }).click();
     await expect(
       page.getByRole("button", { name: "正在上传原图…", exact: true }),
     ).toBeDisabled();
@@ -402,7 +403,7 @@ test("上传和识别失败可保留图片重试，忙时不能替换且识别�
     releaseUpload();
     await expect(
       page.getByRole("button", {
-        name: "正在识别正文与注音…",
+        name: "正在识别正文（1/2）…",
         exact: true,
       }),
     ).toBeDisabled();
@@ -501,6 +502,169 @@ test("授权设置主流程（OAuth 为明确测试替身，不向官方发送�
   await expect(page.getByText("尚未授权", { exact: true })).toBeVisible();
 });
 
+test("自动导入总计时等待正文注音和原图显示，不在模型返回时提前结束", async ({ page }) => {
+  await page.goto("/");
+  await enableTestAccount(page);
+  let releaseImage;
+  const gate = new Promise((resolve) => { releaseImage = resolve; });
+  await page.route(/\/api\/images\/[^/]+\/raw(?:\?.*)?$/, async (route) => {
+    await gate;
+    await route.continue();
+  });
+  try {
+    const result = await importDraft(page);
+    expect(result.annotation).toBeTruthy();
+    await expect(page.getByLabel("日语正文", { exact: true })).toHaveValue(ocrText);
+    await expect(page.locator("[data-import-elapsed-ms]")).toHaveCount(0);
+    await expect(page.locator("[data-annotation-elapsed-ms]")).toHaveCount(0);
+    await expect(page.locator("[data-ocr-elapsed-ms]")).toHaveCount(0);
+  } finally {
+    releaseImage();
+  }
+  await expect(page.locator("[data-import-elapsed-ms]")).toBeVisible();
+  await expect(page.locator("[data-import-elapsed-ms]")).toContainText("上传后识别与注音完成用时");
+  await expect(page.locator("[data-annotation-elapsed-ms]")).toBeVisible();
+});
+
+test("一次点击先识别再自动注音，全部完成后进入校对页且忙时不能替换", async ({ page }) => {
+  await enableTestAccount(page);
+  await openImageImport(page);
+  await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(imagePath);
+  let annotationCount = 0;
+  let releaseAnnotation;
+  let recognitionCompleted = false;
+  const gate = new Promise((resolve) => { releaseAnnotation = resolve; });
+  const recognizedReply = page.waitForResponse((response) => /\/api\/images\/[^/]+\/recognize$/.test(new URL(response.url()).pathname));
+  const annotationReply = page.waitForResponse((response) => /\/api\/images\/[^/]+\/annotate$/.test(new URL(response.url()).pathname));
+  await page.route("**/api/images/*/recognize", async (route) => {
+    expect(annotationCount).toBe(0);
+    const response = await route.fetch();
+    recognitionCompleted = true;
+    await route.fulfill({ response });
+  });
+  await page.route("**/api/images/*/annotate", async (route) => {
+    annotationCount++;
+    expect(recognitionCompleted).toBe(true);
+    const request = route.request().postDataJSON();
+    expect(request.manualReadings).toEqual([]);
+    expect(typeof request.content).toBe("string");
+    await gate;
+    await route.continue();
+  });
+  const observeRecognition = recognizedReply.then(async (response) => {
+    expect(response.ok()).toBe(true);
+    recognitionCompleted = true;
+    return response.json();
+  });
+  await page.getByRole("button", { name: "识别并注音", exact: true }).click();
+  const draft = await observeRecognition;
+  expect(draft.reasoningEffort).toBe("low");
+  expect(draft.processing.bodyFormat).toBe("text_only");
+  expect(draft.blocks.flatMap((block) => block.segments).every((segment) => segment.reading === null && segment.origin === null)).toBe(true);
+  try {
+    await expect.poll(() => annotationCount).toBe(1);
+    await expect(page.getByRole("region", { name: "图片导入", exact: true })).toHaveAttribute("aria-busy", "true");
+    await expect(page.getByLabel("日语正文", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "保存并阅读", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "取消", exact: true })).toBeDisabled();
+    await expect(page.getByLabel("选择日语图片", { exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "点击选择或更换图片", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "正在参考原图注音（2/2）…", exact: true })).toBeDisabled();
+    const bytes = [...(await readFile(imagePath))];
+    await transferImages(page, "paste", [{ name: "注音时不应替换.png", type: "image/png", bytes }]);
+    await expect(page.getByRole("alert")).toContainText("完成后再更换图片");
+    await expect(page.locator(".image-file-details > strong")).toHaveText("01-lyrics-ruby.png");
+  } finally {
+    releaseAnnotation();
+  }
+  const response = await annotationReply;
+  expect(response.ok()).toBe(true);
+  const annotated = await response.json();
+  expect(annotated.annotationReasoningEffort).toBe("low");
+  expect(annotated.annotation.readingPolicy).toBe("image_reference");
+  expect(annotated.annotation.imageReference).toEqual({ imageId: draft.sourceImageId, revision: draft.sourceImage.revision });
+  const segments = annotated.blocks.flatMap((block) => block.segments);
+  expect(segments.filter((segment) => segment.origin === "source")).toHaveLength(0);
+  expect(segments.filter((segment) => segment.origin === "generated")).toHaveLength(7);
+  await expect(page.getByLabel("日语正文", { exact: true })).toHaveValue(ocrText);
+  await expect(page.getByRole("button", { name: "保存并阅读", exact: true })).toBeEnabled();
+  const totalClock = page.locator("[data-import-elapsed-ms]");
+  await expect(totalClock).toBeVisible();
+  await expect(page.locator("[data-annotation-elapsed-ms]")).toBeVisible();
+  await expect(page.locator("[data-ocr-elapsed-ms]")).toHaveCount(0);
+  const elapsed = await totalClock.getAttribute("data-import-elapsed-ms");
+  const annotationElapsed = await page.locator("[data-annotation-elapsed-ms]").getAttribute("data-annotation-elapsed-ms");
+  expect(Number(elapsed)).toBeGreaterThanOrEqual(Number(annotationElapsed));
+  expect(Number(annotationElapsed)).toBeGreaterThan(0);
+  expect(annotationCount).toBe(1);
+  await expect(page.getByRole("button", { name: "生成缺失注音", exact: true })).toHaveCount(0);
+  await page.getByRole("tab", { name: "阅读预览", exact: true }).click();
+  const preview = page.getByRole("region", { name: "阅读预览", exact: true });
+  expect(await renderedText(preview)).toBe(ocrText);
+  await expect(preview.locator('ruby[data-origin="generated"]')).toHaveCount(7);
+  expect(await totalClock.getAttribute("data-import-elapsed-ms")).toBe(elapsed);
+  expect(annotationCount).toBe(1);
+});
+
+test("自动注音失败保留正文，重试只重发注音不重复上传或识别", async ({ page }) => {
+  await enableTestAccount(page);
+  await openImageImport(page);
+  await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(imagePath);
+  let uploads = 0, recognitions = 0, annotations = 0;
+  page.on("request", (request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (request.method() !== "POST") return;
+    if (pathname === "/api/images") uploads++;
+    if (/\/recognize$/.test(pathname)) recognitions++;
+  });
+  await page.route("**/api/images/*/annotate", async (route) => {
+    annotations++;
+    if (annotations === 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "测试故障：注音暂时失败。" }) });
+    return route.continue();
+  });
+  await page.getByRole("button", { name: "识别并注音", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("注音暂时失败");
+  await expect(page.getByRole("alert")).toContainText("正文");
+  await expect(page.getByLabel("日语正文", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "重试注音", exact: true })).toBeEnabled();
+  expect([uploads, recognitions, annotations]).toEqual([1, 1, 1]);
+  await page.getByRole("button", { name: "重试注音", exact: true }).click();
+  await expect(page.getByLabel("日语正文", { exact: true })).toHaveValue(ocrText);
+  await expect(page.locator("[data-import-elapsed-ms]")).toBeVisible();
+  expect([uploads, recognitions, annotations]).toEqual([1, 1, 2]);
+});
+
+test("自动注音失败可先校对正文，手动重试继续保留已完成结果", async ({ page }) => {
+  await enableTestAccount(page);
+  await openImageImport(page);
+  await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(imagePath);
+  let annotations = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && /\/annotate$/.test(new URL(request.url()).pathname)) annotations++;
+  });
+  await page.route("**/api/images/*/annotate", async (route) => {
+    return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "测试故障：注音暂时失败。" }) });
+  });
+  await page.getByRole("button", { name: "识别并注音", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("注音暂时失败");
+  await page.getByRole("button", { name: "先校对正文", exact: true }).click();
+  await expect(page.getByLabel("日语正文", { exact: true })).toHaveValue(ocrText);
+  await expect(page.getByRole("tab", { name: /注音校正/ })).toContainText("0");
+  await expect(page.locator("[data-ocr-elapsed-ms]")).toBeVisible();
+  await expect(page.locator("[data-import-elapsed-ms]")).toHaveCount(0);
+  await page.unroute("**/api/images/*/annotate");
+  const reply = page.waitForResponse((response) => /\/api\/images\/[^/]+\/annotate$/.test(new URL(response.url()).pathname));
+  await page.getByRole("button", { name: "生成缺失注音", exact: true }).click();
+  expect((await reply).ok()).toBe(true);
+  await expect(page.locator("[data-annotation-elapsed-ms]")).toBeVisible();
+  await expect(page.getByLabel("日语正文", { exact: true })).toHaveValue(ocrText);
+  await expect(page.getByText("正文与注音已完成，请一起校对正文和读音后保存。", { exact: true })).toBeVisible();
+  await expect(page.getByText(/正文已完成，注音尚未完成/)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "生成缺失注音", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(annotations).toBe(2);
+});
+
 test("真实图片上传、校对保存与对话重开（OCR 和回答为测试替身）", async ({
   page,
 }, info) => {
@@ -518,7 +682,7 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
   await expect(
     page.getByAltText("待识别的日语原图", { exact: true }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "识别图片", exact: true }).click();
+  await page.getByRole("button", { name: "识别并注音", exact: true }).click();
   const original = page.getByRole("region", { name: "原图对照", exact: true });
   await expect(original).toBeVisible();
   const originalImage = original.getByAltText("用于校对正文和注音的日语原图", {
@@ -535,28 +699,19 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
   const raw = await page.request.get(imageUrl);
   expect(raw.ok()).toBe(true);
   expect(await raw.body()).toEqual(await readFile(imagePath));
-  await expect(
-    page
-      .getByRole("listitem")
-      .filter({ hasText: "此识别结果来自浏览器测试替身，不是真实 OCR。" }),
-  ).toBeVisible();
-  const nonBody = page.locator("details.ocr-nonbody-list");
-  await expect(nonBody).toHaveJSProperty("open", false);
-  await nonBody.locator(":scope > summary").click();
-  await expect(
-    page.getByText("测试替身：绿色手写批注", { exact: true }),
-  ).toBeVisible();
-  await nonBody.locator(":scope > summary").click();
+  await expect(page.locator("details.ocr-nonbody-list")).toHaveCount(0);
   await page.screenshot({
     path: `artifacts/stage2-original-test-double-${info.project.name}.png`,
     fullPage: true,
     animations: "disabled",
   });
+  await expect(page.locator("[data-import-elapsed-ms]")).toBeVisible();
+  await expect(page.locator("[data-annotation-elapsed-ms]")).toBeVisible();
   await page.getByRole("tab", { name: "阅读预览", exact: true }).click();
   const preview = page.getByRole("region", { name: "阅读预览", exact: true });
   await expect(preview.locator(".japanese-text")).toHaveCSS("writing-mode", "horizontal-tb");
-  await expect(preview.locator("h2.text-heading")).toHaveText("用語（原文）");
-  await expect(preview.locator("ul.ruby-text-list > li.text-line")).toHaveCount(1);
+  await expect(preview.locator("h2.text-heading")).toHaveCount(0);
+  await expect(preview.locator("ul.ruby-text-list > li.text-line")).toHaveCount(0);
   expect(await renderedText(preview)).toBe(ocrText);
   await expect(preview.locator("rt")).toHaveText([
     "ぼく",
@@ -567,8 +722,8 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
     "な",
     "た",
   ]);
-  await expect(preview.locator('ruby[data-origin="source"]')).toHaveCount(3);
-  await expect(preview.locator('ruby[data-origin="generated"]')).toHaveCount(4);
+  await expect(preview.locator('ruby[data-origin="source"]')).toHaveCount(0);
+  await expect(preview.locator('ruby[data-origin="generated"]')).toHaveCount(7);
   await expect(
     preview.locator("rt").filter({ hasText: "あきっくす" }),
   ).toHaveCount(0);
@@ -587,7 +742,7 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
       exact: true,
     }),
   });
-  await expect(sourceRow.getByText("原有", { exact: true })).toBeVisible();
+  await expect(sourceRow.getByText("AI 注音", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("textbox", {
       name: "アキックス的读音（第5行）",
@@ -608,7 +763,7 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
   await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
   await expect(
     page.getByRole("heading", {
-      name: "界面测试草稿（OCR 为测试替身）",
+      name: "僕が生まれた日の空は",
       exact: true,
     }),
   ).toBeVisible();
@@ -618,7 +773,7 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
   ).json();
   expect(saved.sourceImageId).toBeTruthy();
   expect(saved.orientation).toBe("horizontal");
-  expect(saved.recognition.sourceOrientation).toBe("vertical");
+  expect(saved.recognition.sourceOrientation).toBe("horizontal");
   expect(saved.recognition.orientation).toBe("horizontal");
   expect(saved.blocks.map((block) => block.type)).toEqual(ocrTypes);
   expect(saved.recognition.blocks.map((block) => block.type)).toEqual(ocrTypes);
@@ -627,30 +782,30 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
     "manual",
   );
   expect(saved.blocks[0].segments.find((s) => s.text === "僕").origin).toBe(
-    "source",
+    "generated",
   );
-  expect(saved.blocks[0].segments.find((s) => s.text === "生まれた")).toEqual({
+  expect(saved.recognition.annotation.blocks[0].segments.find((s) => s.text === "生まれた")).toEqual({
     text: "生まれた",
     reading: "うまれた",
     origin: "generated",
   });
-  expect(saved.blocks[2].segments.find((s) => s.text === "撫でる")).toEqual({
+  expect(saved.recognition.annotation.blocks[2].segments.find((s) => s.text === "撫でる")).toEqual({
     text: "撫でる",
     reading: "なでる",
     origin: "generated",
   });
-  expect(saved.recognition.nonBody.some((n) => n.type === "handwriting")).toBe(
-    true,
-  );
-  expect(saved.recognition.readingPolicy).toBe("image_first_context_fallback");
-  expect(
-    saved.recognition.blocks[4].segments.find((s) => s.text === "アキックス"),
-  ).toEqual({ text: "アキックス", reading: null, origin: null });
+  expect(saved.blocks.flatMap((block) => block.segments).filter((segment) => segment.origin === "generated")).toHaveLength(6);
+  expect(saved.recognition.blocks.flatMap((block) => block.segments).filter((segment) => segment.origin === "generated")).toHaveLength(0);
+  expect(saved.recognition.nonBody).toEqual([]);
+  expect(saved.recognition.readingPolicy).toBe("image_ocr_correction_only");
+  expect(saved.recognition.blocks[4].segments.some((segment) =>
+    segment.text.includes("アキックス") && segment.reading === null && segment.origin === null,
+  )).toBe(true);
   expect(saved.content).not.toContain("{アキックス|");
   await page.reload();
   const article = page.getByRole("article", { name: "日语原文", exact: true });
-  await expect(article.locator("h2.text-heading")).toHaveText("用語（原文）");
-  await expect(article.locator("ul.ruby-text-list > li.text-line")).toHaveCount(1);
+  await expect(article.locator("h2.text-heading")).toHaveCount(0);
+  await expect(article.locator("ul.ruby-text-list > li.text-line")).toHaveCount(0);
   await expect(article.locator(".japanese-text")).toHaveCSS("writing-mode", "horizontal-tb");
   expect(await renderedText(article)).toBe(ocrText);
   await page.locator(".reader-recognition-details > summary").click();
@@ -690,7 +845,7 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
           exact: true,
         }),
       })
-      .getByText("原有", { exact: true }),
+      .getByText("AI 注音", { exact: true }),
   ).toBeVisible();
   await checkOriginalPreview(page, info.project.name);
   let previewDialogs = 0;

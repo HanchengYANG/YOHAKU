@@ -1,0 +1,1 @@
+ndlocr-lite @ git+https://github.com/ndl-lab/ndlocr-lite.git@e57f7c6bd9cfb3de5f12f008e71ad2122bd44bfd

@@ -52,6 +52,15 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
   );
   const [imageError, setImageError] = useState(false);
   const [imageSize, setImageSize] = useState(null);
+  const [loadedImageUrl, setLoadedImageUrl] = useState(null);
+  const [importElapsedMs, setImportElapsedMs] = useState(null);
+  const [annotating, setAnnotating] = useState(false);
+  const [annotationCompleted, setAnnotationCompleted] = useState(
+    initial.autoAnnotationCompleted === true,
+  );
+  const [annotationError, setAnnotationError] = useState(initial.annotationError || "");
+  const [annotationElapsedMs, setAnnotationElapsedMs] = useState(null);
+  const [annotationPaint, setAnnotationPaint] = useState(null);
   const [imageRotation, setImageRotation] = useState(0);
   const [imageZoom, setImageZoom] = useState(100);
   const [imageMetadata, setImageMetadata] = useState(null);
@@ -65,11 +74,59 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
   const metadataRequest = useRef(0);
   const rotationRequest = useRef(null);
   const submitLock = useRef(false);
-  const busy = saving || imageSaving || submitting;
+  const annotationRequest = useRef(null);
+  const busy = saving || imageSaving || submitting || annotating;
   const imageSideways = imageRotation % 2 === 1;
   const imageUrl = sourceImageId
     ? `/api/images/${encodeURIComponent(sourceImageId)}/raw${imageMetadata ? `?revision=${imageMetadata.revision}` : ""}`
     : null;
+  useEffect(() => {
+    if (!Number.isFinite(initial.importStartedAt) || importElapsedMs !== null ||
+        imageMetadataLoading || imageMetadataError || imageError || !imageSize || loadedImageUrl !== imageUrl) return;
+    let second;
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => {
+        const completedAt = performance.now();
+        const elapsedMs = Math.round(completedAt - initial.importStartedAt);
+        const automatic = initial.autoAnnotationCompleted === true;
+        const eventName = automatic ? "yohaku:import-page-ready" : "yohaku:ocr-page-ready";
+        performance.mark(eventName);
+        setImportElapsedMs(elapsedMs);
+        if (automatic && Number.isFinite(initial.annotationStartedAt)) {
+          const annotationMs = Math.round(completedAt - initial.annotationStartedAt);
+          setAnnotationElapsedMs(annotationMs);
+          window.dispatchEvent(new CustomEvent("yohaku:annotation-page-ready", {
+            detail: { elapsedMs: annotationMs, sourceImageId, stage: "annotation" },
+          }));
+        }
+        window.dispatchEvent(new CustomEvent(eventName, {
+          detail: { elapsedMs, engine: initial.engine || "llm", sourceImageId,
+            stage: automatic ? "complete" : "body" },
+        }));
+      });
+    });
+    return () => { cancelAnimationFrame(first); cancelAnimationFrame(second); };
+  }, [initial.importStartedAt, initial.annotationStartedAt, initial.autoAnnotationCompleted,
+    importElapsedMs, imageMetadataLoading, imageMetadataError, imageError, imageSize, loadedImageUrl, imageUrl]);
+  useEffect(() => () => annotationRequest.current?.abort(), []);
+  useEffect(() => {
+    if (!annotationPaint) return;
+    let second;
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => {
+        const elapsedMs = Math.round(performance.now() - annotationPaint.startedAt);
+        setAnnotationElapsedMs(elapsedMs);
+        setAnnotationPaint(null);
+        setAnnotating(false);
+        setAnnotationCompleted(true);
+        annotationRequest.current = null;
+        window.dispatchEvent(new CustomEvent("yohaku:annotation-page-ready", {
+          detail: { elapsedMs, sourceImageId, stage: "annotation" },
+        }));
+      });
+    });
+    return () => { cancelAnimationFrame(first); cancelAnimationFrame(second); };
+  }, [annotationPaint, sourceImageId]);
   useEffect(() => {
     onDirty(contentDirty || imageRotation !== 0);
   }, [contentDirty, imageRotation, onDirty]);
@@ -164,6 +221,9 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
   const readingInput = useRef(null);
   const body = plainText(blocks);
   const counts = stats(blocks);
+  const hasMissingReadings = blocks.some((block) => block.segments.some(
+    (segment) => !segment.reading && /\p{Script=Han}/u.test(segment.text),
+  ));
   const batchResults = useMemo(
     () => (batchSearch ? findTextOccurrences(blocks, batchSearch.query) : []),
     [blocks, batchSearch],
@@ -192,6 +252,58 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
     setBatchSearch((old) => old && { query: old.query, blocks: next });
     if (!preserveActive) setActiveRange(null);
     setContentDirty(true);
+  };
+  const generateMissingReadings = async () => {
+    if (busy || submitLock.current || annotationRequest.current || !sourceImageId || initial.id || !body.trim()) return;
+    const controller = new AbortController();
+    annotationRequest.current = controller;
+    const currentContent = serializeBlocks(blocks);
+    const currentBody = plainText(blocks);
+    const manualReadings = blocks.flatMap((block, blockIndex) =>
+      block.segments.filter((segment) => segment.reading).flatMap((segment, rubyIndex) =>
+        segment.origin === "manual"
+          ? [{ blockIndex, rubyIndex, text: segment.text, reading: segment.reading }]
+          : [],
+      ),
+    );
+    const startedAt = performance.now();
+    setAnnotating(true);
+    setAnnotationError("");
+    setAnnotationElapsedMs(null);
+    let awaitingPaint = false;
+    try {
+      const result = await api(`/images/${encodeURIComponent(sourceImageId)}/annotate`, {
+        method: "POST",
+        body: JSON.stringify({ content: currentContent, manualReadings }),
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (!Array.isArray(result?.blocks) || plainText(result.blocks) !== currentBody)
+        throw new Error("注音结果改变了正文，已拒绝应用；当前正文保留，可重试。");
+      const content = serializeBlocks(result.blocks);
+      updateBlocks(result.blocks);
+      setValue((old) => ({
+        ...old,
+        content,
+        blocks: result.blocks,
+        annotationModel: result.annotationModel,
+        annotationReasoningEffort: result.annotationReasoningEffort,
+        annotationElapsedMs: result.annotationElapsedMs,
+      }));
+      setMessage("");
+      setAnnotationPaint({ startedAt });
+      awaitingPaint = true;
+    } catch (error) {
+      if (!controller.signal.aborted)
+        setAnnotationError(error instanceof TypeError
+          ? "无法连接本机服务，当前正文保留，请重试生成注音。"
+          : error.message);
+    } finally {
+      if (!awaitingPaint && annotationRequest.current === controller) {
+        annotationRequest.current = null;
+        if (!controller.signal.aborted) setAnnotating(false);
+      }
+    }
   };
   const findBatch = (query = batchTerm) => {
     const term = query.trim();
@@ -283,9 +395,10 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
   return (
     <form
       className="editor-page"
+      aria-busy={busy}
       onSubmit={async (e) => {
         e.preventDefault();
-        if (incompleteRuby || busy || submitLock.current) return;
+        if (incompleteRuby || busy || submitLock.current || annotationRequest.current) return;
         submitLock.current = true;
         setSubmitting(true);
         try {
@@ -332,7 +445,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
             <button
               type="button"
               className="button subtle"
-              onClick={onCancel}
+              onClick={() => { if (!annotationRequest.current) onCancel(); }}
               disabled={busy}
             >
               取消
@@ -345,7 +458,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
               }
             >
               <Icon name="check" size={17} />
-              {busy ? "正在保存…" : "保存并阅读"}
+              {annotating ? "正在生成注音…" : busy ? "正在保存…" : "保存并阅读"}
             </button>
           </div>
         </div>
@@ -385,6 +498,36 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
             <p>
               检查正文、分行、阅读顺序和读音后再保存。右侧可以切换原图与阅读预览。
             </p>
+            {importElapsedMs !== null && (
+              <p role="status"
+                data-import-elapsed-ms={initial.autoAnnotationCompleted ? importElapsedMs : undefined}
+                data-ocr-elapsed-ms={!initial.autoAnnotationCompleted ? importElapsedMs : undefined}>
+                {initial.autoAnnotationCompleted ? "上传后识别与注音完成用时" : "上传后正文完成用时"}{" "}
+                {(importElapsedMs / 1000).toFixed(2)} 秒
+              </p>
+            )}
+            {!initial.id && (
+              <div className="ocr-annotation-task">
+                <p>{annotationCompleted
+                  ? "正文与注音已完成，请一起校对正文和读音后保存。"
+                  : "正文已完成，注音尚未完成；可重试生成注音，正文和已有读音保持不变。"}</p>
+                {(!annotationCompleted || hasMissingReadings || annotating) && (
+                  <button type="button" className="button secondary"
+                    disabled={busy || !body.trim() || incompleteRuby}
+                    onClick={generateMissingReadings}>
+                    {annotating ? "正在生成缺失注音…"
+                      : annotationCompleted ? "补全缺失注音" : "生成缺失注音"}
+                  </button>
+                )}
+                {annotating && <p role="status">正在参考原图生成缺失注音，正文保持不变。</p>}
+                {annotationError && <p role="alert">{annotationError}</p>}
+                {annotationElapsedMs !== null && (
+                  <p role="status" data-annotation-elapsed-ms={annotationElapsedMs}>
+                    注音完成用时 {(annotationElapsedMs / 1000).toFixed(2)} 秒
+                  </p>
+                )}
+              </div>
+            )}
             <details className="ocr-review-details" open={warnings.length > 0}>
               <summary>
                 识别记录
@@ -443,8 +586,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
               )}
               {!warnings.length && !nonBody.length && (
                 <p className="ocr-history-hint">
-                  识别未单独标出疑点，仍请检查正文、原图注音和 AI
-                  补充的读音，特别留意人名与特殊读法。
+                  仍请对照原图检查正文和读音，特别留意人名与特殊读法。
                 </p>
               )}
             </details>
@@ -929,10 +1071,17 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                               : "100%",
                           transform: `translate(-50%, -50%) rotate(${-imageRotation * 90}deg)`,
                         }}
-                        onLoad={(event) => {
-                          const { naturalWidth: width, naturalHeight: height } =
-                            event.currentTarget;
-                          if (width && height) setImageSize({ width, height });
+                        onLoad={async (event) => {
+                          const element = event.currentTarget;
+                          try {
+                            await element.decode();
+                            if (!element.isConnected) return;
+                            setLoadedImageUrl(element.getAttribute("src"));
+                            const { naturalWidth: width, naturalHeight: height } = element;
+                            if (width && height) setImageSize({ width, height });
+                          } catch {
+                            if (element.isConnected) setImageError(true);
+                          }
                         }}
                         onError={() => setImageError(true)}
                       />

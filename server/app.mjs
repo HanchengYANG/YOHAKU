@@ -159,6 +159,8 @@ export function createApp({
   dataDir = join(rootDir, "data"),
   callbackUri = `http://127.0.0.1:${process.env.PORT || 4317}/auth/callback`,
   aiServices,
+  mangaOcr,
+  ndlOcr,
 } = {}) {
   const storageDir = resolve(dataDir);
   mkdirSync(storageDir, { recursive: true, mode: 0o700 });
@@ -268,6 +270,8 @@ export function createApp({
     storageDir,
     callbackUri,
     services: aiServices,
+    mangaOcr,
+    ndlOcr,
   });
 
   app.get("/api/health", async (req, res) => {
@@ -328,7 +332,7 @@ export function createApp({
     }
     const blocks = parseContent(
       input.content,
-      recognition?.blocks || [],
+      recognition?.annotation?.blocks || recognition?.blocks || [],
       req.body.manualReadings,
     );
     const id = randomUUID();

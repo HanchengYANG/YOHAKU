@@ -26,11 +26,21 @@ server/providers/openai/auth.mjs   本应用的 SIWC OAuth 与刷新
 server/providers/openai/runtime.mjs Codex stdio、会话恢复、最终结果校验
 server/ai/routes.mjs               图片与讨论业务，选择当前用户的 provider
 server/ai/images.mjs               受限图片解码及原图持久存储
-shared/ocr.mjs                    业务 OCR Schema、识别提示、验证
+shared/ocr.mjs                    纯正文Schema、OCR／纠错提示、历史OCR兼容与验证
+shared/ocr-correction.mjs         本地文字纠错、缺失读音Schema、提示与逐字校验
+server/ocr/manga.mjs              持久Python进程、JSONL协议与请求生命周期
+server/ocr/manga-worker.py        mokuro自动分区与MangaOCR本地识别
+server/ocr/ndl.mjs                NDLOCR-Lite解释器与共用JSONL进程配置
+server/ocr/ndl-worker.py          国会图书馆布局、文字识别与读序适配
+server/ocr/line_preprocess.py     横排行的自动几何估计与原RGB重采样
 shared/ruby-display.mjs           整词读音对齐与汉字部分显示
 ```
 
 应用只通过 connection 的 `auth`、`runtime.run`、`runtime.status` 和 `close` 接口使用提供方。OCR 的正文／注音结构和阅读界面不依赖某个厂商的 RPC 协议。OpenAI 的 OAuth、Codex 协议及模型目录处理留在其 adapter 内。
+
+正文纠错与注音使用两个独立Schema和请求：`ImageImport`一次点击后顺序调用`/images/:id/recognize`及`/images/:id/annotate`，两步完成再交给Editor。失败时缓存已上传图片和已完成正文，重试仅续失败阶段；最终页面总计时等待原图metadata／解码和双rAF。注音仍严格核对逐字相同并保护已有来源。`image_drafts.blocks`保留初始识别／正文纠错输出，第二阶段另存`annotation.blocks`和自己的计时、模型、等级；保存材料时用注音阶段作为来源锚点，原识别记录不被人工校对或新增注音改写。
+
+当前图片导入固定走纯LLM：第一阶段使用`OCR_BODY_SCHEMA`，模型只返回`{text}`，由程序展开为无读音草稿；第二阶段同时传已确认正文和本人原图的方向规范化像素，图片仅供参考读音，使用稀疏`blocks/words`返回含汉字词的`t/r`，原假名／标点／空白由程序回填。依序定位不得跳过任何未覆盖汉字，未知词也必须返回null，以防重复同形词错位。图片版本在推理后再次核对，记录`annotation.imageReference`；参考图片不等于逐词证实source，新增仍为generated。最终正文、来源与读音保护由程序执行。历史`OCR_SCHEMA`和本地OCR接口保留兼容，当前UI不再选择本地引擎。
 
 注册表目前只有 OpenAI 启用，认证方式是 `chatgpt_subscription`。`claude` 和 `api_base` 只保留不可用的注册项与空认证方式，界面禁用，调用返回 501；没有客户端、密钥输入、外部请求或计费接入。
 
@@ -42,9 +52,9 @@ shared/ruby-display.mjs           整词读音对齐与汉字部分显示
 - Codex 历史：上述提供方目录下的 `runtime/`，再按外部账号区分。
 - 所有真实学习数据、授权和备份都被 Git 忽略。
 
-正文块的可选`type`仅允许paragraph、heading和list_item；旧无类型块按段落显示。模型只整理原文的结构与空白，字词和标点仍为纯文字；页面用受控标签呈现，Markdown导出保留标题与条目，不执行模型HTML。阅读与编辑统一横排，来源方向另存于识别记录。
+正文块的可选`type`仅允许paragraph、heading和list_item；旧无类型块按段落显示。页面用受控标签呈现，Markdown导出保留既有标题与条目，不执行模型HTML。当前纯正文识别按换行展开paragraph，来源页为unknown、nonBody为空，不恢复原图方向、页边界或标题／列表语义；历史结构化识别信息仍保留。阅读与编辑统一横排。
 
-新识别优先保留清晰印刷注音为source，缺失或模糊才按语境补为generated；新草稿过滤不含汉字片段的冗余读音，历史记录不迁移。存储与校对使用完整词读音；阅读和Markdown导出按正文假名对齐，只在汉字上显示对应小假名。不能可靠对齐时不猜分，完整读音保留于悬停提示和校对条目，原文与整词记录保持。
+当前注音优先参考清晰印刷读音，缺失或模糊才按语境补全；由于稀疏注音结果不返回逐词来源证据，新增读音统一generated。已有source／generated／manual保持，历史记录不迁移。通用解析器继续兼容历史数字source，并过滤新草稿不含汉字片段的冗余读音。存储与校对使用完整词读音；阅读和Markdown导出按正文假名对齐，只在汉字上显示对应小假名。不能可靠对齐时不猜分，完整读音保留于悬停提示和校对条目，原文与整词记录保持。
 
 初次创建站内账号时，旧本机资料归初始管理员。这与管理员创建处于同一数据库事务，失败会整体回滚。此前在本应用完成的 SIWC 授权留在旧目录，只有初始账号可以明确点击「绑定刚才的 ChatGPT 授权」认领；认领保留原注册、主机 ID 和历史，并形成持久外部身份绑定，不默认共享给朋友。
 

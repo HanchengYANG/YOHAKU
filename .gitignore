@@ -1,4 +1,9 @@
 node_modules/
+.venv-mangaocr/
+.venv-ndlocr/
+__pycache__/
+# Additional personal photo samples stay local.
+/fixtures/images/Image_*.jpg
 dist/
 data/
 artifacts/

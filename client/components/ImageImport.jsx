@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { plainText } from "../../shared/document.mjs";
 import api from "../api.mjs";
 import Icon from "./Icon.jsx";
 
@@ -10,11 +11,13 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
   const [preview, setPreview] = useState("");
   const [previewError, setPreviewError] = useState(false);
   const [image, setImage] = useState(null);
+  const [recognizedDraft, setRecognizedDraft] = useState(null);
   const [phase, setPhase] = useState("");
   const [error, setError] = useState("");
   const [dragActive, setDragActive] = useState(false);
   const fileInput = useRef(null);
   const pending = useRef(null);
+  const importStartedAt = useRef(null);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -40,7 +43,7 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
       const files = Array.from(fileList || []);
       if (!files.length) return;
       if (pending.current) {
-        setError("正在上传或识别，请完成后再更换图片。");
+        setError("正在处理图片，请完成后再更换图片。");
         return false;
       }
       if (files.length !== 1) {
@@ -59,6 +62,8 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
       setError("");
       setFile(selected);
       setImage(null);
+      setRecognizedDraft(null);
+      importStartedAt.current = null;
       setPreviewError(false);
       onDirty?.(true);
       if (fileInput.current && !fromPicker) fileInput.current.value = "";
@@ -104,6 +109,7 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
     pending.current = controller;
     setError("");
     let uploaded = image;
+    let draft = recognizedDraft;
     try {
       if (!uploaded) {
         setPhase("upload");
@@ -130,19 +136,39 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
         uploaded = result;
         if (mounted.current) setImage(uploaded);
       }
-      if (controller.signal.aborted) return;
-      setPhase("recognize");
-      const draft = await api(
-        `/images/${encodeURIComponent(uploaded.id)}/recognize`,
-        {
-          method: "POST",
-          body: "{}",
-          signal: controller.signal,
-        },
-      );
+      if (!mounted.current || controller.signal.aborted) return;
+      if (importStartedAt.current === null) {
+        importStartedAt.current = performance.now();
+        performance.mark("yohaku:ocr-upload-complete");
+      }
+      if (!draft) {
+        setPhase("recognize");
+        draft = await api(
+          `/images/${encodeURIComponent(uploaded.id)}/recognize`,
+          {
+            method: "POST",
+            body: JSON.stringify({ engine: "llm" }),
+            signal: controller.signal,
+          },
+        );
+        if (!mounted.current || controller.signal.aborted) return;
+        setRecognizedDraft(draft);
+      }
+      setPhase("annotate");
+      const annotationStartedAt = performance.now();
+      const annotated = await api(`/images/${encodeURIComponent(uploaded.id)}/annotate`, {
+        method: "POST",
+        body: JSON.stringify({ content: draft.content, manualReadings: [] }),
+        signal: controller.signal,
+      });
+      if (!mounted.current || controller.signal.aborted) return;
+      if (!Array.isArray(annotated?.blocks) || plainText(annotated.blocks) !== plainText(draft.blocks))
+        throw new Error("注音结果改变了正文，已拒绝应用；已完成的正文保留，请重试注音。");
       if (mounted.current) {
         onDirty?.(false);
-        onReady({ ...draft, sourceImageId: uploaded.id });
+        onReady({ ...annotated, sourceImageId: uploaded.id,
+          importStartedAt: importStartedAt.current, annotationStartedAt,
+          autoAnnotationCompleted: true });
       }
     } catch (e) {
       if (mounted.current && e.name !== "AbortError")
@@ -155,6 +181,14 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
       if (pending.current === controller) pending.current = null;
       if (mounted.current) setPhase("");
     }
+  };
+
+  const reviewBody = () => {
+    if (pending.current || !recognizedDraft || !image) return;
+    onDirty?.(false);
+    onReady({ ...recognizedDraft, sourceImageId: image.id,
+      importStartedAt: importStartedAt.current, autoAnnotationCompleted: false,
+      annotationError: error });
   };
 
   const busy = !!phase;
@@ -186,12 +220,14 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
         </button>
       </div>
       <p className="stage2-description">
-        截图可直接粘贴，也可拖入图片或从设备选择照片。识别后先对照原图校对，再保存到书架。
+        截图可直接粘贴，也可拖入图片或从设备选择照片。识别与注音会自动连续完成，再对照原图校对并保存到书架。
       </p>
       {error && (
         <div className="stage2-error" role="alert">
           {error}
-          {image ? (
+          {recognizedDraft ? (
+            <p>正文已完成并保留，重试只继续注音，不会重新上传或识别。</p>
+          ) : image ? (
             <p>原图已上传，重试会继续使用这张图片。</p>
           ) : (
             file && <p>所选图片已保留，无需重新选择。</p>
@@ -261,10 +297,8 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
             </div>
           )}
           <div className="image-recognition-note">
-            <p>
-              优先保留原图中清晰的注音；缺失或不清晰的读音，由 AI 按语境补充。
-            </p>
-            <p>纯假名不重复注音。手写批注和页码单独整理，识别后可逐项校正。</p>
+            <p>一次点击，自动识别并纠正正文，再参考原图生成含汉字完整词的假名。</p>
+            <p>完成后可一起校对正文和读音。小注音、页码和手写批注不混入正文。</p>
             <p>
               照片的阴影、弯曲、反光和模糊可能影响正文识别，请在下一步确认。
             </p>
@@ -279,15 +313,26 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
             {phase === "upload"
               ? "正在上传原图…"
               : phase === "recognize"
-                ? "正在识别正文与注音…"
-                : image
-                  ? "重试识别"
-                  : "识别图片"}
+                ? "正在识别正文（1/2）…"
+                : phase === "annotate"
+                  ? "正在参考原图注音（2/2）…"
+                  : recognizedDraft
+                    ? "重试注音"
+                    : image
+                      ? "重试识别"
+                      : "识别并注音"}
           </button>
+          {recognizedDraft && error && !busy && (
+            <button type="button" className="button subtle" onClick={reviewBody}>
+              先校对正文
+            </button>
+          )}
           <p className="image-recognition-state" role="status">
             {phase === "recognize"
-              ? "正在识别正文和清晰注音，并按语境补充缺失读音。完成后会打开可编辑的校对草稿。"
-              : "此步骤不会自动把识别结果存为最终原文。"}
+              ? "正在识别并校正正文，随后会自动开始参考原图注音。"
+              : phase === "annotate"
+                ? "正文已完成，正在参考原图生成注音；两步完成后打开校对草稿。"
+                : "识别与注音完成后进入校对草稿，不会自动保存为最终原文。"}
           </p>
         </div>
       </div>

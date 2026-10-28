@@ -5,6 +5,8 @@ import { rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 import { createApp } from "../../server/app.mjs";
+import { ANNOTATION_SCHEMA } from "../../shared/ocr-correction.mjs";
+import { OCR_BODY_SCHEMA } from "../../shared/ocr.mjs";
 
 const dataDir = fileURLToPath(
   new URL("../../artifacts/ai-e2e-data/", import.meta.url),
@@ -71,69 +73,24 @@ const auth = {
   },
 };
 
-const ocrDouble = {
-  title: "界面测试草稿（OCR 为测试替身）",
-  kind: "article",
-  orientation: "vertical",
-  readingOrder: "测试替身：来源竖排，原文整理为段落与学习条目，不代表真实 OCR 结论。",
-  blocks: [
-    {
-      type: "paragraph",
-      confidence: "high",
-      sourcePage: "single",
-      segments: [
-        { text: "僕", reading: "ぼく", origin: "source" },
-        { text: "が", reading: null, origin: null },
-        { text: "生まれた", reading: "うまれた", origin: "generated" },
-        { text: "日", reading: "ひ", origin: "source" },
-        { text: "の", reading: null, origin: null },
-        { text: "空", reading: "そら", origin: "generated" },
-        { text: "は", reading: null, origin: null },
-      ],
-    },
-    { type: "paragraph", confidence: "high", sourcePage: "single", segments: [] },
-    {
-      type: "paragraph",
-      confidence: "uncertain",
-      sourcePage: "single",
-      segments: [
-        { text: "背中", reading: "せなか", origin: "source" },
-        { text: "を", reading: null, origin: null },
-        { text: "撫でる", reading: "なでる", origin: "generated" },
-      ],
-    },
-    {
-      type: "heading",
-      confidence: "high",
-      sourcePage: "single",
-      segments: [{ text: "用語（原文）", reading: null, origin: null }],
-    },
-    {
-      type: "list_item",
-      confidence: "high",
-      sourcePage: "single",
-      segments: [
-        // Deliberately redundant model output: the real new-draft normalizer
-        // must remove kana-only readings before the UI or database sees them.
-        { text: "アキックス", reading: "あきっくす", origin: "generated" },
-        { text: "：「ここで", reading: null, origin: null },
-        { text: "食べる", reading: "たべる", origin: "generated" },
-        { text: "。」", reading: null, origin: null },
-      ],
-    },
-  ],
-  warnings: [
-    { blockIndex: 2, message: "测试替身：请对照原图核对这一行。" },
-    {
-      blockIndex: null,
-      message: "此识别结果来自浏览器测试替身，不是真实 OCR。",
-    },
-  ],
-  nonBody: [
-    { type: "handwriting", text: "测试替身：绿色手写批注", page: "single" },
-    { type: "page_number", text: "62", page: "single" },
-  ],
-};
+// The body reply contains only text; annotation is returned separately.
+const ocrText = "僕が生まれた日の空は\n\n背中を撫でる\n用語（原文）\nアキックス：「ここで食べる。」";
+
+function annotationWords(text) {
+  const readings = { 僕: "ぼく", 生まれた: "うまれた", 日: "ひ", 空: "そら", 背中: "せなか", 撫でる: "なでる", 食べる: "たべる" };
+  const words = [];
+  let cursor = 0;
+  const unknown = (gap) => {
+    for (const match of gap.matchAll(/\p{Script=Han}+/gu)) words.push({ t: match[0], r: null });
+  };
+  for (const match of text.matchAll(/僕|生まれた|日|空|背中|撫でる|食べる/g)) {
+    unknown(text.slice(cursor, match.index));
+    words.push({ t: match[0], r: readings[match[0]] });
+    cursor = match.index + match[0].length;
+  }
+  unknown(text.slice(cursor));
+  return words;
+}
 
 const runtime = {
   status() {
@@ -142,12 +99,29 @@ const runtime = {
   stop() {
     busy = false;
   },
-  async run({ schema, image, prompt, threadId }) {
+  async run({ schema, image, prompt, threadId, reasoningEffort }) {
     if (!connected) throw new Error("测试账户尚未连接。");
     busy = true;
     try {
       const id = threadId || `ui-test-thread-${randomUUID()}`;
+      if (schema === ANNOTATION_SCHEMA) {
+        if (typeof image !== "string" || !/^data:image\/(png|jpeg|webp);base64,/.test(image))
+          throw new Error("独立注音未收到参考原图。");
+        const referencePixels = Buffer.from(image.slice(image.indexOf(",") + 1), "base64");
+        const referenceMetadata = await sharp(referencePixels).metadata();
+        if (!referenceMetadata.width || !referenceMetadata.height || referenceMetadata.orientation !== undefined)
+          throw new Error("注音参考原图未正确解码或按EXIF转正。");
+        const targets = JSON.parse(prompt.split("输入目标：\n").at(-1));
+        return {
+          completed: true,
+          text: JSON.stringify({ blocks: targets.map(({ text }) => ({ words: annotationWords(text) })) }),
+          model: "UI-TEST-DOUBLE",
+          threadId: id,
+          reasoningEffort: reasoningEffort ?? null,
+        };
+      }
       if (schema) {
+        if (schema !== OCR_BODY_SCHEMA) throw new Error("正文测试替身仅接受纯文字Schema。");
         // Upload parsing, byte validation, orientation handling, and SQLite are
         // the real production implementations. Only the model output is fixed.
         if (
@@ -165,9 +139,10 @@ const runtime = {
           throw new Error("真实图片无法读取。");
         return {
           completed: true,
-          text: JSON.stringify(ocrDouble),
+          text: JSON.stringify({ text: ocrText }),
           model: "UI-TEST-DOUBLE",
           threadId: id,
+          reasoningEffort: reasoningEffort ?? null,
         };
       }
       const context = JSON.parse(prompt.slice(prompt.indexOf("\n") + 1));

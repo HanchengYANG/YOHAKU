@@ -4,7 +4,10 @@ import { mkdtemp, rm, stat, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
-import { OCR_SCHEMA, OCR_PROMPT, validateOcr, normalizeNewOcrDraft } from "../shared/ocr.mjs";
+import {
+  OCR_SCHEMA, OCR_PROMPT, OCR_BODY_SCHEMA, OCR_TRANSCRIPTION_PROMPT,
+  expandOcrBody, validateOcr, normalizeNewOcrDraft,
+} from "../shared/ocr.mjs";
 import { plainText, serializeBlocks } from "../shared/document.mjs";
 import { createImageStore } from "../server/ai/images.mjs";
 
@@ -44,7 +47,59 @@ const result = () => ({
   ],
 });
 
-test("新识别草稿保留正文分行与生成词组注音，批注与页码独立", () => {
+test("正文阶段只收text，保留模型整理的段落和歌词分行，所有读音为空", () => {
+  const raw = { text: "名字\r\n\r\n中国語の「名字」は姓と名の両方。\r\n眞人のお父さん。３７歳。\r\n\r\n歌の一行目\r\n歌の二行目" };
+  const snapshot = structuredClone(raw);
+  const draft = validateOcr(expandOcrBody(raw));
+  assert.equal(plainText(draft.blocks), raw.text.replace(/\r\n/g, "\n"));
+  assert.deepEqual(draft.blocks.map((block) => block.segments.map((segment) => segment.text).join("")), [
+    "名字", "", "中国語の「名字」は姓と名の両方。", "眞人のお父さん。３７歳。", "", "歌の一行目", "歌の二行目",
+  ]);
+  assert.ok(draft.blocks.every((block) => block.type === "paragraph" && block.sourcePage === "unknown"));
+  assert.ok(draft.blocks.flatMap((block) => block.segments)
+    .every((segment) => segment.reading === null && segment.origin === null));
+  assert.equal(draft.title, "名字");
+  assert.equal(draft.kind, "article");
+  assert.equal(draft.orientation, "horizontal");
+  assert.match(draft.readingOrder, /按图片读序/);
+  assert.match(draft.readingOrder, /注音另行执行/);
+  assert.deepEqual(draft.warnings, []);
+  assert.deepEqual(draft.nonBody, []);
+  assert.deepEqual(raw, snapshot);
+  assert.equal(OCR_BODY_SCHEMA.additionalProperties, false);
+  assert.deepEqual(OCR_BODY_SCHEMA.required, ["text"]);
+  assert.deepEqual(Object.keys(OCR_BODY_SCHEMA.properties), ["text"]);
+});
+
+test("正文适配不猜标题层级、列表或注音语法，长首行用默认标题", () => {
+  const value = "原文".repeat(21) + "\n# 実際の記号\n{宇宙|そら}\n- 原文の記号";
+  const draft = validateOcr(expandOcrBody({ text: value }));
+  assert.equal(draft.title, "待校对的日语材料");
+  assert.equal(plainText(draft.blocks), value);
+  assert.ok(draft.blocks.every((block) => block.type === "paragraph"));
+  assert.ok(draft.blocks.flatMap((block) => block.segments).every((segment) => segment.reading === null));
+  assert.match(OCR_TRANSCRIPTION_PROMPT, /校正明显OCR识别错误/);
+  assert.match(OCR_TRANSCRIPTION_PROMPT, /不注音/);
+});
+
+test("正文长段落分片保留补充平面汉字与全部空白，不增加段落", () => {
+  const value = "  " + "あ".repeat(9997) + "𠮷" + "語".repeat(10020) + "  ";
+  const draft = validateOcr(expandOcrBody({ text: value }));
+  assert.equal(draft.blocks.length, 1);
+  assert.equal(plainText(draft.blocks), value);
+  assert.ok(draft.blocks[0].segments.every((segment) => segment.text.length <= 10000));
+  assert.ok(draft.blocks[0].segments.every((segment) => !/[\ud800-\udbff]$/.test(segment.text)));
+});
+
+test("正文阶段拒绝空结果、多余读音字段、HTML、控制字符与超限文字", () => {
+  for (const raw of [null, {}, [], { text: "" }, { text: " \n\t" }, { text: 1 },
+    { text: "東京", reading: "とうきょう" }, { text: "東京", blocks: [] },
+    { text: "<ruby>東京</ruby>" }, { text: "東京\u0000" }, { text: "字".repeat(200001) },
+    { text: Array.from({ length: 2001 }, () => "字").join("\n") }])
+    assert.throws(() => expandOcrBody(raw), /识别结果格式有误/);
+});
+
+test("历史完整草稿保留正文分行与生成词组注音，批注与页码独立", () => {
   const raw = result();
   const parsed = validateOcr(raw);
   assert.equal(plainText(parsed.blocks), "背中を撫でる\n\n生まれた□");
@@ -174,7 +229,7 @@ test("按语境提供的同词不同读音与含送假名的完整词形不会�
   );
 });
 
-test("新请求Schema允许清晰原图source、上下文generated或无注音", () => {
+test("历史完整Schema允许清晰原图source、上下文generated或无注音", () => {
   const schema = OCR_SCHEMA.properties.blocks.items.properties.segments.items;
   assert.deepEqual(schema.properties.origin.enum, ["source", "generated", null]);
   for (const segment of result().blocks.flatMap((block) => block.segments)) {

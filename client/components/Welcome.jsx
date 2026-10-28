@@ -58,8 +58,7 @@ export default function Welcome({ onImport, onSample, onImage }) {
         <span>02 / 图片与讨论</span>
         <p>
           文字可直接导入。连接 ChatGPT
-          后可识别图片并讨论原文。清晰注音优先保留，缺失或不清晰时由 AI
-          补充；结果先校对再保存。旁注和朗读尚未接入。
+          后可识别图片并讨论原文。自动识别正文并参考原图生成假名，完成后一起校对再保存。旁注和朗读尚未接入。
         </p>
       </div>
     </section>

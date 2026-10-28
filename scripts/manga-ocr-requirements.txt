@@ -1,0 +1,3 @@
+manga-ocr==0.1.16
+mokuro==0.2.5
+transformers==4.57.6
