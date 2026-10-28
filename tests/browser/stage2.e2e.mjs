@@ -1,8 +1,9 @@
 // UI integration only: actual uploads/Sharp/SQLite, explicit OAuth/model doubles.
 // These checks are not evidence of real subscription authorization or OCR quality.
 import { test, expect } from "@playwright/test";
-import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import sharp from "sharp";
 import { ensureOwnerSession, testOwner } from "./session.mjs";
 
@@ -18,9 +19,17 @@ test.beforeEach(async ({ page }, info) => {
   ownerCookies = await page.context().cookies();
 });
 
-const imagePath = fileURLToPath(
-  new URL("../../fixtures/images/01-lyrics-ruby.png", import.meta.url),
-);
+let imagePath, secondImagePath, imageDirectory;
+test.beforeAll(async () => {
+  imageDirectory = await mkdtemp(join(tmpdir(), "yohaku-browser-images-"));
+  imagePath = join(imageDirectory, "first.png");
+  secondImagePath = join(imageDirectory, "second.png");
+  await sharp({ create: { width: 800, height: 600, channels: 3, background: "#f5f3ee" } }).png().toFile(imagePath);
+  await sharp({ create: { width: 640, height: 480, channels: 3, background: "#e4ebdf" } }).png().toFile(secondImagePath);
+});
+test.afterAll(async () => {
+  if (imageDirectory) await rm(imageDirectory, { recursive: true, force: true });
+});
 const callback =
   "/auth/callback?state=ui-test-state&code=ui-test-code&client_id=ui-test-client";
 const ocrText = "僕が生まれた日の空は\n\n背中を撫でる\n用語（原文）\nアキックス：「ここで食べる。」";
@@ -327,7 +336,7 @@ test("图片入口支持截图粘贴、拖放及键盘选图，拒绝无效或�
   const chooser = await chooserReady;
   await chooser.setFiles(imagePath);
   await expect(page.locator(".image-file-details > strong")).toHaveText(
-    "01-lyrics-ruby.png",
+    "first.png",
   );
   await expect(
     page.getByRole("button", { name: "识别并注音", exact: true }),
@@ -580,7 +589,7 @@ test("一次点击先识别再自动注音，全部完成后进入校对页且�
     const bytes = [...(await readFile(imagePath))];
     await transferImages(page, "paste", [{ name: "注音时不应替换.png", type: "image/png", bytes }]);
     await expect(page.getByRole("alert")).toContainText("完成后再更换图片");
-    await expect(page.locator(".image-file-details > strong")).toHaveText("01-lyrics-ruby.png");
+    await expect(page.locator(".image-file-details > strong")).toHaveText("first.png");
   } finally {
     releaseAnnotation();
   }
@@ -1521,9 +1530,6 @@ test("多页书籍逐张保存图片，翻页重开保留各页原图注音与�
   await enableTestAccount(page);
   let bookId;
   const title = `逐张图片书籍-${info.project.name}`;
-  const secondImagePath = fileURLToPath(
-    new URL("../../fixtures/images/06-context-words-no-ruby.png", import.meta.url),
-  );
   const browserErrors = [];
   page.on("pageerror", (error) => browserErrors.push(error.message));
   try {

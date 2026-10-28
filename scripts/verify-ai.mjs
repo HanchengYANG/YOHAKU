@@ -138,7 +138,7 @@ const saveJSON = (directory, filename, value) =>
   savePrivate(directory, filename, `${JSON.stringify(value, null, 2)}\n`);
 const initialPassed = (report) =>
   report.chat?.passed === true &&
-  report.images?.length === 4 &&
+  report.images?.length === 1 &&
   report.images.every(
     (image) => image.completed === true && image.anchorsPassed === true,
   );
@@ -167,34 +167,6 @@ export function checkImage(name, draft) {
     .map((segment) => segment.reading || segment.text)
     .join("")
     .replace(/\s/g, "");
-  if (name === "01-lyrics")
-    return [
-      validOrigins,
-      text.includes("僕が生まれた日の空"),
-      text.includes("背中を撫でる声"),
-      phonetic.includes("せなか"),
-      phonetic.includes("うまれた"),
-    ];
-  if (name === "02-textbook")
-    return [
-      validOrigins,
-      text.includes("中国語"),
-      text.includes("明治時代"),
-      phonetic.includes("めいじじだい"),
-      draft.nonBody.some((item) => item.type === "handwriting"),
-      draft.nonBody.some(
-        (item) => item.type === "page_number" && item.text.includes("62"),
-      ),
-    ];
-  if (name === "03-vertical")
-    return [
-      validOrigins,
-      draft.orientation === "vertical",
-      text.indexOf("お花見") >= 0 &&
-        text.indexOf("お花見") < text.indexOf("梅雨"),
-      draft.blocks.some((block) => block.sourcePage === "right"),
-      draft.blocks.some((block) => block.sourcePage === "left"),
-    ];
   return [
     validOrigins,
     text === "今日は図書館で日本語を勉強します。",
@@ -384,22 +356,8 @@ async function main() {
       .png()
       .toBuffer();
     await savePrivate(output, "04-unseen-text.png", fresh);
+    // Generate the verification image locally; no published photo collection.
     const samples = [
-      [
-        "01-lyrics",
-        join(root, "fixtures/images/01-lyrics-ruby.png"),
-        "image/png",
-      ],
-      [
-        "02-textbook",
-        join(root, "fixtures/images/02-horizontal-book-photo.jpg"),
-        "image/jpeg",
-      ],
-      [
-        "03-vertical",
-        join(root, "fixtures/images/03-vertical-book-spread.jpg"),
-        "image/jpeg",
-      ],
       ["04-unseen", join(output, "04-unseen-text.png"), "image/png"],
     ];
     for (const [name, filename, mime] of samples) {
