@@ -30,6 +30,9 @@ Node 和 Codex 安装到应用用户的 `~/.local/share/yohaku/`。
 
 Nginx 提供 HTTPS 443，Node 仅监听 `127.0.0.1:4317`。
 `PUBLIC_ORIGIN` 配置允许的站点 Host 和页面提交来源。
+需要同时支持多个入口时，可在被 Git 忽略的 `.env.deploy` 中增加 `PUBLIC_ORIGINS`，用逗号分隔附加来源，例如 `https://reader-alt.example:8443`。必须包含协议和外部端口，不含路径或末尾斜线；未配置的地址仍被拒绝。
+systemd 会读取此本地文件。修改后执行 `sudo systemctl restart yohaku`；更新服务模板时需重新运行系统配置脚本。
+Nginx 保留原始 Host 中的外部端口，因此路由器可把不同外部 HTTPS 端口转发到服务器的 443。端口转发、IPv6 可达性和证书信任仍需在对应网络与设备中配置。
 默认生成 365 天自签名证书，浏览器需要确认信任；证书保存在 `/etc/nginx/yohaku/`，私钥仅 root 可读。重复安装保留已有证书；更换主机地址时需另行更新证书。
 如启用了防火墙，管理员需根据实际局域网网段允许 TCP 443。脚本不会修改防火墙或路由器。
 首次打开网站创建管理员；学习资料和授权位于项目 `data/`，被 Git 忽略。

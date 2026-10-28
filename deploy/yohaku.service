@@ -15,6 +15,7 @@ Environment=DATA_DIR=@APP_ROOT@/data
 Environment=HOME=@APP_HOME@
 Environment=PATH=@NODE_BIN@:/usr/local/bin:/usr/bin:/bin
 Environment=YOHAKU_CODEX_PATH=@APP_HOME@/.local/share/yohaku/codex/bin/codex
+EnvironmentFile=-@APP_ROOT@/.env.deploy
 ExecStart=@NODE_BIN@/node server/index.mjs
 Restart=on-failure
 RestartSec=5

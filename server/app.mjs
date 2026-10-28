@@ -162,16 +162,24 @@ function summary(row) {
 export function createApp({
   dataDir = join(rootDir, "data"),
   publicOrigin = process.env.PUBLIC_ORIGIN,
+  publicOrigins = process.env.PUBLIC_ORIGINS || "",
   callbackUri = `http://127.0.0.1:${process.env.PORT || 4317}/auth/callback`,
   aiServices,
   mangaOcr,
   ndlOcr,
 } = {}) {
-  const site = publicOrigin ? new URL(publicOrigin) : null;
-  if (site && (!["http:", "https:"].includes(site.protocol) ||
-    site.origin !== publicOrigin || site.username || site.password)) {
-    throw new Error("PUBLIC_ORIGIN 必须是完整站点来源，例如 https://reader.example。");
-  }
+  const sites = [publicOrigin, ...publicOrigins.split(",")]
+    .filter((value) => value?.trim())
+    .map((value) => {
+      const origin = value.trim();
+      const site = new URL(origin);
+      if (!["http:", "https:"].includes(site.protocol) ||
+        site.origin !== origin || site.username || site.password)
+        throw new Error("PUBLIC_ORIGIN / PUBLIC_ORIGINS 必须是完整站点来源，例如 https://reader.example:8443。");
+      return site;
+    });
+  const allowedOrigins = new Set(sites.map((site) => site.origin));
+  const allowedHosts = new Set(sites.map((site) => site.host));
   const storageDir = resolve(dataDir);
   mkdirSync(storageDir, { recursive: true, mode: 0o700 });
   chmodSync(storageDir, 0o700);
@@ -213,19 +221,19 @@ export function createApp({
   };
   const app = express();
   app.disable("x-powered-by");
-  if (site) app.set("trust proxy", "loopback");
+  if (sites.length) app.set("trust proxy", "loopback");
   app.use((req, _res, next) => {
     try {
       const host = req.headers.host;
       if (
         typeof host !== "string" ||
-        (!(site && host === site.host) &&
+        (!allowedHosts.has(host) &&
           !/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(host))
       ) {
         throw new Error("host");
       }
       const authority = new URL(`http://${host}`);
-      if (!localHosts.has(authority.hostname) && !(site && host === site.host)) throw new Error("host");
+      if (!localHosts.has(authority.hostname) && !allowedHosts.has(host)) throw new Error("host");
     } catch {
       return next(new HttpError(403, "只允许通过本机或已配置的站点地址访问。"));
     }
@@ -241,7 +249,7 @@ export function createApp({
       try {
         const origin = new URL(req.headers.origin);
         if (
-          !(site ? origin.origin === site.origin : localHosts.has(origin.hostname)) ||
+          !(sites.length ? allowedOrigins.has(origin.origin) : localHosts.has(origin.hostname)) ||
           !["http:", "https:"].includes(origin.protocol) ||
           origin.origin !== req.headers.origin
         )
