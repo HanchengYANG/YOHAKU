@@ -223,7 +223,7 @@ export default function AccountGate({ session, onAuthenticated }) {
             </fieldset>
           </form>
           <p className="account-separation-note">
-            网站账号用于保存你的资料；ChatGPT 等 AI 服务的授权在登录后单独设置。
+            网站账号用于保存你的资料；AI 授权由网站拥有者统一配置，所有账号共用。
           </p>
         </section>
       )}
