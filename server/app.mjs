@@ -6,6 +6,7 @@ import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { attachAIRoutes } from "./ai/routes.mjs";
 import { attachAccountRoutes } from "./accounts.mjs";
+import { attachBookRoutes } from "./books.mjs";
 import {
   parseText,
   serializeBlocks,
@@ -135,6 +136,7 @@ function fromRow(row) {
     updatedAt: row.updated_at,
     sourceImageId: row.source_image_id || null,
     recognition,
+    ...(row.book_id ? { bookId: row.book_id, position: row.page_position } : {}),
   };
 }
 
@@ -152,6 +154,8 @@ function summary(row) {
     revision: document.revision,
     createdAt: document.createdAt,
     updatedAt: document.updatedAt,
+    ...(document.bookId ? { bookId: document.bookId, position: document.position,
+      sourceImageId: document.sourceImageId } : {}),
   };
 }
 
@@ -273,6 +277,7 @@ export function createApp({
     mangaOcr,
     ndlOcr,
   });
+  const books = attachBookRoutes({ app, database, summary, requireDocument });
 
   app.get("/api/health", async (req, res) => {
     const authorization = await ai.statusForUser(req.user?.id);
@@ -301,14 +306,14 @@ export function createApp({
       rows = database
         .prepare(
           `SELECT * FROM documents
-        WHERE owner_id=? AND (title LIKE ? ESCAPE '!' OR plain_text LIKE ? ESCAPE '!')
+        WHERE owner_id=? AND book_id IS NULL AND (title LIKE ? ESCAPE '!' OR plain_text LIKE ? ESCAPE '!')
         ORDER BY updated_at DESC, id ASC`,
         )
         .all(req.user.id, pattern, pattern);
     } else {
       rows = database
         .prepare(
-          "SELECT * FROM documents WHERE owner_id=? ORDER BY updated_at DESC, id ASC",
+          "SELECT * FROM documents WHERE owner_id=? AND book_id IS NULL ORDER BY updated_at DESC, id ASC",
         )
         .all(req.user.id);
     }
@@ -317,6 +322,10 @@ export function createApp({
 
   app.post("/api/documents", async (req, res) => {
     const input = validateInput(req.body);
+    const bookId = req.body.bookId ?? undefined;
+    if (bookId !== undefined && (typeof bookId !== "string" || !bookId))
+      throw new HttpError(400, "请选择有效的书籍。");
+    if (bookId !== undefined) books.requireBook(req.user.id, bookId);
     const sourceImageId = req.body.sourceImageId || null;
     let recognition = null;
     if (sourceImageId) {
@@ -337,29 +346,35 @@ export function createApp({
     );
     const id = randomUUID();
     const now = new Date().toISOString();
-    database
-      .prepare(
-        `INSERT INTO documents
-      (id, title, kind, orientation, blocks_json, plain_text, revision, created_at, updated_at, owner_id)
-      VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
-      )
-      .run(
-        id,
-        input.title,
-        input.kind,
-        input.orientation,
-        JSON.stringify(blocks),
-        plainText(blocks),
-        now,
-        now,
-        req.user.id,
-      );
-    if (recognition)
+    books.transaction(() => {
+      if (bookId !== undefined) books.requireBook(req.user.id, bookId);
+      const position = bookId === undefined ? null : database.prepare(
+        "SELECT count(*)+1 AS position FROM documents WHERE book_id=? AND owner_id=?",
+      ).get(bookId, req.user.id).position;
       database
         .prepare(
-          "UPDATE documents SET source_image_id=?,recognition_json=? WHERE id=?",
+          `INSERT INTO documents
+        (id, title, kind, orientation, blocks_json, plain_text, revision, created_at, updated_at, owner_id,
+         source_image_id, recognition_json, book_id, page_position)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(sourceImageId, JSON.stringify(recognition), id);
+        .run(
+          id,
+          input.title,
+          input.kind,
+          input.orientation,
+          JSON.stringify(blocks),
+          plainText(blocks),
+          now,
+          now,
+          req.user.id,
+          sourceImageId,
+          recognition ? JSON.stringify(recognition) : null,
+          bookId ?? null,
+          position,
+        );
+      if (bookId !== undefined) books.touch(req.user.id, bookId, now);
+    });
     res.status(201).json(fromRow(read.get(id)));
   });
 
@@ -376,29 +391,47 @@ export function createApp({
         "这篇材料已在其他页面修改。请保留当前文字，重新打开最新版本后再保存。",
       );
     }
+    const requestedBookId = req.body.bookId;
+    if (requestedBookId !== undefined && requestedBookId !== null &&
+        (typeof requestedBookId !== "string" || !requestedBookId))
+      throw new HttpError(400, "请选择有效的书籍。");
+    if (old.book_id && requestedBookId !== undefined && requestedBookId !== old.book_id)
+      throw new HttpError(409, "这页已经属于一本书，不能通过编辑移动或移出书籍。");
+    const bookId = old.book_id || requestedBookId || null;
+    if (bookId) books.requireBook(req.user.id, bookId);
     const blocks = parseContent(
       input.content,
       JSON.parse(old.blocks_json),
       req.body.manualReadings,
     );
-    const result = database
-      .prepare(
-        `UPDATE documents SET title = ?, kind = ?, orientation = ?,
-      blocks_json = ?, plain_text = ?, revision = revision + 1, updated_at = ?
-      WHERE id = ? AND revision = ?`,
-      )
-      .run(
-        input.title,
-        input.kind,
-        input.orientation,
-        JSON.stringify(blocks),
-        plainText(blocks),
-        new Date().toISOString(),
-        old.id,
-        input.revision,
-      );
-    if (result.changes !== 1)
-      throw new HttpError(409, "文档版本已更新，请重新打开后再保存。");
+    books.transaction(() => {
+      if (bookId) books.requireBook(req.user.id, bookId);
+      const position = old.book_id ? old.page_position : bookId ? database.prepare(
+        "SELECT count(*)+1 AS position FROM documents WHERE book_id=? AND owner_id=?",
+      ).get(bookId, req.user.id).position : null;
+      const result = database
+        .prepare(
+          `UPDATE documents SET title = ?, kind = ?, orientation = ?,
+        blocks_json = ?, plain_text = ?, revision = revision + 1, updated_at = ?,
+        book_id = ?, page_position = ?
+        WHERE id = ? AND revision = ?`,
+        )
+        .run(
+          input.title,
+          input.kind,
+          input.orientation,
+          JSON.stringify(blocks),
+          plainText(blocks),
+          new Date().toISOString(),
+          bookId,
+          position,
+          old.id,
+          input.revision,
+        );
+      if (result.changes !== 1)
+        throw new HttpError(409, "文档版本已更新，请重新打开后再保存。");
+      if (bookId) books.touch(req.user.id, bookId);
+    });
     res.json(fromRow(read.get(old.id)));
   });
 
@@ -408,15 +441,22 @@ export function createApp({
     if (!Number.isSafeInteger(revision) || revision < 1) {
       throw new HttpError(400, "缺少有效的文档版本，请重新打开后再删除。");
     }
-    const result = database
-      .prepare("DELETE FROM documents WHERE id = ? AND revision = ?")
-      .run(document.id, revision);
-    if (result.changes !== 1) {
-      throw new HttpError(
-        409,
-        "这篇材料已在其他页面修改，请重新打开最新版本后再决定是否删除。",
-      );
-    }
+    books.transaction(() => {
+      const result = database
+        .prepare("DELETE FROM documents WHERE id = ? AND revision = ?")
+        .run(document.id, revision);
+      if (result.changes !== 1) {
+        throw new HttpError(
+          409,
+          "这篇材料已在其他页面修改，请重新打开最新版本后再决定是否删除。",
+        );
+      }
+      database.prepare("DELETE FROM conversations WHERE document_id=? AND user_id=?").run(document.id, req.user.id);
+      if (document.book_id) {
+        books.reindex(req.user.id, document.book_id);
+        books.touch(req.user.id, document.book_id);
+      }
+    });
     res.status(204).end();
   });
 

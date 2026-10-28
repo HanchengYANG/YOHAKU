@@ -22,17 +22,36 @@ export default function RubyText({
     }
     const targetRect = target.getBoundingClientRect();
     const previewRect = preview.getBoundingClientRect();
+    const top = previewRect.top + preview.clientTop;
+    const bottom = top + preview.clientHeight;
+    const visibleTop = Math.max(0, top);
+    const visibleBottom = Math.min(window.innerHeight, bottom);
+    // Keep the active word in the visible part of a tall preview without
+    // moving the page or the reading input that currently has focus.
+    const center = visibleBottom - visibleTop >= targetRect.height
+      ? (visibleTop + visibleBottom) / 2
+      : (top + bottom) / 2;
+    const previousPadding = preview.style.paddingBottom;
+    const previousHeight = preview.style.height;
+    if (visibleBottom > visibleTop && bottom > visibleBottom) {
+      const computed = window.getComputedStyle(preview);
+      const padding = Number.parseFloat(computed.paddingBottom);
+      // Leave enough internal scroll space for the final lines when the pane
+      // extends below the viewport. Its outer size and page position stay put.
+      preview.style.height = computed.height;
+      preview.style.paddingBottom = `${padding + bottom - visibleBottom}px`;
+    }
     preview.scrollTo({
       top: Math.max(
         0,
-        preview.scrollTop +
-          targetRect.top -
-          previewRect.top -
-          preview.clientTop -
-          (preview.clientHeight - targetRect.height) / 2,
+        preview.scrollTop + targetRect.top + targetRect.height / 2 - center,
       ),
       behavior: "auto",
     });
+    return () => {
+      preview.style.paddingBottom = previousPadding;
+      preview.style.height = previousHeight;
+    };
   }, [activeRange]);
 
   const matchesByBlock = new Map();

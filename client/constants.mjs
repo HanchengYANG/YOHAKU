@@ -2,7 +2,7 @@ export const kinds = {
   lyrics: "歌词",
   article: "文章",
   textbook: "教材",
-  book: "书籍",
+  book: "书页",
 };
 export const sample = {
   title: "把读音放回字词上方",

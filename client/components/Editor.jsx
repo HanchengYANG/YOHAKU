@@ -14,7 +14,7 @@ import api from "../api.mjs";
 import Icon from "./Icon.jsx";
 import RubyText from "./RubyText.jsx";
 
-export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
+export default function Editor({ initial, onSave, onCancel, onDirty, saving, books = [], onCreateBook }) {
   const [value, setValue] = useState(() => ({
     ...initial,
     orientation: "horizontal",
@@ -34,6 +34,9 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
   const [selection, setSelection] = useState(null);
   const [reading, setReading] = useState("");
   const [message, setMessage] = useState("");
+  const [newBookTitle, setNewBookTitle] = useState("");
+  const [showNewBook, setShowNewBook] = useState(false);
+  const [creatingBook, setCreatingBook] = useState(false);
   const [tab, setTab] = useState("text");
   const [batchTerm, setBatchTerm] = useState("");
   const [batchSearch, setBatchSearch] = useState(null);
@@ -75,7 +78,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
   const rotationRequest = useRef(null);
   const submitLock = useRef(false);
   const annotationRequest = useRef(null);
-  const busy = saving || imageSaving || submitting || annotating;
+  const busy = saving || imageSaving || submitting || annotating || creatingBook;
   const imageSideways = imageRotation % 2 === 1;
   const imageUrl = sourceImageId
     ? `/api/images/${encodeURIComponent(sourceImageId)}/raw${imageMetadata ? `?revision=${imageMetadata.revision}` : ""}`
@@ -437,9 +440,9 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
         <div className="editor-heading">
           <div>
             <span className="eyebrow">
-              {initial.id ? "校对材料" : "放进书架"}
+              {initial.id ? "校对材料" : value.bookId ? "加入书籍" : "放进书架"}
             </span>
-            <h1>{initial.id ? "留住准确的每一行" : "导入一篇新材料"}</h1>
+            <h1>{initial.id ? "留住准确的每一行" : value.bookId ? "添加一页阅读材料" : "导入一篇新材料"}</h1>
           </div>
           <div className="editor-actions">
             <button
@@ -462,6 +465,48 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
             </button>
           </div>
         </div>
+        {(!initial.id || !initial.bookId) && (
+          <div className="book-target">
+            <label>
+              保存到书籍
+              <select aria-label="保存到书籍" value={value.bookId || ""}
+                onChange={(event) => update({ bookId: event.target.value || null })}>
+                <option value="">独立材料（不放入书籍）</option>
+                {books.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+              </select>
+            </label>
+            {onCreateBook && (
+              <button className="text-button" type="button" onClick={() => setShowNewBook(!showNewBook)}>
+                {showNewBook ? "收起新建书籍" : "新建书籍"}
+              </button>
+            )}
+            {showNewBook && (
+              <div className="book-target-create">
+                <label>书籍名称
+                  <input aria-label="新书籍名称" value={newBookTitle} maxLength={160}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.nativeEvent.isComposing) event.preventDefault();
+                    }}
+                    onChange={(event) => setNewBookTitle(event.target.value)} />
+                </label>
+                <button className="button secondary" type="button" disabled={!newBookTitle.trim() || busy}
+                  onClick={async () => {
+                    if (creatingBook || !newBookTitle.trim()) return;
+                    setCreatingBook(true);
+                    try {
+                      const created = await onCreateBook(newBookTitle.trim());
+                      update({ bookId: created.id });
+                      setShowNewBook(false);
+                      setNewBookTitle("");
+                      setMessage("");
+                    } catch (cause) { setMessage(cause.message); }
+                    finally { setCreatingBook(false); }
+                  }}>创建并选中</button>
+              </div>
+            )}
+            <small>一本书可逐页追加。每次保存会添加为最后一页，之后可在书籍目录调整顺序。</small>
+          </div>
+        )}
         <div className="metadata-form">
           <label className="title-field">
             标题

@@ -10,6 +10,8 @@ import ImageImport from "./components/ImageImport.jsx";
 import DocumentChat from "./components/DocumentChat.jsx";
 import AccountGate from "./components/AccountGate.jsx";
 import UserMenu from "./components/UserMenu.jsx";
+import BookView from "./components/BookView.jsx";
+import BookNavigation from "./components/BookNavigation.jsx";
 
 export default function App() {
   const [session, setSession] = useState(null);
@@ -60,10 +62,42 @@ export default function App() {
   );
 }
 
+function BookCreate({ initialTitle, promoting, busy, onSave, onCancel, onDirty }) {
+  const [title, setTitle] = useState(initialTitle);
+  return (
+    <form className="book-create editor-page" onSubmit={(event) => {
+      event.preventDefault();
+      if (!busy && title.trim()) onSave(title.trim());
+    }}>
+      <h1>{promoting ? "将材料转为书籍" : "新建书籍"}</h1>
+      <p>{promoting
+        ? "当前材料将成为第1页，正文、原图、注音和讨论都保留。以后可逐页追加。"
+        : "为这本书起个名字，再逐页导入图片或文字。每页独立保存原图、正文和读音。"}</p>
+      <label className="book-target">
+        书籍名称
+        <input aria-label="书籍名称" value={title} maxLength={160} required autoFocus disabled={busy}
+          onChange={(event) => { setTitle(event.target.value); onDirty(true); }} />
+      </label>
+      <div className="book-create-actions">
+        <button className="button subtle" type="button" disabled={busy} onClick={onCancel}>取消</button>
+        <button className="button primary" type="submit" disabled={busy || !title.trim()}>
+          {busy ? "正在创建…" : "创建书籍"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
 function Workspace({ user, onLoggedOut }) {
   const [documents, setDocuments] = useState([]);
+  const [books, setBooks] = useState([]);
+  const [shelfBooks, setShelfBooks] = useState([]);
   const [activeId, setActiveId] = useState(() => window.location.hash.slice(1));
   const [document, setDocument] = useState(null);
+  const [book, setBook] = useState(null);
+  const [importBookId, setImportBookId] = useState(null);
+  const [promotion, setPromotion] = useState(null);
+  const [bookBusy, setBookBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailFailed, setDetailFailed] = useState(false);
@@ -91,11 +125,15 @@ function Workspace({ user, onLoggedOut }) {
     const controller = new AbortController();
     const timer = setTimeout(
       () => {
-        api(`/documents?q=${encodeURIComponent(query)}`, {
-          signal: controller.signal,
-        })
-          .then((data) => {
+        Promise.all([
+          api(`/documents?q=${encodeURIComponent(query)}`, { signal: controller.signal }),
+          api(`/books?q=${encodeURIComponent(query)}`, { signal: controller.signal }),
+          query ? api("/books", { signal: controller.signal }) : null,
+        ])
+          .then(([data, shelf, all]) => {
             setDocuments(data.documents);
+            setShelfBooks(shelf.books);
+            setBooks(all?.books || shelf.books);
             setShelfError("");
           })
           .catch((e) => {
@@ -116,6 +154,7 @@ function Workspace({ user, onLoggedOut }) {
   useEffect(() => {
     if (!activeId) {
       setDocument(null);
+      setBook(null);
       setDetailLoading(false);
       setDetailFailed(false);
       return;
@@ -130,12 +169,25 @@ function Workspace({ user, onLoggedOut }) {
     }
     const controller = new AbortController();
     setDocument(null);
+    setBook(null);
     setDetailLoading(true);
     setDetailFailed(false);
-    api(`/documents/${encodeURIComponent(activeId)}`, {
-      signal: controller.signal,
-    })
-      .then(setDocument)
+    const isBook = activeId.startsWith("book/");
+    api(isBook
+      ? `/books/${encodeURIComponent(activeId.slice(5))}`
+      : `/documents/${encodeURIComponent(activeId)}`, { signal: controller.signal })
+      .then(async (result) => {
+        if (isBook) setBook(result);
+        else {
+          if (controller.signal.aborted) return;
+          setDocument(result);
+          const parent = result.bookId
+            ? await api(`/books/${encodeURIComponent(result.bookId)}`, { signal: controller.signal })
+            : null;
+          if (controller.signal.aborted) return;
+          setBook(parent);
+        }
+      })
       .catch((e) => {
         if (e.name !== "AbortError") {
           setError(e.message);
@@ -163,7 +215,7 @@ function Workspace({ user, onLoggedOut }) {
     const changed = () => {
       const nextId = window.location.hash.slice(1);
       if (nextId === activeId) return;
-      if (saving) {
+      if (saving || bookBusy) {
         history.replaceState(
           null,
           "",
@@ -187,7 +239,7 @@ function Workspace({ user, onLoggedOut }) {
     };
     window.addEventListener("hashchange", changed);
     return () => window.removeEventListener("hashchange", changed);
-  }, [activeId, dirty, saving]);
+  }, [activeId, dirty, saving, bookBusy]);
 
   useEffect(() => {
     if (!notice) return;
@@ -196,7 +248,7 @@ function Workspace({ user, onLoggedOut }) {
   }, [notice]);
 
   const mayLeave = () =>
-    !saving && (!dirty || window.confirm("当前修改还没有保存，确定离开吗？"));
+    !saving && !bookBusy && (!dirty || window.confirm("当前修改还没有保存，确定离开吗？"));
   const openDocument = (id) => {
     if (!mayLeave()) return;
     setDraft(null);
@@ -244,6 +296,8 @@ function Workspace({ user, onLoggedOut }) {
     setDirty(false);
     setError("");
     setSidebarOpen(false);
+    setImportBookId(null);
+    setPromotion(null);
   };
   const closePanel = () => {
     if (!mayLeave()) return;
@@ -252,7 +306,7 @@ function Workspace({ user, onLoggedOut }) {
   };
   const imageReady = (value) => {
     setPanel(null);
-    setDraft(value);
+    setDraft({ ...value, ...(importBookId ? { bookId: importBookId, kind: "book" } : {}) });
     setEditorSession((n) => n + 1);
     setDirty(true);
   };
@@ -268,14 +322,18 @@ function Workspace({ user, onLoggedOut }) {
           body: JSON.stringify(value),
         },
       );
+      const parent = result.bookId
+        ? await api(`/books/${encodeURIComponent(result.bookId)}`).catch(() => null)
+        : null;
       if (activeId !== result.id) savedDetail.current = result.id;
+      setBook(parent);
       setDocument(result);
       setActiveId(result.id);
       history.replaceState(null, "", `#${result.id}`);
       setDraft(null);
       setDirty(false);
       setRefresh((n) => n + 1);
-      setNotice("已保存到书架");
+      setNotice(result.bookId ? "已保存到书籍" : "已保存到书架");
     } catch (e) {
       setError(e.message);
     } finally {
@@ -292,15 +350,92 @@ function Workspace({ user, onLoggedOut }) {
         method: "DELETE",
         body: JSON.stringify({ revision: document.revision }),
       });
-      setActiveId("");
+      const nextId = document.bookId ? `book/${document.bookId}` : "";
+      setActiveId(nextId);
       setPanel(null);
       setDocument(null);
-      history.replaceState(null, "", window.location.pathname);
+      history.replaceState(null, "", nextId ? `#${nextId}` : window.location.pathname);
       setRefresh((n) => n + 1);
-      setNotice("材料已删除");
+      setNotice(document.bookId ? "书页已删除" : "材料已删除");
     } catch (e) {
       setError(e.message);
     }
+  };
+
+  const openBook = (id) => openDocument(`book/${id}`);
+  const beginBookPage = (imagePage) => {
+    if (!book || !mayLeave()) return;
+    if (imagePage) {
+      openPanel("image");
+      setImportBookId(book.id);
+    } else beginNew({
+      title: `第${book.pages.length + 1}页`, kind: "book", orientation: "horizontal",
+      content: "", bookId: book.id,
+    });
+  };
+  const createBook = async (title) => {
+    const created = await api("/books", {
+      method: "POST", body: JSON.stringify({ title }),
+    });
+    setBooks((current) => [{ ...created, pageCount: created.pages.length, charCount: 0 }, ...current]);
+    setRefresh((n) => n + 1);
+    return created;
+  };
+  const saveBook = async (title) => {
+    if (bookBusy) return;
+    setBookBusy(true);
+    setError("");
+    try {
+      const created = await api("/books", {
+        method: "POST",
+        body: JSON.stringify({ title, ...(promotion ? { documentId: promotion.id } : {}) }),
+      });
+      setPanel(null);
+      setPromotion(null);
+      setDirty(false);
+      setDocument(null);
+      setActiveId(`book/${created.id}`);
+      history.replaceState(null, "", `#book/${created.id}`);
+      setRefresh((n) => n + 1);
+      setNotice(promotion ? "已转为书籍，原材料保留为第1页" : "书籍已创建，可以开始添加页面");
+    } catch (cause) {
+      setError(cause.message);
+    } finally { setBookBusy(false); }
+  };
+  const updateBook = async (changes) => {
+    if (bookBusy || !book) return;
+    setBookBusy(true);
+    setError("");
+    try {
+      const updated = await api(`/books/${encodeURIComponent(book.id)}`, {
+        method: "PUT", body: JSON.stringify({ title: book.title, revision: book.revision, ...changes }),
+      });
+      setBook(updated);
+      setRefresh((n) => n + 1);
+      return updated;
+    } catch (cause) {
+      setError(cause.message);
+      setDetailRefresh((n) => n + 1);
+      throw cause;
+    } finally { setBookBusy(false); }
+  };
+  const deleteBook = async () => {
+    if (bookBusy || !window.confirm(`删除《${book.title}》及其中全部${book.pages.length}页？删除后无法撤销。`)) return;
+    setBookBusy(true);
+    try {
+      await api(`/books/${encodeURIComponent(book.id)}`, {
+        method: "DELETE", body: JSON.stringify({ revision: book.revision }),
+      });
+      setActiveId("");
+      setBook(null);
+      setDocument(null);
+      history.replaceState(null, "", window.location.pathname);
+      setRefresh((n) => n + 1);
+      setNotice("书籍已删除");
+    } catch (cause) {
+      setError(cause.message);
+      setDetailRefresh((n) => n + 1);
+    } finally { setBookBusy(false); }
   };
 
   return (
@@ -361,12 +496,20 @@ function Workspace({ user, onLoggedOut }) {
         >
           AI 设置
         </button>
+        <button
+          className="button secondary"
+          disabled={saving || bookBusy}
+          onClick={() => openPanel("newBook")}
+          style={{ marginBottom: 18 }}
+        >
+          新建书籍
+        </button>
         <div className="shelf-heading">
           <span>
             <Icon name="book" size={16} />
             我的书架
           </span>
-          <span className="count">{documents.length}</span>
+          <span className="count">{documents.length + shelfBooks.length}</span>
         </div>
         <label className="search-box">
           <Icon name="search" size={16} />
@@ -380,13 +523,28 @@ function Workspace({ user, onLoggedOut }) {
         </label>
         <nav className="document-list" aria-label="阅读材料">
           {loading && <p className="shelf-empty">正在打开书架…</p>}
-          {!loading && documents.length === 0 && (
+          {!loading && documents.length === 0 && shelfBooks.length === 0 && (
             <p className="shelf-empty">
               {query
                 ? "没有找到匹配的材料。"
                 : "还没有材料。\n从一段喜欢的日语开始。"}
             </p>
           )}
+          {shelfBooks.map((item) => (
+            <button
+              className={`document-link ${item.id === book?.id ? "active" : ""}`}
+              key={`book-${item.id}`}
+              disabled={saving || bookBusy}
+              onClick={() => openBook(item.id)}
+            >
+              <span className="document-link-top">
+                <span className="kind-dot book" />书籍
+                <span>{item.pageCount} 页 · {item.charCount} 字</span>
+              </span>
+              <strong>{item.title}</strong>
+              <small lang="ja">{item.preview?.replace(/\n/g, " ") || "添加页面，开始阅读"}</small>
+            </button>
+          ))}
           {documents.map((item) => (
             <button
               className={`document-link ${item.id === activeId ? "active" : ""}`}
@@ -446,7 +604,17 @@ function Workspace({ user, onLoggedOut }) {
             </button>
           </div>
         )}
-        {panel === "settings" ? (
+        {panel === "newBook" ? (
+          <BookCreate
+            key={promotion?.id || "new"}
+            initialTitle={promotion?.title || ""}
+            promoting={!!promotion}
+            busy={bookBusy}
+            onSave={saveBook}
+            onCancel={closePanel}
+            onDirty={setDirty}
+          />
+        ) : panel === "settings" ? (
           <AISettings onClose={closePanel} />
         ) : panel === "image" ? (
           <ImageImport
@@ -471,8 +639,34 @@ function Workspace({ user, onLoggedOut }) {
             onCancel={cancelEdit}
             onDirty={(next = true) => setDirty(next)}
             saving={saving}
+            books={books}
+            onCreateBook={createBook}
           />
         ) : document ? (
+          <>
+          {book ? (
+            <BookNavigation
+              book={book}
+              currentPageId={document.id}
+              onOpenBook={() => openBook(book.id)}
+              onOpenPage={openDocument}
+              onAddImage={() => beginBookPage(true)}
+              disabled={saving || bookBusy}
+            />
+          ) : document.bookId ? (
+            <div className="book-promotion">
+              <button className="text-button" onClick={() => openBook(document.bookId)}>打开所属书籍</button>
+              <span>目录暂未加载，正文已保存，可重新打开书籍。</span>
+            </div>
+          ) : (
+            <div className="book-promotion">
+              <button className="text-button" onClick={() => {
+                openPanel("newBook");
+                setPromotion(document);
+              }}>转为书籍</button>
+              <span>将这份材料作为第1页，再继续添加其他页面。</span>
+            </div>
+          )}
           <Reader
             document={document}
             onEdit={beginEdit}
@@ -482,6 +676,18 @@ function Workspace({ user, onLoggedOut }) {
             setShowRuby={setShowRuby}
             fontSize={fontSize}
             setFontSize={setFontSize}
+          />
+          </>
+        ) : book && activeId.startsWith("book/") ? (
+          <BookView
+            book={book}
+            onOpenPage={openDocument}
+            onAddImage={() => beginBookPage(true)}
+            onAddText={() => beginBookPage(false)}
+            onRename={(title) => updateBook({ title })}
+            onReorder={(pageIds) => updateBook({ pageIds })}
+            onDelete={deleteBook}
+            busy={bookBusy}
           />
         ) : activeId ? (
           <div className="loading-page">

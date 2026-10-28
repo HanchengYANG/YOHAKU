@@ -7,8 +7,15 @@ import sharp from "sharp";
 import { ensureOwnerSession, testOwner } from "./session.mjs";
 
 const accountFlowTitle = "网站账号登录、退出与邀请码注册使用真实会话和资料隔离";
+let ownerCookies = [];
 test.beforeEach(async ({ page }, info) => {
-  if (info.title !== accountFlowTitle) await ensureOwnerSession(page.request);
+  if (info.title === accountFlowTitle) return;
+  // Reuse this isolated fixture session instead of logging in once per test;
+  // the complete suite exceeds the production login rate limit otherwise.
+  // The account-flow test creates its own contexts and still tests real login.
+  if (ownerCookies.length) await page.context().addCookies(ownerCookies);
+  await ensureOwnerSession(page.request);
+  ownerCookies = await page.context().cookies();
 });
 
 const imagePath = fileURLToPath(
@@ -35,9 +42,9 @@ async function getDocument(page, id) {
   return response.json();
 }
 
-async function importDraft(page) {
+async function importDraft(page, filePath = imagePath) {
   await openImageImport(page);
-  await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(imagePath);
+  await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(filePath);
   const reply = page.waitForResponse((res) =>
     /\/api\/images\/[^/]+\/annotate$/.test(new URL(res.url()).pathname),
   );
@@ -1442,5 +1449,298 @@ test(accountFlowTitle, async ({ page, playwright, baseURL }, info) => {
       }
     }
     await administrator.dispose();
+  }
+});
+
+async function removeTestBook(page, id) {
+  if (!id) return;
+  const response = await page.request.get(`/api/books/${id}`);
+  if (!response.ok()) return;
+  const book = await response.json();
+  const removed = await page.request.delete(`/api/books/${id}`, {
+    data: { revision: book.revision },
+  });
+  expect(removed.status()).toBe(204);
+}
+
+test("多页书籍逐张保存图片，翻页重开保留各页原图注音与独立讨论", async ({ page }, info) => {
+  await enableTestAccount(page);
+  let bookId;
+  const title = `逐张图片书籍-${info.project.name}`;
+  const secondImagePath = fileURLToPath(
+    new URL("../../fixtures/images/06-context-words-no-ruby.png", import.meta.url),
+  );
+  const browserErrors = [];
+  page.on("pageerror", (error) => browserErrors.push(error.message));
+  try {
+    await page.goto("/");
+    const openShelf = page.getByRole("button", { name: "打开书架", exact: true });
+    if (await openShelf.isVisible()) await openShelf.click();
+    await page.getByRole("button", { name: "新建书籍", exact: true }).click();
+    await page.getByRole("textbox", { name: "书籍名称", exact: true }).fill(title);
+    await page.getByRole("button", { name: "创建书籍", exact: true }).click();
+    await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
+    bookId = await page.evaluate(() => location.hash.slice("#book/".length));
+    expect(bookId).toMatch(/^[a-f0-9-]+$/);
+    await page.getByRole("button", { name: "添加图片页", exact: true }).click();
+    await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(imagePath);
+    await page.getByRole("button", { name: "识别并注音", exact: true }).click();
+    await expect(page.getByLabel("保存到书籍", { exact: true })).toHaveValue(bookId);
+    await page.getByRole("textbox", { name: "材料标题", exact: true }).fill("第一张图片页");
+    if (info.project.name === "desktop")
+      await page.getByRole("tab", { name: "阅读预览", exact: true }).click();
+    await page.getByRole("tab", { name: /注音校正/ }).click();
+    const preview = page.locator(".preview-content");
+    const previewHeight = info.project.name === "desktop"
+      ? await preview.evaluate((element) => element.getBoundingClientRect().height)
+      : null;
+    await page.getByRole("textbox", { name: "空的读音（第1行）", exact: true }).fill("くう");
+    if (previewHeight !== null) {
+      await expect(page.locator("mark.ruby-active-occurrence")).toHaveCount(1);
+      await expect.poll(() => preview.evaluate((element) => element.getBoundingClientRect().height))
+        .toBeCloseTo(previewHeight, 2);
+    }
+    await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "第一张图片页", exact: true })).toBeVisible();
+    const firstId = await page.evaluate(() => location.hash.slice(1));
+    const first = await getDocument(page, firstId);
+    expect(first.bookId).toBe(bookId);
+    expect(first.position).toBe(1);
+    expect(first.content).toContain("{空|くう}");
+    expect(first.blocks[0].segments.find((segment) => segment.text === "空").origin).toBe("manual");
+    const discussionResponse = await page.request.post(`/api/documents/${firstId}/conversations`, {
+      data: { quote: "空", question: "第一张图片页的独立讨论" },
+    });
+    expect(discussionResponse.status()).toBe(201);
+    const discussion = await discussionResponse.json();
+
+    // Append from the ordinary image importer to exercise the explicit parent
+    // selector as well as the preselected book context used for the first page.
+    const secondDraft = await importDraft(page, secondImagePath);
+    await page.getByLabel("保存到书籍", { exact: true }).selectOption(bookId);
+    await page.getByRole("textbox", { name: "材料标题", exact: true }).fill("第二张图片页");
+    await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "第二张图片页", exact: true })).toBeVisible();
+    const secondId = await page.evaluate(() => location.hash.slice(1));
+    const second = await getDocument(page, secondId);
+    expect(second.bookId).toBe(bookId);
+    expect(second.position).toBe(2);
+    expect(second.id).not.toBe(first.id);
+    expect(second.sourceImageId).not.toBe(first.sourceImageId);
+    expect(second.recognition.sourceImageId).toBe(secondDraft.sourceImageId);
+    expect(second.content).toContain("{空|そら}");
+    expect(second.blocks[0].segments.find((segment) => segment.text === "空").origin).toBe("generated");
+    for (const [document, path] of [[first, imagePath], [second, secondImagePath]]) {
+      const original = await page.request.get(`/api/images/${document.sourceImageId}/raw`);
+      expect(original.ok()).toBe(true);
+      expect(await original.body()).toEqual(await readFile(path));
+    }
+    expect(second.recognition.blocks.flatMap((block) => block.segments).some((segment) => segment.reading)).toBe(false);
+    expect(second.recognition.annotation.blocks.flatMap((block) => block.segments).some((segment) => segment.reading)).toBe(true);
+
+    const bookResponse = await page.request.get(`/api/books/${bookId}`);
+    expect(bookResponse.ok()).toBe(true);
+    const book = await bookResponse.json();
+    expect(book.pages.map((item) => item.id)).toEqual([firstId, secondId]);
+    expect(book.pages.map((item) => item.position)).toEqual([1, 2]);
+    const library = await (await page.request.get("/api/documents")).json();
+    expect(library.documents.some((item) => [firstId, secondId].includes(item.id))).toBe(false);
+    const listedBooks = await (await page.request.get(`/api/books?q=${encodeURIComponent(title)}`)).json();
+    expect(listedBooks.books.map((item) => item.id)).toContain(bookId);
+
+    await page.reload();
+    const navigation = page.getByRole("navigation", { name: "书页导航", exact: true });
+    const article = page.getByRole("article", { name: "日语原文", exact: true });
+    await expect(navigation.getByLabel("书籍页面", { exact: true })).toHaveValue(secondId);
+    await expect(navigation.getByRole("button", { name: "下一页", exact: true })).toBeDisabled();
+    await expect(article.locator("rt")).toContainText(["そら"]);
+    await page.getByRole("button", { name: "问 AI", exact: true }).click();
+    await expect(page.getByLabel("选择已有讨论", { exact: true })).toHaveValue("");
+    await expect(page.locator(".chat-message")).toHaveCount(0);
+    await page.getByRole("button", { name: "关闭 AI 讨论", exact: true }).click();
+
+    await navigation.getByRole("button", { name: "上一页", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "第一张图片页", exact: true })).toBeVisible();
+    await expect(navigation.getByLabel("书籍页面", { exact: true })).toHaveValue(firstId);
+    await expect(navigation.getByRole("button", { name: "上一页", exact: true })).toBeDisabled();
+    await expect(article.locator("rt")).toContainText(["くう"]);
+    await page.getByRole("button", { name: "问 AI", exact: true }).click();
+    await expect(page.getByLabel("选择已有讨论", { exact: true })).toHaveValue(discussion.id);
+    await expect(page.locator(".chat-message.user")).toContainText("第一张图片页的独立讨论");
+    await page.getByRole("button", { name: "关闭 AI 讨论", exact: true }).click();
+    await navigation.getByRole("button", { name: "下一页", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "第二张图片页", exact: true })).toBeVisible();
+    await navigation.getByLabel("书籍页面", { exact: true }).selectOption(firstId);
+    await expect(page.getByRole("heading", { name: "第一张图片页", exact: true })).toBeVisible();
+    expect(await getDocument(page, firstId)).toEqual(first);
+    expect(await getDocument(page, secondId)).toEqual(second);
+    await page.screenshot({
+      path: `artifacts/books-page-reader-${info.project.name}.png`,
+      fullPage: true,
+      animations: "disabled",
+    });
+    await navigation.getByRole("button", { name: `返回书籍：${title}`, exact: true }).click();
+    await expect(page.getByLabel("书籍页面列表", { exact: true }).getByRole("listitem")).toHaveCount(2);
+    await page.screenshot({
+      path: `artifacts/books-two-image-pages-${info.project.name}.png`,
+      fullPage: true,
+      animations: "disabled",
+    });
+    expect(browserErrors).toEqual([]);
+  } finally {
+    await removeTestBook(page, bookId);
+    await page.request.post("/api/ai/logout");
+  }
+});
+
+test("既有材料原地转为书籍，保留原图注音讨论并可追加文字页", async ({ page }, info) => {
+  await enableTestAccount(page);
+  let bookId;
+  let firstId;
+  const title = `原地转换书籍-${info.project.name}`;
+  try {
+    const { document: original } = await createImageDocument(page);
+    firstId = original.id;
+    const conversationResponse = await page.request.post(`/api/documents/${firstId}/conversations`, {
+      data: { quote: "背中", question: "转换书籍前的原有讨论" },
+    });
+    expect(conversationResponse.status()).toBe(201);
+    const originalDiscussion = await conversationResponse.json();
+    await page.getByRole("button", { name: "转为书籍", exact: true }).click();
+    await expect(page.getByRole("textbox", { name: "书籍名称", exact: true })).toHaveValue(original.title);
+    await page.getByRole("textbox", { name: "书籍名称", exact: true }).fill(title);
+    await page.getByRole("button", { name: "创建书籍", exact: true }).click();
+    await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
+    const promoted = await getDocument(page, firstId);
+    bookId = promoted.bookId;
+    expect(bookId).toBeTruthy();
+    expect(promoted.position).toBe(1);
+    expect(promoted.id).toBe(original.id);
+    expect(promoted.blocks).toEqual(original.blocks);
+    expect(promoted.recognition).toEqual(original.recognition);
+    expect(promoted.sourceImageId).toBe(original.sourceImageId);
+    const conversations = await (await page.request.get(`/api/documents/${firstId}/conversations`)).json();
+    expect(conversations.conversations).toEqual([originalDiscussion]);
+
+    await page.getByRole("button", { name: "添加文字页", exact: true }).click();
+    await expect(page.getByLabel("保存到书籍", { exact: true })).toHaveValue(bookId);
+    await page.getByRole("textbox", { name: "材料标题", exact: true }).fill("补充文字页");
+    await page.getByRole("textbox", { name: "日语正文", exact: true }).fill("これは{追加|ついか}した{本文|ほんぶん}です。");
+    await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "补充文字页", exact: true })).toBeVisible();
+    const secondId = await page.evaluate(() => location.hash.slice(1));
+    const added = await getDocument(page, secondId);
+    expect(added.bookId).toBe(bookId);
+    expect(added.position).toBe(2);
+    expect(added.sourceImageId).toBeNull();
+    await page.reload();
+    const navigation = page.getByRole("navigation", { name: "书页导航", exact: true });
+    await expect(navigation.getByLabel("书籍页面", { exact: true })).toHaveValue(secondId);
+    await navigation.getByRole("button", { name: "上一页", exact: true }).click();
+    await expect(page.getByRole("heading", { name: original.title, exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "问 AI", exact: true }).click();
+    await expect(page.getByLabel("选择已有讨论", { exact: true })).toHaveValue(originalDiscussion.id);
+    await expect(page.locator(".chat-message.user")).toContainText("转换书籍前的原有讨论");
+  } finally {
+    if (bookId) await removeTestBook(page, bookId);
+    else if (firstId) {
+      const response = await page.request.get(`/api/documents/${firstId}`);
+      if (response.ok()) {
+        const document = await response.json();
+        await page.request.delete(`/api/documents/${firstId}`, { data: { revision: document.revision } });
+      }
+    }
+    await page.request.post("/api/ai/logout");
+  }
+});
+
+test("校对既有独立材料时新建并选择书籍，书名回车不提前保存且归书保留记录", async ({ page }, info) => {
+  await enableTestAccount(page);
+  let bookId;
+  let documentId;
+  const title = `校对归书-${info.project.name}`;
+  try {
+    const { document: original } = await createImageDocument(page);
+    documentId = original.id;
+    const discussionResponse = await page.request.post(`/api/documents/${documentId}/conversations`, {
+      data: { quote: "空", question: "校对归书前的独立讨论" },
+    });
+    expect(discussionResponse.status()).toBe(201);
+    const discussion = await discussionResponse.json();
+    await page.getByRole("button", { name: "校对文字与注音", exact: true }).click();
+    const editor = page.locator(".editor-page");
+    const target = editor.getByLabel("保存到书籍", { exact: true });
+    await expect(target).toHaveValue("");
+    await editor.getByRole("button", { name: "新建书籍", exact: true }).click();
+    const name = editor.getByRole("textbox", { name: "新书籍名称", exact: true });
+    await name.fill(title);
+    const unexpectedSaves = [];
+    const preventPrematureSave = async (route) => {
+      if (["POST", "PUT"].includes(route.request().method())) {
+        unexpectedSaves.push(route.request().url());
+        await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "测试：书名回车不应保存材料。" }) });
+      } else await route.continue();
+    };
+    const documentRoute = /\/api\/documents(?:\/[^/]+)?$/;
+    await page.route(documentRoute, preventPrematureSave);
+    try {
+      await name.press("Enter");
+      await expect(name).toHaveValue(title);
+      await expect(editor.getByRole("button", { name: "创建并选中", exact: true })).toBeEnabled();
+      expect(unexpectedSaves).toEqual([]);
+      expect((await getDocument(page, documentId)).revision).toBe(original.revision);
+    } finally {
+      await page.unroute(documentRoute, preventPrematureSave);
+    }
+    await editor.getByRole("button", { name: "创建并选中", exact: true }).click();
+    await expect(target).not.toHaveValue("");
+    bookId = await target.inputValue();
+    await expect(editor.getByRole("textbox", { name: "新书籍名称", exact: true })).toHaveCount(0);
+    // Creating/selecting a parent is separate from saving the current page.
+    expect((await getDocument(page, documentId)).bookId).toBeUndefined();
+    const bookRoute = `**/api/books/${bookId}`;
+    await page.route(bookRoute, (route) => route.fulfill({
+      status: 503, contentType: "application/json", body: JSON.stringify({ error: "测试：目录暂时不可用。" }),
+    }));
+    try {
+      await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
+      await expect(page.getByRole("heading", { name: original.title, exact: true })).toBeVisible();
+      await expect(page.getByRole("article", { name: "日语原文", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "打开所属书籍", exact: true })).toBeVisible();
+      await page.reload();
+      await expect(page.getByRole("heading", { name: original.title, exact: true })).toBeVisible();
+      await expect(page.getByRole("article", { name: "日语原文", exact: true }).locator("rt")).toHaveCount(7);
+      await expect(page.getByRole("button", { name: "打开所属书籍", exact: true })).toBeVisible();
+    } finally {
+      await page.unroute(bookRoute);
+    }
+    await page.getByRole("button", { name: "打开所属书籍", exact: true }).click();
+    await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
+    await page.getByRole("button", { name: `打开第 1 页：${original.title}`, exact: true }).click();
+    await expect(page.getByRole("navigation", { name: "书页导航", exact: true })).toBeVisible();
+    const saved = await getDocument(page, documentId);
+    expect(saved.id).toBe(original.id);
+    expect(saved.bookId).toBe(bookId);
+    expect(saved.position).toBe(1);
+    expect(saved.blocks).toEqual(original.blocks);
+    expect(saved.sourceImageId).toBe(original.sourceImageId);
+    expect(saved.recognition).toEqual(original.recognition);
+    expect(saved.revision).toBe(original.revision + 1);
+    const conversations = await (await page.request.get(`/api/documents/${documentId}/conversations`)).json();
+    expect(conversations.conversations).toEqual([discussion]);
+    await page.reload();
+    await expect(page.getByRole("navigation", { name: "书页导航", exact: true }).getByLabel("书籍页面", { exact: true })).toHaveValue(documentId);
+    await page.getByRole("button", { name: "校对文字与注音", exact: true }).click();
+    await expect(page.getByLabel("保存到书籍", { exact: true })).toHaveCount(0);
+  } finally {
+    if (bookId) await removeTestBook(page, bookId);
+    else if (documentId) {
+      const response = await page.request.get(`/api/documents/${documentId}`);
+      if (response.ok()) {
+        const document = await response.json();
+        await page.request.delete(`/api/documents/${documentId}`, { data: { revision: document.revision } });
+      }
+    }
+    await page.request.post("/api/ai/logout");
   }
 });
