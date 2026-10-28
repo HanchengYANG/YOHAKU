@@ -7,5 +7,6 @@ import "./books.css";
 import "./import-progress.css";
 import "./design-theme.css";
 import "./welcome.css";
+import "./pwa.css";
 
 createRoot(document.getElementById("root")).render(<App />);

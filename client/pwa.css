@@ -1,0 +1,20 @@
+/* Installed apps can extend behind the notch and home indicator. */
+@media (display-mode: standalone) {
+  body {
+    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+      env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+  }
+  .app-shell,
+  .main-panel,
+  .account-gate {
+    min-height: calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  }
+  .sidebar {
+    top: env(safe-area-inset-top, 0px);
+    bottom: env(safe-area-inset-bottom, 0px);
+    left: env(safe-area-inset-left, 0px);
+  }
+  .toast {
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+  }
+}
