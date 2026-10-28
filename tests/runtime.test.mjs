@@ -15,6 +15,10 @@ const catalog = [
     hidden: false,
     isDefault: true,
     inputModalities: ["text", "image"],
+    defaultReasoningEffort: "medium",
+    supportedReasoningEfforts: ["low", "medium", "high"].map(
+      (reasoningEffort) => ({ reasoningEffort, description: "测试目录等级" }),
+    ),
   },
 ];
 
@@ -40,6 +44,7 @@ async function fixture(t, options = {}) {
   const children = [],
     turns = [],
     requests = [];
+  const threadEfforts = new Map();
   let threadSequence = 0,
     turnSequence = 0;
   const spawnImpl = (command, args, spawnOptions) => {
@@ -85,11 +90,21 @@ async function fixture(t, options = {}) {
               });
             else if (request.method === "model/list")
               reply(options.catalog || { data: catalog });
-            else if (request.method === "thread/start")
-              reply({ thread: { id: `thread-${++threadSequence}` } });
-            else if (request.method === "thread/resume")
-              reply({ thread: { id: request.params.threadId } });
-            else if (request.method === "turn/start") {
+            else if (request.method === "thread/start") {
+              const id = `thread-${++threadSequence}`;
+              const reasoningEffort = Object.hasOwn(options, "startReasoningEffort")
+                ? options.startReasoningEffort : "medium";
+              threadEfforts.set(id, reasoningEffort);
+              reply({ thread: { id }, reasoningEffort });
+            } else if (request.method === "thread/resume") {
+              const id = request.params.threadId;
+              const reasoningEffort = Object.hasOwn(options, "resumeReasoningEffort")
+                ? options.resumeReasoningEffort : threadEfforts.get(id) ?? null;
+              threadEfforts.set(id, reasoningEffort);
+              reply({ thread: { id }, reasoningEffort });
+            } else if (request.method === "turn/start") {
+              if (Object.hasOwn(request.params, "effort"))
+                threadEfforts.set(request.params.threadId, request.params.effort);
               const id = `turn-${++turnSequence}`;
               const context = {
                 child,
@@ -193,6 +208,115 @@ test("只有对应 turn 的 completed 终态和最终消息能够返回结果，
   assert.equal(result.model, "fixture-model");
   assert.equal(f.runtime.status().busy, false);
   assert.ok(f.runtime.status().lastSuccessfulAt);
+});
+
+test("图片识别显式low映射turn effort，早到终态也正确报告并区分目录默认", async (t) => {
+  const f = await fixture(t, {
+    startReasoningEffort: "high",
+    onTurn: (turn) => {
+      turn.item("图片正文");
+      turn.complete();
+      turn.reply();
+    },
+  });
+  const result = await f.runtime.run({
+    prompt: "识别图片",
+    image: "data:image/png;base64,AA==",
+    reasoningEffort: "low",
+  });
+  assert.equal(f.turns[0].request.params.effort, "low");
+  assert.equal(Object.hasOwn(f.turns[0].request.params, "reasoningEffort"), false);
+  assert.equal(result.model, "fixture-model");
+  assert.equal(result.reasoningEffort, "low");
+  assert.equal(f.runtime.status().defaultReasoningEffort, "medium");
+  assert.deepEqual(f.runtime.status().supportedReasoningEfforts, ["low", "medium", "high"]);
+  assert.equal(f.runtime.status().lastCompletedReasoningEffort, "low");
+});
+
+test("聊天不显式覆盖effort，报告thread实际返回等级并继承已接受的覆盖", async (t) => {
+  const f = await fixture(t, {
+    startReasoningEffort: "high",
+    onTurn: (turn) => {
+      turn.reply();
+      turn.item("答案");
+      turn.complete();
+    },
+  });
+  const first = await f.runtime.run({ prompt: "第一问" });
+  assert.equal(first.reasoningEffort, "high");
+  assert.equal(f.runtime.status().defaultReasoningEffort, "medium");
+  const inherited = await f.runtime.run({ prompt: "追问", threadId: first.threadId });
+  assert.equal(inherited.reasoningEffort, "high");
+  const overridden = await f.runtime.run({ prompt: "低等级追问", threadId: first.threadId, reasoningEffort: "low" });
+  assert.equal(overridden.reasoningEffort, "low");
+  const next = await f.runtime.run({ prompt: "继续", threadId: first.threadId });
+  assert.equal(next.reasoningEffort, "low");
+  assert.deepEqual(f.turns.map((turn) => turn.request.params.effort), [undefined, undefined, "low", undefined]);
+  assert.equal(f.requests.filter((request) => request.method === "thread/start").length, 1);
+});
+
+test("重新载入线程以resume实际等级为准，不把目录默认或旧进程状态当实际", async (t) => {
+  const f = await fixture(t, {
+    resumeReasoningEffort: "high",
+    onTurn: (turn) => {
+      turn.reply();
+      turn.item("答案");
+      turn.complete();
+    },
+  });
+  const first = await f.runtime.run({ prompt: "第一问", reasoningEffort: "low" });
+  f.runtime.stop();
+  const resumed = await f.runtime.run({ prompt: "重启后追问", threadId: first.threadId });
+  assert.equal(resumed.reasoningEffort, "high");
+  assert.equal(Object.hasOwn(f.turns[1].request.params, "effort"), false);
+  assert.equal(f.runtime.status().lastCompletedReasoningEffort, "high");
+  assert.equal(f.requests.filter((request) => request.method === "thread/resume").length, 1);
+  const unknown = await fixture(t, {
+    startReasoningEffort: null,
+    onTurn: (turn) => {
+      turn.reply();
+      turn.item("未知等级的答案");
+      turn.complete();
+    },
+  });
+  assert.equal((await unknown.runtime.run({ prompt: "默认聊天" })).reasoningEffort, null);
+  assert.equal(unknown.runtime.status().defaultReasoningEffort, "medium");
+  assert.equal(unknown.runtime.status().lastCompletedReasoningEffort, null);
+});
+
+test("缺失目录能力或不支持的显式推理等级在thread和turn前拒绝，不静默回退", async (t) => {
+  const f = await fixture(t);
+  await assert.rejects(f.runtime.run({ prompt: "请求未支持等级", reasoningEffort: "none" }), /不支持.*推理等级/);
+  assert.equal(f.requests.some((request) => ["thread/start", "turn/start"].includes(request.method)), false);
+  const noMetadata = { ...catalog[0] };
+  delete noMetadata.supportedReasoningEfforts;
+  const g = await fixture(t, { catalog: { data: [noMetadata] } });
+  await assert.rejects(g.runtime.run({ prompt: "目录未给等级", reasoningEffort: "low" }), /未提供推理等级信息/);
+  assert.equal(g.requests.some((request) => ["thread/start", "turn/start"].includes(request.method)), false);
+  assert.equal(g.runtime.status().busy, false);
+  for (const invalid of [null, "", 1])
+    await assert.rejects(g.runtime.run({ prompt: "非法等级", reasoningEffort: invalid }), (error) => error.status === 400);
+});
+
+test("失败轮次接受的effort可被续聊继承，但最后完成等级只在成功结果时更新", async (t) => {
+  const f = await fixture(t);
+  const first = f.runtime.run({ prompt: "第一问" });
+  await waitFor(() => f.turns.length === 1);
+  f.turns[0].item("第一轮完成");
+  f.turns[0].complete();
+  const answer = await first;
+  const failed = f.runtime.run({ prompt: "失败追问", threadId: answer.threadId, reasoningEffort: "low" });
+  failed.catch(() => {});
+  await waitFor(() => f.turns.length === 2);
+  f.turns[1].complete("failed");
+  await assert.rejects(failed, /未完成/);
+  assert.equal(f.runtime.status().lastCompletedReasoningEffort, "medium");
+  const next = f.runtime.run({ prompt: "继续", threadId: answer.threadId });
+  await waitFor(() => f.turns.length === 3);
+  f.turns[2].item("完成");
+  f.turns[2].complete();
+  assert.equal((await next).reasoningEffort, "low");
+  assert.equal(f.runtime.status().lastCompletedReasoningEffort, "low");
 });
 
 test("RPC 答复前到达的终态可以正确处理，但旧 turn 的迟到事件不会结束新 turn", async (t) => {

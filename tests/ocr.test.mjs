@@ -247,6 +247,25 @@ test("仅新草稿去掉无Han片段的冗余注音，纯假名正文与汉字�
   assert.equal(serializeBlocks(normalized.blocks), '「ここでキリコ{食べる|たべる}{生まれた|うまれた}{お父さん|おとうさん}{𠮷さん|よしさん}。」');
 });
 
+test("新草稿保留清晰数字原注音，纯假名清理不丢数量词信息或改写正文", () => {
+  const raw = result();
+  raw.blocks = [{ confidence: "high", sourcePage: "single", segments: [
+    { text: "30", reading: "さんじゅう", origin: "source" },
+    { text: "万", reading: "まん", origin: "source" },
+    { text: "第１位", reading: "だいいちい", origin: "source" },
+    { text: "37", reading: null, origin: null },
+    { text: "歳", reading: "さい", origin: "source" },
+    { text: "カナ", reading: "かな", origin: "source" },
+  ] }];
+  raw.warnings = [];
+  const parsed = validateOcr(raw), snapshot = structuredClone(parsed);
+  const normalized = normalizeNewOcrDraft(parsed);
+  assert.deepEqual(normalized.blocks[0].segments.slice(0, 5), parsed.blocks[0].segments.slice(0, 5));
+  assert.deepEqual(normalized.blocks[0].segments[5], { text: "カナ", reading: null, origin: null });
+  assert.equal(plainText(normalized.blocks), plainText(parsed.blocks));
+  assert.deepEqual(parsed, snapshot);
+});
+
 test("不确定行缺少模型说明时增加校对提示，模型下标必须有效", () => {
   const raw = result();
   raw.warnings = [];

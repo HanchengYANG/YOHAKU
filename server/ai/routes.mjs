@@ -6,7 +6,7 @@ import multer from "multer";
 import { PROVIDERS, createProviderConnection } from "../providers/index.mjs";
 import { createImageStore } from "./images.mjs";
 import {
-  OCR_SCHEMA, OCR_PROMPT, validateOcr, normalizeNewOcrDraft,
+  OCR_SCHEMA, OCR_PROMPT, OCR_REASONING_EFFORT, validateOcr, normalizeNewOcrDraft,
 } from "../../shared/ocr.mjs";
 import { plainText, serializeBlocks } from "../../shared/document.mjs";
 
@@ -441,6 +441,7 @@ export function attachAIRoutes({
         });
         const result = await provider.runtime.run({
           prompt: OCR_PROMPT,
+          reasoningEffort: OCR_REASONING_EFFORT,
           image: `data:${image.mimeType};base64,${pixels.toString("base64")}`,
           schema: OCR_SCHEMA,
           expectedAccountId: accountId,
@@ -464,6 +465,7 @@ export function attachAIRoutes({
           sourceImage: publicImage(image),
           recognizedAt: new Date().toISOString(),
           model: result.model,
+          reasoningEffort: result.reasoningEffort ?? null,
           providerId: provider.id,
         };
         database

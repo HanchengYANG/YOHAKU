@@ -16,7 +16,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import sharp from "sharp";
 import { createProviderConnection } from "../server/providers/index.mjs";
 import {
-  OCR_SCHEMA, OCR_PROMPT, validateOcr, normalizeNewOcrDraft,
+  OCR_SCHEMA, OCR_PROMPT, OCR_REASONING_EFFORT, validateOcr, normalizeNewOcrDraft,
 } from "../shared/ocr.mjs";
 import { plainText } from "../shared/document.mjs";
 
@@ -416,6 +416,7 @@ async function main() {
             : original;
         const result = await completed(provider.runtime, {
           prompt: OCR_PROMPT,
+          reasoningEffort: OCR_REASONING_EFFORT,
           schema: OCR_SCHEMA,
           image: `data:${mime};base64,${pixels.toString("base64")}`,
         });
@@ -426,6 +427,7 @@ async function main() {
           ...draft,
           completed: true,
           model: result.model,
+          reasoningEffort: result.reasoningEffort ?? null,
           readingPolicy: "image_first_context_fallback",
         });
         report.images.push({

@@ -23,12 +23,15 @@ export function createCodexRuntime({
     sequence = 0,
     active = null;
   let model = null,
+    defaultReasoningEffort = null,
+    supportedReasoningEfforts = [],
+    lastCompletedReasoningEffort = null,
     lastError = null,
     lastSuccessfulAt = null,
     busy = false,
     generation = 0;
   const pending = new Map(),
-    loadedThreads = new Set();
+    loadedThreads = new Map();
   const directory = resolve(storageDir);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   chmodSync(directory, 0o700);
@@ -36,6 +39,8 @@ export function createCodexRuntime({
     account.activeAccountId ||
     account.id ||
     `${account.clientId}:${account.subject}`;
+  const returnedEffort = (value) =>
+    typeof value === "string" && value.trim() ? value : null;
   function requireExpected(account, expected = {}) {
     if (
       (expected.expectedAccountId &&
@@ -159,10 +164,12 @@ export function createCodexRuntime({
     }
     lastError = null;
     lastSuccessfulAt = new Date().toISOString();
+    lastCompletedReasoningEffort = current.reasoningEffort;
     current.resolve({
       text,
       threadId: current.threadId,
       model,
+      reasoningEffort: current.reasoningEffort,
       completed: true,
     });
   }
@@ -182,6 +189,8 @@ export function createCodexRuntime({
     token = null;
     identity = null;
     model = null;
+    defaultReasoningEffort = null;
+    supportedReasoningEfforts = [];
     loadedThreads.clear();
     if (old && !old.killed) {
       old.stdin.end();
@@ -364,6 +373,16 @@ export function createCodexRuntime({
       if (!selected || typeof (selected.model || selected.id) !== "string")
         throw failure("当前模型目录没有支持图片的模型，尚未发起推理。");
       model = selected.model || selected.id;
+      defaultReasoningEffort = returnedEffort(selected.defaultReasoningEffort);
+      supportedReasoningEfforts = [
+        ...new Set(
+          (Array.isArray(selected.supportedReasoningEfforts)
+            ? selected.supportedReasoningEfforts
+            : [])
+            .map((option) => returnedEffort(option?.reasoningEffort))
+            .filter(Boolean),
+        ),
+      ];
     })();
     try {
       await starting;
@@ -382,12 +401,18 @@ export function createCodexRuntime({
     image,
     threadId = null,
     schema,
+    reasoningEffort,
     expectedAccountId,
     expectedSubject,
   } = {}) {
     if (busy) throw failure("AI 正在处理另一项请求，请稍后重试。", 409);
     if (typeof prompt !== "string" || !prompt.trim())
       throw failure("请提供需要解释或识别的内容。", 400);
+    if (
+      reasoningEffort !== undefined &&
+      (typeof reasoningEffort !== "string" || !reasoningEffort.trim())
+    )
+      throw failure("请提供有效的 AI 推理等级。", 400);
     if (
       (expectedAccountId !== undefined &&
         (typeof expectedAccountId !== "string" || !expectedAccountId)) ||
@@ -402,6 +427,12 @@ export function createCodexRuntime({
       const verified = await ensure({ expectedAccountId, expectedSubject });
       if (generation !== currentGeneration)
         throw failure("AI 请求已中断，请重试。");
+      if (reasoningEffort !== undefined) {
+        if (!supportedReasoningEfforts.length)
+          throw failure("当前模型目录未提供推理等级信息，尚未发起推理。");
+        if (!supportedReasoningEfforts.includes(reasoningEffort))
+          throw failure("当前模型不支持所请求的推理等级，尚未发起推理。", 400);
+      }
       const settings = {
         model,
         approvalPolicy: "never",
@@ -415,10 +446,10 @@ export function createCodexRuntime({
           environments: [],
         });
         threadId = started.thread.id;
-        loadedThreads.add(threadId);
+        loadedThreads.set(threadId, returnedEffort(started.reasoningEffort));
       } else if (!loadedThreads.has(threadId)) {
-        await rpc("thread/resume", { ...settings, threadId });
-        loadedThreads.add(threadId);
+        const resumed = await rpc("thread/resume", { ...settings, threadId });
+        loadedThreads.set(threadId, returnedEffort(resumed.reasoningEffort));
       }
       const beforeTurn = await auth.status();
       requireExpected(beforeTurn, verified);
@@ -433,6 +464,7 @@ export function createCodexRuntime({
       return await new Promise((resolve, reject) => {
         const state = {
           threadId,
+          reasoningEffort: loadedThreads.get(threadId) ?? null,
           turnId: null,
           resolve,
           reject,
@@ -452,6 +484,7 @@ export function createCodexRuntime({
           threadId,
           input,
           ...(schema ? { outputSchema: schema } : {}),
+          ...(reasoningEffort !== undefined ? { effort: reasoningEffort } : {}),
           sandboxPolicy: { type: "readOnly", networkAccess: false },
           environments: [],
           approvalPolicy: "never",
@@ -460,6 +493,10 @@ export function createCodexRuntime({
             if (active !== state) return;
             if (typeof result?.turn?.id !== "string")
               throw failure("Codex 未返回有效的对话轮次，请重试。");
+            if (reasoningEffort !== undefined) {
+              loadedThreads.set(threadId, reasoningEffort);
+              state.reasoningEffort = reasoningEffort;
+            }
             state.turnId = result.turn.id;
             const buffered = state.buffer;
             state.buffer = [];
@@ -485,6 +522,9 @@ export function createCodexRuntime({
       running: !!proc,
       busy,
       model,
+      defaultReasoningEffort,
+      supportedReasoningEfforts: [...supportedReasoningEfforts],
+      lastCompletedReasoningEffort,
       lastError,
       lastSuccessfulAt,
     }),

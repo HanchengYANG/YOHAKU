@@ -53,3 +53,5 @@ shared/ruby-display.mjs           整词读音对齐与汉字部分显示
 发起授权时保存一次性 state 对应的网站 user ID 和 provider ID。来自 OpenAI 的跨站回调可能不带 SameSite=Strict 网站 Cookie，因此回调按服务端 state 找回原连接，再由认证模块校验 state、nonce、签名、audience、时效及 granted scopes。不会拿当前浏览器碰巧登录的另一个网站账号接收授权。
 
 运行时当前固定验证 Codex CLI `0.160.1`，使用官方实验字段 `environments: []` 禁止模型访问执行环境。线程创建和每一轮都显式指定；不支持时失败，不回退到默认环境。模型推理、结构化识别及持续运行仍须使用真实账号另行验证。
+
+OCR单独请求`reasoningEffort: low`，OpenAI adapter按当前账号`model/list`的支持列表校验后映射到`turn/start.effort`；不支持或能力信息缺失时明确拒绝，不静默沿用更高等级。普通问答不增加此覆盖。线程start/resume返回的有效等级及后续显式覆盖按线程记录，识别记录保存本次等级；未知返回null，不用目录推荐默认值冒充实际使用值。模型仍取账号目录的默认图片模型，最近实测为gpt-6.1-sol，未硬编码升级到其他型号。
