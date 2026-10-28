@@ -82,10 +82,10 @@ const ocrDouble = {
       confidence: "high",
       sourcePage: "single",
       segments: [
-        { text: "僕", reading: "ぼく", origin: "generated" },
+        { text: "僕", reading: "ぼく", origin: "source" },
         { text: "が", reading: null, origin: null },
         { text: "生まれた", reading: "うまれた", origin: "generated" },
-        { text: "日", reading: "ひ", origin: "generated" },
+        { text: "日", reading: "ひ", origin: "source" },
         { text: "の", reading: null, origin: null },
         { text: "空", reading: "そら", origin: "generated" },
         { text: "は", reading: null, origin: null },
@@ -97,7 +97,7 @@ const ocrDouble = {
       confidence: "uncertain",
       sourcePage: "single",
       segments: [
-        { text: "背中", reading: "せなか", origin: "generated" },
+        { text: "背中", reading: "せなか", origin: "source" },
         { text: "を", reading: null, origin: null },
         { text: "撫でる", reading: "なでる", origin: "generated" },
       ],
@@ -113,7 +113,10 @@ const ocrDouble = {
       confidence: "high",
       sourcePage: "single",
       segments: [
-        { text: "アキックス：「ここで", reading: null, origin: null },
+        // Deliberately redundant model output: the real new-draft normalizer
+        // must remove kana-only readings before the UI or database sees them.
+        { text: "アキックス", reading: "あきっくす", origin: "generated" },
+        { text: "：「ここで", reading: null, origin: null },
         { text: "食べる", reading: "たべる", origin: "generated" },
         { text: "。」", reading: null, origin: null },
       ],

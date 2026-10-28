@@ -12,6 +12,7 @@ import {
   plainText,
   stats,
 } from "../shared/document.mjs";
+import { splitRubyDisplay } from "../shared/ruby-display.mjs";
 
 const kinds = new Set(["lyrics", "article", "textbook", "book"]);
 const orientations = new Set(["horizontal", "vertical"]);
@@ -37,10 +38,16 @@ function markdown(document) {
     .map((block) => {
       const text = block.segments
         .map((segment) => {
-          const base = htmlEscape(segment.text);
-          return segment.reading
-            ? `<ruby>${base}<rp>（</rp><rt>${htmlEscape(segment.reading)}</rt><rp>）</rp></ruby>`
-            : base;
+          const parts = splitRubyDisplay(segment.text, segment.reading);
+          const text = parts.map((part) => {
+            const base = htmlEscape(part.text);
+            return part.reading
+              ? `<ruby>${base}<rp>（</rp><rt>${htmlEscape(part.reading)}</rt><rp>）</rp></ruby>`
+              : base;
+          }).join("");
+          return segment.reading && !parts.some((part) => part.reading)
+            ? `<span title="${htmlEscape(segment.reading)}">${text}</span>`
+            : text;
         })
         .join("");
       if (!text) return "";

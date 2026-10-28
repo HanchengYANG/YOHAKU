@@ -261,9 +261,13 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
             </div>
           )}
           <div className="image-recognition-note">
-            <p>识别正文，并根据语境生成假名；书上的小号注音可忽略。</p>
-            <p>手写批注和页码单独保存，人名与特殊读法可在下一步校正。</p>
-            <p>照片的阴影、弯曲、反光和模糊可能影响正文识别，请在下一步确认。</p>
+            <p>
+              优先保留原图中清晰的注音；缺失或不清晰的读音，由 AI 按语境补充。
+            </p>
+            <p>纯假名不重复注音。手写批注和页码单独整理，识别后可逐项校正。</p>
+            <p>
+              照片的阴影、弯曲、反光和模糊可能影响正文识别，请在下一步确认。
+            </p>
           </div>
           <button
             className="button primary"
@@ -275,14 +279,14 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
             {phase === "upload"
               ? "正在上传原图…"
               : phase === "recognize"
-                ? "正在识别正文并生成注音…"
+                ? "正在识别正文与注音…"
                 : image
                   ? "重试识别"
                   : "识别图片"}
           </button>
           <p className="image-recognition-state" role="status">
             {phase === "recognize"
-              ? "AI 正在识别正文并按语境生成假名。完成后会打开可编辑的校对草稿。"
+              ? "正在识别正文和清晰注音，并按语境补充缺失读音。完成后会打开可编辑的校对草稿。"
               : "此步骤不会自动把识别结果存为最终原文。"}
           </p>
         </div>

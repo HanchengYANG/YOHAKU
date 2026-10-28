@@ -27,6 +27,7 @@ server/providers/openai/runtime.mjs Codex stdio、会话恢复、最终结果校
 server/ai/routes.mjs               图片与讨论业务，选择当前用户的 provider
 server/ai/images.mjs               受限图片解码及原图持久存储
 shared/ocr.mjs                    业务 OCR Schema、识别提示、验证
+shared/ruby-display.mjs           整词读音对齐与汉字部分显示
 ```
 
 应用只通过 connection 的 `auth`、`runtime.run`、`runtime.status` 和 `close` 接口使用提供方。OCR 的正文／注音结构和阅读界面不依赖某个厂商的 RPC 协议。OpenAI 的 OAuth、Codex 协议及模型目录处理留在其 adapter 内。
@@ -42,6 +43,8 @@ shared/ocr.mjs                    业务 OCR Schema、识别提示、验证
 - 所有真实学习数据、授权和备份都被 Git 忽略。
 
 正文块的可选`type`仅允许paragraph、heading和list_item；旧无类型块按段落显示。模型只整理原文的结构与空白，字词和标点仍为纯文字；页面用受控标签呈现，Markdown导出保留标题与条目，不执行模型HTML。阅读与编辑统一横排，来源方向另存于识别记录。
+
+新识别优先保留清晰印刷注音为source，缺失或模糊才按语境补为generated；新草稿过滤不含汉字片段的冗余读音，历史记录不迁移。存储与校对使用完整词读音；阅读和Markdown导出按正文假名对齐，只在汉字上显示对应小假名。不能可靠对齐时不猜分，完整读音保留于悬停提示和校对条目，原文与整词记录保持。
 
 初次创建站内账号时，旧本机资料归初始管理员。这与管理员创建处于同一数据库事务，失败会整体回滚。此前在本应用完成的 SIWC 授权留在旧目录，只有初始账号可以明确点击「绑定刚才的 ChatGPT 授权」认领；认领保留原注册、主机 ID 和历史，并形成持久外部身份绑定，不默认共享给朋友。
 

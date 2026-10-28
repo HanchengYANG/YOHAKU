@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from "react";
+import { splitRubyDisplay } from "../../shared/ruby-display.mjs";
 
 export default function RubyText({
   blocks,
@@ -104,15 +105,32 @@ export default function RubyText({
           start - segment.start,
           end - segment.start,
         );
+        let partOffset = start;
+        const display = splitRubyDisplay(value, segment.reading).map(
+          (part, partIndex) => {
+            const base = baseText(part.text, partOffset);
+            partOffset += part.text.length;
+            return part.reading ? (
+              <ruby key={partIndex} data-origin={segment.origin}>
+                {base}
+                <rp>（</rp>
+                <rt>{part.reading}</rt>
+                <rp>）</rp>
+              </ruby>
+            ) : (
+              <React.Fragment key={partIndex}>{base}</React.Fragment>
+            );
+          },
+        );
         const content = segment.reading ? (
-          <ruby data-origin={segment.origin}>
-            {baseText(value, start)}
-            <rp>（</rp>
-            <rt>{segment.reading}</rt>
-            <rp>）</rp>
-          </ruby>
+          <span
+            className="ruby-word"
+            title={`${segment.text}：${segment.reading}`}
+          >
+            {display}
+          </span>
         ) : (
-          baseText(value, start)
+          display
         );
         const active =
           activeRange &&

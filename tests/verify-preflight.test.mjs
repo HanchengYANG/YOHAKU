@@ -5,11 +5,12 @@ import { mkdtemp, rm, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkImage, selectVerificationUser } from "../scripts/verify-ai.mjs";
+import { validateOcr, normalizeNewOcrDraft } from "../shared/ocr.mjs";
 
 const owner = "11111111-1111-4111-8111-111111111111";
 const friend = "22222222-2222-4222-8222-222222222222";
 
-test("新读音验收要求AI生成注音，不把旧source结果或无注音当作新策略通过", () => {
+test("新读音验收允许印刷source和补全generated，不把无注音或非法来源当通过", () => {
   const segments = [
     { text: "今日", reading: "きょう", origin: "generated" },
     { text: "は", reading: null, origin: null },
@@ -22,15 +23,56 @@ test("新读音验收要求AI生成注音，不把旧source结果或无注音当
   ];
   const draft = { blocks: [{ segments }] };
   assert.ok(checkImage("04-unseen", draft).every(Boolean));
-  const legacy = structuredClone(draft);
-  legacy.blocks[0].segments[0].origin = "source";
-  assert.equal(checkImage("04-unseen", legacy).every(Boolean), false);
+  const mixed = structuredClone(draft);
+  mixed.blocks[0].segments[0].origin = "source";
+  assert.ok(checkImage("04-unseen", mixed).every(Boolean));
+  const printed = structuredClone(draft);
+  for (const segment of printed.blocks[0].segments)
+    if (segment.reading) segment.origin = "source";
+  assert.ok(checkImage("04-unseen", printed).every(Boolean));
+  const invalid = structuredClone(draft);
+  invalid.blocks[0].segments[0].origin = "manual";
+  assert.equal(checkImage("04-unseen", invalid).every(Boolean), false);
+  invalid.blocks[0].segments[0].origin = null;
+  assert.equal(checkImage("04-unseen", invalid).every(Boolean), false);
   const unannotated = structuredClone(draft);
   for (const segment of unannotated.blocks[0].segments) {
     segment.reading = null;
     segment.origin = null;
   }
   assert.equal(checkImage("04-unseen", unannotated).every(Boolean), false);
+});
+
+test("验证新草稿去掉纯假名冗余reading，保留source/generated/null及原始输入", () => {
+  const raw = {
+    title: "验证替身草稿",
+    kind: "article",
+    orientation: "horizontal",
+    readingOrder: "从左到右。",
+    blocks: [{
+      confidence: "high", sourcePage: "single",
+      segments: [
+        { text: "今日", reading: "きょう", origin: "source" },
+        { text: "は", reading: "は", origin: "source" },
+        { text: "図書館", reading: "としょかん", origin: "generated" },
+        { text: "で", reading: "で", origin: "generated" },
+        { text: "日本語", reading: "にほんご", origin: "source" },
+        { text: "を", reading: null, origin: null },
+        { text: "勉強", reading: "べんきょう", origin: "generated" },
+        { text: "します。", reading: null, origin: null },
+      ],
+    }],
+    warnings: [], nonBody: [],
+  };
+  const validated = validateOcr(raw);
+  const snapshot = structuredClone(validated);
+  const normalized = normalizeNewOcrDraft(validated);
+  assert.ok(checkImage("04-unseen", normalized).every(Boolean));
+  assert.deepEqual(normalized.blocks[0].segments.map((segment) => segment.origin),
+    ["source", null, "generated", null, "source", null, "generated", null]);
+  assert.equal(normalized.blocks[0].segments[1].reading, null);
+  assert.equal(normalized.blocks[0].segments[3].reading, null);
+  assert.deepEqual(validated, snapshot);
 });
 
 async function fixture(t) {

@@ -15,7 +15,9 @@ import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import sharp from "sharp";
 import { createProviderConnection } from "../server/providers/index.mjs";
-import { OCR_SCHEMA, OCR_PROMPT, validateOcr } from "../shared/ocr.mjs";
+import {
+  OCR_SCHEMA, OCR_PROMPT, validateOcr, normalizeNewOcrDraft,
+} from "../shared/ocr.mjs";
 import { plainText } from "../shared/document.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -158,16 +160,16 @@ export function checkImage(name, draft) {
   const text = plainText(draft.blocks).replace(/\s/g, "");
   const segments = draft.blocks.flatMap((block) => block.segments);
   const readings = segments.filter((segment) => segment.reading);
-  const generated =
+  const validOrigins =
     readings.length > 0 &&
-    readings.every((segment) => segment.origin === "generated");
+    readings.every((segment) => ["source", "generated"].includes(segment.origin));
   const phonetic = segments
     .map((segment) => segment.reading || segment.text)
     .join("")
     .replace(/\s/g, "");
   if (name === "01-lyrics")
     return [
-      generated,
+      validOrigins,
       text.includes("僕が生まれた日の空"),
       text.includes("背中を撫でる声"),
       phonetic.includes("せなか"),
@@ -175,7 +177,7 @@ export function checkImage(name, draft) {
     ];
   if (name === "02-textbook")
     return [
-      generated,
+      validOrigins,
       text.includes("中国語"),
       text.includes("明治時代"),
       phonetic.includes("めいじじだい"),
@@ -186,7 +188,7 @@ export function checkImage(name, draft) {
     ];
   if (name === "03-vertical")
     return [
-      generated,
+      validOrigins,
       draft.orientation === "vertical",
       text.indexOf("お花見") >= 0 &&
         text.indexOf("お花見") < text.indexOf("梅雨"),
@@ -194,7 +196,7 @@ export function checkImage(name, draft) {
       draft.blocks.some((block) => block.sourcePage === "left"),
     ];
   return [
-    generated,
+    validOrigins,
     text === "今日は図書館で日本語を勉強します。",
     phonetic.includes("としょかん"),
     phonetic.includes("にほんご"),
@@ -233,11 +235,16 @@ async function main() {
         ]),
       )
       .digest("hex");
-    const output = join(root, "artifacts", "ai-verification", user.id, "ai-context");
+    const output = join(
+      root, "artifacts", "ai-verification", user.id, "image-first-context-fallback",
+    );
     await mkdir(output, { recursive: true, mode: 0o700 });
     await chmod(output, 0o700);
     console.log(
       `验证站内账号：${user.username}；提供方：OpenAI；路径：本应用 SIWC + Codex app-server。`,
+    );
+    console.log(
+      `本轮报告目录：artifacts/ai-verification/${user.id}/image-first-context-fallback/。`,
     );
 
     if (args.includes("--resume")) {
@@ -254,6 +261,8 @@ async function main() {
         state.identity !== identity ||
         state.userId !== user.id ||
         state.providerId !== "openai" ||
+        state.readingPolicy !== "image_first_context_fallback" ||
+        report.readingPolicy !== "image_first_context_fallback" ||
         state.runId !== report.runId ||
         typeof state.threadId !== "string" ||
         !state.threadId ||
@@ -262,7 +271,7 @@ async function main() {
         state.processId === process.pid
       )
         prerequisite(
-          "验证记录与当前账号不符，或不是新的 CLI 进程；请重新执行初次验证。",
+          "验证记录与当前账号或注音策略不符，或不是新的 CLI 进程；请重新执行初次验证。",
         );
       try {
         const result = await completed(provider.runtime, {
@@ -311,7 +320,7 @@ async function main() {
       userId: user.id,
       username: user.username,
       providerId: "openai",
-      readingPolicy: "ai_context",
+      readingPolicy: "image_first_context_fallback",
       authPath: "本应用独立 SIWC + Codex app-server",
       realInference: false,
       scope:
@@ -333,6 +342,7 @@ async function main() {
         runId: report.runId,
         userId: user.id,
         providerId: "openai",
+        readingPolicy: "image_first_context_fallback",
         identity,
         threadId: first.threadId,
         code,
@@ -410,13 +420,13 @@ async function main() {
           image: `data:${mime};base64,${pixels.toString("base64")}`,
         });
         report.realInference = true;
-        const draft = validateOcr(JSON.parse(result.text));
+        const draft = normalizeNewOcrDraft(validateOcr(JSON.parse(result.text)));
         const anchors = checkImage(name, draft);
         await saveJSON(output, `${name}.json`, {
           ...draft,
           completed: true,
           model: result.model,
-          readingPolicy: "ai_context",
+          readingPolicy: "image_first_context_fallback",
         });
         report.images.push({
           name,
@@ -448,7 +458,7 @@ async function main() {
     await saveJSON(output, "report.json", report);
     process.exitCode = report.initialChecksPassed ? 0 : 1;
     console.log(
-      `结果保存在 artifacts/ai-verification/${user.id}/。网站保持停止，用新的 CLI 进程运行 npm run verify:ai -- --resume${args.find((arg) => arg.startsWith("--user=")) ? ` ${args.find((arg) => arg.startsWith("--user="))}` : ""} 验证续聊。`,
+      `结果保存在 artifacts/ai-verification/${user.id}/image-first-context-fallback/。网站保持停止，用新的 CLI 进程运行 npm run verify:ai -- --resume${args.find((arg) => arg.startsWith("--user=")) ? ` ${args.find((arg) => arg.startsWith("--user="))}` : ""} 验证续聊。`,
     );
     console.log(
       "本报告只证明对应 provider 能力与核对点；HTTP、SQLite、UI 的证据来自独立测试，不等于完整网站真模型流程已验收。",

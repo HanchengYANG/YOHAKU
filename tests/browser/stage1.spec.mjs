@@ -261,17 +261,17 @@ test("原词示例与完整词注音统一横排，注音在上方并能保存�
     .getByRole("textbox", { name: "假名读音", exact: true })
     .fill("たべる");
   await page.getByRole("button", { name: "添加注音" }).click();
-  await expect(preview.locator("rt")).toHaveText([...originalReadings, "たべる"]);
+  await expect(preview.locator("rt")).toHaveText([...originalReadings, "た"]);
   await page.getByRole("button", { name: "保存并阅读" }).click();
   const article = page.getByRole("article", { name: "日语原文" });
   await expect(article.locator(".japanese-text")).toHaveCSS(
     "writing-mode",
     "horizontal-tb",
   );
-  await expect(article.locator("rt")).toHaveText([...originalReadings, "たべる"]);
+  await expect(article.locator("rt")).toHaveText([...originalReadings, "た"]);
   await expect(article.locator(".text-line")).toHaveCount(6);
-  const wholeWord = article.locator("ruby").last();
-  expect(await wholeWord.evaluate((el) => el.firstChild.textContent)).toBe("食べる");
+  const displayedKanji = article.locator("ruby").last();
+  expect(await displayedKanji.evaluate((el) => el.firstChild.textContent)).toBe("食");
   const position = await article
     .locator("ruby")
     .last()
@@ -298,9 +298,9 @@ test("原词示例与完整词注音统一横排，注音在上方并能保存�
   ]);
   await page.reload();
   await expect(article.locator(".japanese-text")).toHaveCSS("writing-mode", "horizontal-tb");
-  await expect(article.locator("rt")).toHaveText([...originalReadings, "たべる"]);
+  await expect(article.locator("rt")).toHaveText([...originalReadings, "た"]);
   expect(await article.locator("ruby").last().evaluate((el) => el.firstChild.textContent))
-    .toBe("食べる");
+    .toBe("食");
   expect(await (await page.request.get(`/api/documents/${id}`)).json()).toEqual(saved);
   expect(
     await page.evaluate(
@@ -311,5 +311,61 @@ test("原词示例与完整词注音统一横排，注音在上方并能保存�
     path: `artifacts/stage1-horizontal-whole-word-${info.project.name}.png`,
     fullPage: true,
   });
+  await page.getByRole("button", { name: "校对文字与注音", exact: true }).click();
+  await page.getByRole("tab", { name: /注音校正/ }).click();
+  await expect(page.getByRole("textbox", { name: "食べる的读音（第6行）", exact: true }))
+    .toHaveValue("たべる");
+  await page.getByRole("button", { name: "取消", exact: true }).click();
   await deleteDocument(page, id);
+});
+
+test("假名锚点只让汉字显示注音，前后缀与多汉字整词保存校对不拆分", async ({ page }, info) => {
+  const content = "{お父さん|おとうさん}。{取り戻す|とりもどす}。\n{キリコ|きりこ}と{ここで|ここで}。";
+  const expectedBody = "お父さん。取り戻す。\nキリコとここで。";
+  const created = await page.request.post("/api/documents", {
+    data: { title: "整词数据与汉字注音显示", kind: "article", orientation: "horizontal", content },
+  });
+  expect(created.status()).toBe(201);
+  const initial = await created.json();
+  await page.goto(`/#${initial.id}`);
+  const article = page.getByRole("article", { name: "日语原文", exact: true });
+  const checkDisplay = async () => {
+    await expect(article.locator("rt")).toHaveText(["とう", "と", "もど"]);
+    expect(await article.locator("ruby").evaluateAll((items) => items.map((el) => el.firstChild.textContent)))
+      .toEqual(["父", "取", "戻"]);
+    await expect(article.locator(".text-line").nth(1).locator("ruby")).toHaveCount(0);
+    const text = await article.locator(".text-line").evaluateAll((lines) => lines.map((line) => {
+      const copy = line.cloneNode(true);
+      copy.querySelectorAll("rt, rp").forEach((node) => node.remove());
+      return copy.textContent;
+    }).join("\n"));
+    expect(text).toBe(expectedBody);
+  };
+  await checkDisplay();
+  await page.getByRole("button", { name: "校对文字与注音", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "日语正文", exact: true })).toHaveValue(expectedBody);
+  await page.getByRole("tab", { name: /注音校正/ }).click();
+  const father = page.getByRole("textbox", { name: "お父さん的读音（第1行）", exact: true });
+  await expect(father).toHaveValue("おとうさん");
+  await expect(page.getByRole("textbox", { name: "取り戻す的读音（第1行）", exact: true })).toHaveValue("とりもどす");
+  await expect(page.getByRole("textbox", { name: "キリコ的读音（第2行）", exact: true })).toHaveValue("きりこ");
+  await expect(page.getByRole("textbox", { name: "ここで的读音（第2行）", exact: true })).toHaveValue("ここで");
+  await father.fill("おとーさん");
+  await father.fill("おとうさん");
+  await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
+  await page.reload();
+  await checkDisplay();
+  await page.screenshot({
+    path: `artifacts/stage2-kanji-only-display-${info.project.name}.png`,
+    fullPage: true,
+  });
+  const response = await page.request.get(`/api/documents/${initial.id}`);
+  expect(response.ok()).toBe(true);
+  const saved = await response.json();
+  expect(saved.content).toBe(content);
+  expect(saved.blocks.map((block) => block.segments)).toEqual(initial.blocks.map((block) => block.segments));
+  expect(saved.blocks.flatMap((block) => block.segments.filter((s) => s.reading).map((s) => [s.text, s.reading])))
+    .toEqual([["お父さん", "おとうさん"], ["取り戻す", "とりもどす"], ["キリコ", "きりこ"], ["ここで", "ここで"]]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await deleteDocument(page, initial.id);
 });

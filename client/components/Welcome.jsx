@@ -45,7 +45,7 @@ export default function Welcome({ onImport, onSample, onImage }) {
         </div>
         <RubyText blocks={preview} fontSize={24} />
         <div className="sheet-footnote">
-          日式注音排版，可按完整词校正读音。
+          读音只显示在汉字部分，仍可按完整词校正。
           <span>
             例：
             <ruby>
@@ -57,8 +57,9 @@ export default function Welcome({ onImport, onSample, onImage }) {
       <div className="welcome-footer">
         <span>02 / 图片与讨论</span>
         <p>
-          文字可直接导入。连接 ChatGPT 后可尝试图片识别与 AI
-          讨论，识别结果先校对再保存。旁注和朗读尚未接入。
+          文字可直接导入。连接 ChatGPT
+          后可识别图片并讨论原文。清晰注音优先保留，缺失或不清晰时由 AI
+          补充；结果先校对再保存。旁注和朗读尚未接入。
         </p>
       </div>
     </section>

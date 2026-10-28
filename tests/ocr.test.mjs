@@ -4,7 +4,7 @@ import { mkdtemp, rm, stat, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
-import { OCR_SCHEMA, OCR_PROMPT, validateOcr } from "../shared/ocr.mjs";
+import { OCR_SCHEMA, OCR_PROMPT, validateOcr, normalizeNewOcrDraft } from "../shared/ocr.mjs";
 import { plainText, serializeBlocks } from "../shared/document.mjs";
 import { createImageStore } from "../server/ai/images.mjs";
 
@@ -174,13 +174,77 @@ test("按语境提供的同词不同读音与含送假名的完整词形不会�
   );
 });
 
-test("新请求Schema仅允许生成注音或无注音，不再请求原图source读音", () => {
+test("新请求Schema允许清晰原图source、上下文generated或无注音", () => {
   const schema = OCR_SCHEMA.properties.blocks.items.properties.segments.items;
-  assert.deepEqual(schema.properties.origin.enum, ["generated", null]);
-  assert.equal(schema.properties.origin.enum.includes("source"), false);
+  assert.deepEqual(schema.properties.origin.enum, ["source", "generated", null]);
   for (const segment of result().blocks.flatMap((block) => block.segments)) {
     assert.ok(schema.properties.origin.enum.includes(segment.origin));
   }
+});
+
+test("清晰特殊source与无注音或模糊处的generated分别保留，整词及数字对应不变", () => {
+  const raw = result();
+  raw.blocks = [{
+    type: "paragraph",
+    confidence: "uncertain",
+    sourcePage: "single",
+    segments: [
+      { text: "宇宙", reading: "そら", origin: "source" },
+      { text: "食べる", reading: "たべる", origin: "source" },
+      { text: "生まれた", reading: "うまれた", origin: "source" },
+      { text: "背中", reading: "せなか", origin: "generated" },
+      { text: "歩いた", reading: "あるいた", origin: "generated" },
+      { text: "37", reading: null, origin: null },
+      { text: "歳", reading: "さい", origin: "source" },
+      { text: "眞人", reading: null, origin: null },
+    ],
+  }];
+  raw.warnings = [
+    { blockIndex: 0, message: "歩いた的小号原注音模糊，按上下文生成；眞人读音仍需确认。" },
+  ];
+  const parsed = normalizeNewOcrDraft(validateOcr(raw));
+  assert.deepEqual(parsed.blocks[0].segments, raw.blocks[0].segments);
+  assert.deepEqual(parsed.warnings, raw.warnings);
+  assert.equal(parsed.blocks[0].segments[0].reading, "そら");
+  assert.equal(parsed.blocks[0].segments[0].origin, "source");
+  assert.deepEqual(parsed.blocks[0].segments.slice(1, 3).map((s) => s.text), ["食べる", "生まれた"]);
+});
+
+test("仅新草稿去掉无Han片段的冗余注音，纯假名正文与汉字混合整词保持", () => {
+  const raw = result();
+  raw.blocks = [{
+    type: "list_item",
+    confidence: "high",
+    sourcePage: "single",
+    segments: [
+      { text: "「", reading: null, origin: null },
+      { text: "ここで", reading: "ここで", origin: "generated" },
+      { text: "キリコ", reading: "きりこ", origin: "source" },
+      { text: "食べる", reading: "たべる", origin: "source" },
+      { text: "生まれた", reading: "うまれた", origin: "generated" },
+      { text: "お父さん", reading: "おとうさん", origin: "source" },
+      { text: "𠮷さん", reading: "よしさん", origin: "generated" },
+      { text: "。」", reading: null, origin: null },
+    ],
+  }];
+  raw.warnings = [];
+  const parsed = validateOcr(raw);
+  const original = structuredClone(parsed);
+  const normalized = normalizeNewOcrDraft(parsed);
+  assert.notEqual(normalized, parsed);
+  assert.notEqual(normalized.blocks[0], parsed.blocks[0]);
+  assert.deepEqual(parsed, original);
+  assert.equal(parsed.blocks[0].segments[1].reading, "ここで");
+  assert.equal(parsed.blocks[0].segments[2].origin, "source");
+  assert.equal(plainText(normalized.blocks), plainText(parsed.blocks));
+  assert.equal(normalized.blocks[0].type, "list_item");
+  assert.equal(normalized.blocks[0].id, parsed.blocks[0].id);
+  assert.deepEqual(normalized.blocks[0].segments.slice(1, 3), [
+    { text: "ここで", reading: null, origin: null },
+    { text: "キリコ", reading: null, origin: null },
+  ]);
+  assert.deepEqual(normalized.blocks[0].segments.slice(3), parsed.blocks[0].segments.slice(3));
+  assert.equal(serializeBlocks(normalized.blocks), '「ここでキリコ{食べる|たべる}{生まれた|うまれた}{お父さん|おとうさん}{𠮷さん|よしさん}。」');
 });
 
 test("不确定行缺少模型说明时增加校对提示，模型下标必须有效", () => {

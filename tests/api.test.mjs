@@ -76,6 +76,27 @@ const sample = {
   content: "{僕|ぼく}が{生|う}まれた{日|ひ}\n\n{背中|せなか}を撫でる",
 };
 
+test("Markdown只在汉字上显示读音，整词正文与结构化读音保存不变", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "yohaku-ruby-display-"));
+  const running = await start(dataDir);
+  t.after(async () => {
+    await running.stop();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+  const content = "{お父さん|おとうさん}は{食べる|たべる}。{取り戻す|とりもどす}。{かな|かな}。\n{青サギ|あおサギ}";
+  const created = await request(running.url, "/api/documents", "POST", { ...sample, content });
+  assert.equal(created.status, 201);
+  const exported = await request(running.url, `/api/documents/${created.data.id}/export?format=markdown`);
+  assert.ok(exported.data.includes("お<ruby>父<rp>（</rp><rt>とう</rt><rp>）</rp></ruby>さん"));
+  assert.ok(exported.data.includes("<ruby>食<rp>（</rp><rt>た</rt><rp>）</rp></ruby>べる"));
+  assert.ok(exported.data.includes("<ruby>取<rp>（</rp><rt>と</rt><rp>）</rp></ruby>り<ruby>戻<rp>（</rp><rt>もど</rt><rp>）</rp></ruby>す"));
+  assert.ok(!exported.data.includes("<ruby>かな"));
+  assert.ok(exported.data.includes("<ruby>青<rp>（</rp><rt>あお</rt><rp>）</rp></ruby>サギ"));
+  const reopened = await request(running.url, `/api/documents/${created.data.id}`);
+  assert.equal(reopened.data.content, content);
+  assert.deepEqual(reopened.data.blocks, created.data.blocks);
+});
+
 test("旧竖排资料统一横排输出，受控标题条目保存重开与Markdown导出保持结构", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "yohaku-layout-"));
   let running = await start(dataDir);
@@ -352,7 +373,7 @@ test("材料 API 的真实存储、重开、版本保护和导出", async (t) =>
     const escaped = await request(running.url, "/api/documents", "POST", {
       ...sample,
       title: "<script>标题</script>",
-      content: "<script>alert(1)</script>\n{言葉|ことば}",
+      content: '<script>alert(1)</script>\n{言葉|ことば}\n{食べる|た"<img>}',
     });
     assert.equal(escaped.status, 201);
     const markdown = await request(
@@ -362,6 +383,8 @@ test("材料 API 的真实存储、重开、版本保护和导出", async (t) =>
     assert.ok(!markdown.data.includes("<script>"));
     assert.ok(markdown.data.includes("&lt;script&gt;"));
     assert.ok(markdown.data.includes("  \n<ruby>"));
+    assert.ok(!markdown.data.includes("<img>"));
+    assert.ok(markdown.data.includes('title="た&quot;&lt;img&gt;">食べる</span>'));
     await request(running.url, `/api/documents/${escaped.data.id}`, "DELETE", {
       revision: escaped.data.revision,
     });

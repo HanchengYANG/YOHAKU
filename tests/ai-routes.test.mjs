@@ -279,7 +279,7 @@ test("AI替身接口集成：multipart原图保留，未授权也可上传，识
   assert.deepEqual(Buffer.from(await reopened.arrayBuffer()), buffer);
 });
 
-test("AI替身接口集成：新图读音统一为上下文生成，保存重开保留来源，手工读音仍为manual", async (t) => {
+test("AI替身接口集成：新图保留印刷source及补全generated，保存重开不丢来源，手改仍为manual", async (t) => {
   const app = await setup(t);
   app.state.ocrResult = { ...recognizedFixture(), orientation: "vertical" };
   ["heading", "paragraph", "list_item"].forEach((type, index) => {
@@ -299,11 +299,8 @@ test("AI替身接口集成：新图读音统一为上下文生成，保存重开
   assert.deepEqual(draft.blocks.map((block) => block.type), ["heading", "paragraph", "list_item"]);
   assert.equal(draft.sourceImageId, image.id);
   assert.equal(Object.hasOwn(draft.sourceImage, "path"), false);
-  // The upstream double deliberately claims source; new OCR cannot retain it.
-  assert.equal(recognizedFixture().blocks[0].segments[0].origin, "source");
-  assert.equal(draft.readingPolicy, "ai_context");
-  for (const segment of draft.blocks.flatMap((block) => block.segments))
-    assert.equal(segment.origin, segment.reading === null ? null : "generated");
+  assert.equal(draft.readingPolicy, "image_first_context_fallback");
+  assert.equal(draft.blocks[0].segments[0].origin, "source");
   assert.equal(draft.blocks[0].segments[2].origin, "generated");
   assert.deepEqual(draft.nonBody, recognizedFixture().nonBody);
   assert.deepEqual(draft.warnings, recognizedFixture().warnings);
@@ -328,13 +325,13 @@ test("AI替身接口集成：新图读音统一为上下文生成，保存重开
   assert.equal(saved.status, 201);
   const document = saved.data;
   assert.equal(document.sourceImageId, image.id);
-  assert.equal(document.blocks[0].segments[0].origin, "generated");
+  assert.equal(document.blocks[0].segments[0].origin, "source");
   assert.equal(document.blocks[0].segments[2].origin, "generated");
   assert.deepEqual(document.recognition.nonBody, draft.nonBody);
-  assert.equal(document.recognition.readingPolicy, "ai_context");
+  assert.equal(document.recognition.readingPolicy, "image_first_context_fallback");
   assert.equal(document.recognition.sourceOrientation, "vertical");
   assert.deepEqual(document.blocks.map((block) => block.type), ["heading", "paragraph", "list_item"]);
-  assert.equal(document.recognition.blocks[0].segments[0].origin, "generated");
+  assert.equal(document.recognition.blocks[0].segments[0].origin, "source");
   await app.restart();
   const reopened = await request(app.url, `/api/documents/${document.id}`);
   assert.deepEqual(reopened.data, document);
@@ -350,7 +347,7 @@ test("AI替身接口集成：新图读音统一为上下文生成，保存重开
   );
   assert.equal(updated.status, 200);
   assert.equal(updated.data.sourceImageId, image.id);
-  assert.equal(updated.data.blocks[0].segments[0].origin, "generated");
+  assert.equal(updated.data.blocks[0].segments[0].origin, "source");
   assert.equal(updated.data.blocks[0].segments[2].origin, "generated");
   assert.deepEqual(updated.data.recognition.nonBody, draft.nonBody);
   const manuallyEdited = await request(
@@ -382,6 +379,39 @@ test("AI替身接口集成：新图读音统一为上下文生成，保存重开
     (await request(app.url, `/api/documents/${document.id}`)).data,
     manuallyEdited.data,
   );
+});
+
+test("AI替身接口集成：仅新草稿去除纯假名冗余注音，混合来源和整词保存重开不变", async (t) => {
+  const app = await setup(t);
+  const segments = [
+    { text: "食べる", reading: "たべる", origin: "source" },
+    { text: "生まれた", reading: "うまれた", origin: "generated" },
+    { text: "おはよう", reading: "おはよう", origin: "source" },
+    { text: "カタカナ", reading: "かたかな", origin: "generated" },
+    { text: "そして", reading: null, origin: null },
+  ];
+  app.state.ocrResult = {
+    ...recognizedFixture(),
+    blocks: [{ confidence: "high", sourcePage: "single", segments }],
+    warnings: [],
+    nonBody: [],
+  };
+  const { image } = await upload(app.url);
+  const result = await request(app.url, `/api/images/${image.id}/recognize`, "POST", {});
+  assert.equal(result.status, 200);
+  const expected = segments.map((segment, index) => index === 2 || index === 3
+    ? { ...segment, reading: null, origin: null } : segment);
+  assert.deepEqual(result.data.blocks[0].segments, expected);
+  assert.equal(result.data.content, "{食べる|たべる}{生まれた|うまれた}おはようカタカナそして");
+  assert.equal(result.data.readingPolicy, "image_first_context_fallback");
+  assert.deepEqual(app.state.ocrResult.blocks[0].segments, segments);
+  const saved = await request(app.url, "/api/documents", "POST", result.data);
+  assert.equal(saved.status, 201);
+  const readings = saved.data.blocks[0].segments.filter((segment) => segment.reading);
+  assert.deepEqual(readings, expected.slice(0, 2));
+  assert.deepEqual(saved.data.recognition.blocks[0].segments, expected);
+  await app.restart();
+  assert.deepEqual((await request(app.url, `/api/documents/${saved.data.id}`)).data, saved.data);
 });
 
 test("图片方向接口：同id持久保存，无AI授权也可旋转且不改已保存正文及识别记录", async (t) => {
@@ -527,9 +557,11 @@ test("AI替身接口集成：历史source识别记录及手工读音不被新识
   const legacyBlocks = structuredClone(document.blocks);
   legacyBlocks[0].segments[0].origin = "source";
   legacyBlocks[0].segments[2].origin = "manual";
+  legacyBlocks[0].segments.push({ text: "カタカナ", reading: "かたかな", origin: "manual" });
   const legacyRecognition = structuredClone(document.recognition);
   delete legacyRecognition.readingPolicy;
   legacyRecognition.blocks[0].segments[0].origin = "source";
+  legacyRecognition.blocks[0].segments.push({ text: "カタカナ", reading: "かたかな", origin: "source" });
   const database = new DatabaseSync(join(app.dataDir, "yohaku.sqlite"));
   try {
     database

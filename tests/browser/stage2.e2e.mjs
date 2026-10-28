@@ -149,7 +149,7 @@ async function transferImages(page, action, files) {
   );
 }
 
-async function checkOriginalPreview(page, saved, projectName) {
+async function checkOriginalPreview(page, projectName) {
   await page.getByRole("tab", { name: "正文编辑", exact: true }).click();
   const body = page.getByRole("textbox", { name: "日语正文", exact: true });
   const originalBody = await body.inputValue();
@@ -258,9 +258,7 @@ async function checkOriginalPreview(page, saved, projectName) {
   expect(matrix.c).toBeCloseTo(0, 3);
   expect(matrix.d).toBeCloseTo(1, 3);
   await page.getByRole("tab", { name: "阅读预览", exact: true }).click();
-  const expectedReadings = saved.blocks.flatMap((block) =>
-    block.segments.filter((s) => s.reading).map((s) => s.reading),
-  );
+  const expectedReadings = ["ぼく", "う", "ひ", "くう", "せなか", "な", "た"];
   await expect(
     page.getByRole("region", { name: "阅读预览", exact: true }).locator("rt"),
   ).toHaveText(expectedReadings);
@@ -404,7 +402,7 @@ test("上传和识别失败可保留图片重试，忙时不能替换且识别�
     releaseUpload();
     await expect(
       page.getByRole("button", {
-        name: "正在识别正文并生成注音…",
+        name: "正在识别正文与注音…",
         exact: true,
       }),
     ).toBeDisabled();
@@ -560,14 +558,20 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
   await expect(preview.locator("h2.text-heading")).toHaveText("用語（原文）");
   await expect(preview.locator("ul.ruby-text-list > li.text-line")).toHaveCount(1);
   expect(await renderedText(preview)).toBe(ocrText);
-  await expect(preview.locator("rt")).toContainText([
+  await expect(preview.locator("rt")).toHaveText([
     "ぼく",
-    "うまれた",
+    "う",
     "ひ",
     "そら",
     "せなか",
-    "なでる",
+    "な",
+    "た",
   ]);
+  await expect(preview.locator('ruby[data-origin="source"]')).toHaveCount(3);
+  await expect(preview.locator('ruby[data-origin="generated"]')).toHaveCount(4);
+  await expect(
+    preview.locator("rt").filter({ hasText: "あきっくす" }),
+  ).toHaveCount(0);
   await page.getByRole("tab", { name: /注音校正/ }).click();
   const reading = page.getByRole("textbox", {
     name: "空的读音（第1行）",
@@ -577,15 +581,22 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
   await expect(row.getByText("AI 注音", { exact: true })).toBeVisible();
   await reading.fill("くう");
   await expect(row.getByText("手动", { exact: true })).toBeVisible();
-  const generatedRow = page.locator(".ruby-edit-row").filter({
+  const sourceRow = page.locator(".ruby-edit-row").filter({
     has: page.getByRole("textbox", {
       name: "僕的读音（第1行）",
       exact: true,
     }),
   });
+  await expect(sourceRow.getByText("原有", { exact: true })).toBeVisible();
   await expect(
-    generatedRow.getByText("AI 注音", { exact: true }),
-  ).toBeVisible();
+    page.getByRole("textbox", {
+      name: "アキックス的读音（第5行）",
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await expect(
+    preview.locator('.ruby-word[title="生まれた：うまれた"]'),
+  ).toHaveCount(1);
   await expect(
     preview.locator("rt").filter({ hasText: /^くう$/ }),
   ).toBeVisible();
@@ -616,7 +627,7 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
     "manual",
   );
   expect(saved.blocks[0].segments.find((s) => s.text === "僕").origin).toBe(
-    "generated",
+    "source",
   );
   expect(saved.blocks[0].segments.find((s) => s.text === "生まれた")).toEqual({
     text: "生まれた",
@@ -631,6 +642,11 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
   expect(saved.recognition.nonBody.some((n) => n.type === "handwriting")).toBe(
     true,
   );
+  expect(saved.recognition.readingPolicy).toBe("image_first_context_fallback");
+  expect(
+    saved.recognition.blocks[4].segments.find((s) => s.text === "アキックス"),
+  ).toEqual({ text: "アキックス", reading: null, origin: null });
+  expect(saved.content).not.toContain("{アキックス|");
   await page.reload();
   const article = page.getByRole("article", { name: "日语原文", exact: true });
   await expect(article.locator("h2.text-heading")).toHaveText("用語（原文）");
@@ -662,7 +678,21 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
       })
       .getByText("手动", { exact: true }),
   ).toBeVisible();
-  await checkOriginalPreview(page, saved, info.project.name);
+  await expect(
+    page.getByRole("textbox", { name: "生まれた的读音（第1行）", exact: true }),
+  ).toHaveValue("うまれた");
+  await expect(
+    page
+      .locator(".ruby-edit-row")
+      .filter({
+        has: page.getByRole("textbox", {
+          name: "僕的读音（第1行）",
+          exact: true,
+        }),
+      })
+      .getByText("原有", { exact: true }),
+  ).toBeVisible();
+  await checkOriginalPreview(page, info.project.name);
   let previewDialogs = 0;
   const unexpectedDialog = async (dialog) => {
     previewDialogs++;
@@ -763,7 +793,7 @@ test("批量注音只修改明确选中的词语位置，保存后保留各自�
   await expect(completeText.locator("mark.ruby-occurrence.unavailable")).toHaveCount(1);
   await expect(completeText.locator("mark.ruby-occurrence.unavailable")).toHaveAttribute("aria-disabled", "true");
   await expect(completeText.locator("button.ruby-occurrence")).toHaveCount(0);
-  await expect(completeText.locator("rt")).toHaveText(["たべる"]);
+  await expect(completeText.locator("rt")).toHaveText(["た"]);
   await expect(batch).toContainText("完整");
 
   await query.fill("名字");
@@ -813,12 +843,12 @@ test("批量注音只修改明确选中的词语位置，保存后保留各自�
   });
   await reading.fill("みょうじ");
   const preview = page.getByRole("region", { name: "阅读预览", exact: true });
-  await expect(preview.locator("rt")).toHaveText(["たべる"]);
+  await expect(preview.locator("rt")).toHaveText(["た"]);
   await batch
     .getByRole("button", { name: "应用到选中的 4 处", exact: true })
     .click();
   await expect(preview.locator("rt")).toHaveText([
-    "たべる",
+    "た",
     "みょうじ",
     "みょうじ",
     "みょうじ",
@@ -832,7 +862,7 @@ test("批量注音只修改明确选中的词语位置，保存后保留各自�
     .getByRole("button", { name: "应用到选中的 2 处", exact: true })
     .click();
   const expectedReadings = [
-    "たべる",
+    "た",
     "みょうじ",
     "ミンツー",
     "みょうじ",

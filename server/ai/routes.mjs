@@ -5,7 +5,9 @@ import { randomUUID } from "node:crypto";
 import multer from "multer";
 import { PROVIDERS, createProviderConnection } from "../providers/index.mjs";
 import { createImageStore } from "./images.mjs";
-import { OCR_SCHEMA, OCR_PROMPT, validateOcr } from "../../shared/ocr.mjs";
+import {
+  OCR_SCHEMA, OCR_PROMPT, validateOcr, normalizeNewOcrDraft,
+} from "../../shared/ocr.mjs";
 import { plainText, serializeBlocks } from "../../shared/document.mjs";
 
 const fail = (status, message) =>
@@ -448,18 +450,15 @@ export function attachAIRoutes({
           throw fail(502, "AI 识别未完成，未保存部分输出。");
         let draft;
         try {
-          draft = validateOcr(JSON.parse(result.text));
+          draft = normalizeNewOcrDraft(validateOcr(JSON.parse(result.text)));
         } catch {
           throw fail(502, "AI 返回的识别草稿格式不完整，请重试；原图仍保留。");
         }
-        for (const block of draft.blocks)
-          for (const segment of block.segments)
-            if (segment.reading !== null) segment.origin = "generated";
         draft = {
           ...draft,
           sourceOrientation: draft.orientation,
           orientation: "horizontal",
-          readingPolicy: "ai_context",
+          readingPolicy: "image_first_context_fallback",
           content: serializeBlocks(draft.blocks),
           sourceImageId: image.id,
           sourceImage: publicImage(image),
