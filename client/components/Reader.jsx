@@ -11,8 +11,19 @@ export default function Reader({
   setShowRuby,
   fontSize,
   setFontSize,
+  onDiscuss,
 }) {
   const counts = stats(document.blocks);
+  const recognition = document.recognition;
+  const warnings = Array.isArray(recognition?.warnings)
+    ? recognition.warnings
+    : [];
+  const nonBody = Array.isArray(recognition?.nonBody)
+    ? recognition.nonBody
+    : [];
+  const imageUrl = document.sourceImageId
+    ? `/api/images/${encodeURIComponent(document.sourceImageId)}/raw`
+    : null;
   return (
     <section className="reader-page">
       <div className="document-meta">
@@ -49,6 +60,14 @@ export default function Reader({
           />
           <span>{fontSize}</span>
         </label>
+        {onDiscuss && (
+          <button
+            className="button subtle reader-ai-action"
+            onClick={onDiscuss}
+          >
+            <Icon name="arrow" size={16} />问 AI
+          </button>
+        )}
         <button className="button subtle edit-action" onClick={onEdit}>
           <Icon name="edit" size={17} />
           校对文字与注音
@@ -65,6 +84,69 @@ export default function Reader({
           orientation={document.orientation}
         />
       </article>
+      {imageUrl && (
+        <details className="reader-recognition-details">
+          <summary>
+            原图与初次识别记录
+            {warnings.length ? ` · ${warnings.length} 条提示` : ""}
+          </summary>
+          <div className="reader-recognition-content">
+            <a
+              className="text-button"
+              href={imageUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              查看完整原图 <Icon name="arrow" size={14} />
+            </a>
+            {recognition?.readingOrder && (
+              <p className="ocr-reading-order">
+                <strong>识别时的阅读顺序：</strong>
+                {recognition.readingOrder}
+              </p>
+            )}
+            {warnings.length > 0 && (
+              <>
+                <p className="ocr-history-hint">
+                  这是初次识别时的提示，已校正后的正文可能与原行号不同。
+                </p>
+                <ul className="ocr-saved-warnings">
+                  {warnings.map((warning, index) => (
+                    <li key={index}>
+                      {Number.isInteger(warning.blockIndex)
+                        ? `识别时第 ${warning.blockIndex + 1} 行：`
+                        : ""}
+                      {typeof warning === "string" ? warning : warning.message}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {nonBody.length > 0 && (
+              <div className="ocr-nonbody-list">
+                <h3>与正文分开的内容</h3>
+                {nonBody.map((item, index) => (
+                  <div className="ocr-nonbody-item" key={index}>
+                    <span>
+                      {{
+                        handwriting: "手写批注",
+                        page_number: "页码",
+                        other: "其他内容",
+                      }[item.type] || "其他内容"}
+                      {item.page === "right"
+                        ? " · 右页"
+                        : item.page === "left"
+                          ? " · 左页"
+                          : ""}
+                    </span>
+                    <p>{item.text}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </details>
+      )}
       <footer className="reader-footer">
         <span>
           更新于{" "}

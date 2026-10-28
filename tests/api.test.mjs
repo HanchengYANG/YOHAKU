@@ -6,12 +6,13 @@ import { join } from "node:path";
 import { once } from "node:events";
 import { request as httpRequest } from "node:http";
 import { createApp } from "../server/app.mjs";
+import { ensureSession, sessionHeaders } from "./helpers/session.mjs";
 
 async function start(dataDir) {
   const { app, close } = createApp({ dataDir });
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
-  return {
+  const running = {
     url: `http://127.0.0.1:${server.address().port}`,
     async stop() {
       const stopped = new Promise((resolve, reject) =>
@@ -22,12 +23,20 @@ async function start(dataDir) {
       close();
     },
   };
+  try {
+    await ensureSession(running.url);
+  } catch (error) {
+    await running.stop();
+    throw error;
+  }
+  return running;
 }
 
 async function request(url, path, method = "GET", body, extraHeaders = {}) {
   const response = await fetch(`${url}${path}`, {
     method,
     headers: {
+      ...sessionHeaders(url),
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),
       ...extraHeaders,
     },
@@ -48,7 +57,7 @@ async function rawGet(url, path, headers = {}) {
     // Fetch may replace a caller-supplied Host; exercise the actual HTTP header.
     const request = httpRequest(
       `${url}${path}`,
-      { headers, setHost: false },
+      { headers: { ...sessionHeaders(url), ...headers }, setHost: false },
       (response) => {
         response.resume();
         response.on("end", () => resolve(response.statusCode));
@@ -81,7 +90,7 @@ test("材料 API 的真实存储、重开、版本保护和导出", async (t) =>
     const health = await request(running.url, "/api/health");
     assert.equal(health.data.storage, "sqlite");
     assert.equal(health.data.capabilities.ai, false);
-    assert.equal(health.data.capabilities.imageImport, false);
+    assert.equal(health.data.capabilities.imageImport, true);
   });
 
   await t.test("所有请求拒绝外部或无效 Host，本机 Host 仍可访问", async () => {
@@ -357,7 +366,10 @@ test("材料 API 的真实存储、重开、版本保护和导出", async (t) =>
       assert.equal(badFormat.status, 400);
       const broken = await fetch(`${running.url}/api/documents`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...sessionHeaders(running.url),
+        },
         body: "{broken",
       });
       assert.equal(broken.status, 400);

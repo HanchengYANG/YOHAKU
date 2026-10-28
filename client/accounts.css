@@ -1,0 +1,258 @@
+.account-gate {
+  min-height: 100dvh;
+  padding: 48px 24px 56px;
+  background: #f6f5f1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.account-gate-brand {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  margin-bottom: 32px;
+}
+.account-gate-brand strong {
+  display: block;
+  font:
+    500 25px/1.5 "Noto Serif CJK SC",
+    serif;
+  letter-spacing: 5px;
+}
+.account-gate-brand small {
+  display: block;
+  color: #8d9783;
+  font-size: 10px;
+  letter-spacing: 2px;
+  margin-top: 3px;
+}
+.account-gate-card {
+  width: min(480px, 100%);
+  padding: 32px 35px 28px;
+  border: 1px solid #dfe5d7;
+  border-radius: 7px;
+  background: #fcfcf8;
+}
+.account-gate-card h1 {
+  font:
+    500 27px/1.6 "Noto Serif CJK SC",
+    serif;
+  margin: 10px 0 0;
+  letter-spacing: 1px;
+}
+.account-gate-description {
+  color: #8c987f;
+  font-size: 12px;
+  line-height: 1.95;
+  margin: 14px 0 23px;
+}
+.account-setup-note {
+  background: #eef2e6;
+  border-left: 2px solid #b3c3a1;
+  padding: 12px 14px;
+  margin: 0 0 24px;
+  color: #8c9a7b;
+  font-size: 11px;
+  line-height: 1.9;
+}
+.account-setup-note p {
+  margin: 0;
+}
+.account-setup-note p + p {
+  margin-top: 7px;
+}
+.account-gate-modes {
+  display: flex;
+  gap: 25px;
+  border-bottom: 1px solid #e2e7da;
+  margin: 0 0 23px;
+}
+.account-gate-modes button {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  font-size: 12px;
+  padding: 0 0 12px;
+  color: #98a58c;
+}
+.account-gate-modes button.selected {
+  color: #5e7c4d;
+  border-bottom-color: #8ca87a;
+}
+.account-gate-card fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.account-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #87967a;
+  font-size: 11px;
+  margin-bottom: 19px;
+}
+.account-form-field input {
+  width: 100%;
+  min-height: 43px;
+  border: 1px solid #dae3d1;
+  background: #fffef9;
+  color: #455c3b;
+  border-radius: 5px;
+  padding: 11px 12px;
+  font-size: 13px;
+}
+.account-submit {
+  width: 100%;
+  margin-top: 5px;
+  min-height: 44px;
+}
+.account-separation-note {
+  color: #a1ac95;
+  font-size: 10px;
+  line-height: 1.9;
+  border-top: 1px solid #e7ecde;
+  padding-top: 17px;
+  margin: 23px 0 0;
+}
+.account-gate-error {
+  color: #a17155;
+  background: #f5ece3;
+  border: 1px solid #e9d8c5;
+  border-radius: 4px;
+  padding: 10px 12px;
+  margin-bottom: 20px;
+  font-size: 12px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+.account-gate-loading {
+  color: #a0ad91;
+  text-align: center;
+  font-size: 12px;
+  padding: 25px 0;
+}
+.account-user-menu {
+  border-top: 1px solid #dce3d2;
+  margin: 0 3px;
+  padding: 16px 3px 2px;
+  min-width: 0;
+}
+.user-menu-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.user-menu-header > div {
+  min-width: 0;
+}
+.user-menu-header small {
+  display: block;
+  font-size: 9px;
+  color: #a0ac92;
+  margin-bottom: 5px;
+}
+.user-menu-header strong {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: #738863;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.user-menu-header > button {
+  font-size: 10px;
+  color: #899d79;
+  flex-shrink: 0;
+}
+.user-menu-error {
+  font-size: 10px;
+  color: #a88560;
+  line-height: 1.8;
+  margin: 10px 0 0;
+  overflow-wrap: anywhere;
+}
+.user-menu-admin {
+  margin-top: 10px;
+}
+.user-menu-admin > button {
+  font-size: 10px;
+}
+.user-menu-invitation {
+  background: #f6f8ee;
+  border: 1px solid #dee7d0;
+  border-radius: 4px;
+  padding: 10px;
+  margin-top: 6px;
+}
+.user-menu-invitation label {
+  display: block;
+  font-size: 9px;
+  color: #98a787;
+}
+.user-menu-invitation input {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid #dce6ce;
+  background: #fcfdf7;
+  border-radius: 3px;
+  font-size: 11px;
+  color: #66834f;
+  margin-top: 6px;
+}
+.invite-copy-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+  margin-top: 5px;
+}
+.invite-copy-row small {
+  color: #a1ad91;
+  font-size: 8px;
+  line-height: 1.8;
+}
+.invite-copy-row .text-button {
+  font-size: 10px;
+  flex-shrink: 0;
+}
+.user-menu-invitation > p {
+  font-size: 9px;
+  color: #a0ad90;
+  line-height: 1.8;
+  margin: 6px 0 0;
+}
+
+@media (max-width: 760px) {
+  .account-gate {
+    padding: 29px 19px 35px;
+  }
+  .account-gate-brand {
+    margin-bottom: 25px;
+  }
+  .account-gate-card {
+    padding: 25px 22px 23px;
+  }
+  .account-gate-card h1 {
+    font-size: 24px;
+  }
+  .account-gate-description {
+    font-size: 11px;
+    margin-top: 13px;
+  }
+  .account-setup-note {
+    font-size: 10px;
+    padding: 11px 12px;
+  }
+  .account-form-field input {
+    font-size: 16px;
+  }
+  .account-gate-error {
+    font-size: 11px;
+  }
+}

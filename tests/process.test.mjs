@@ -7,6 +7,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensureSession, sessionHeaders } from "./helpers/session.mjs";
 
 const rootDir = fileURLToPath(new URL("../", import.meta.url));
 
@@ -83,7 +84,7 @@ async function waitForExit(record) {
 }
 
 test(
-  "整个 Node 服务进程停止并重启后，真实文件数据库仍保留正文与注音",
+  "整个 Node 服务进程停止并重启后，真实会话、正文与注音仍持久保存",
   { timeout: 20_000 },
   async (t) => {
     const dataDir = await mkdtemp(join(tmpdir(), "yohaku-process-"));
@@ -99,6 +100,7 @@ test(
     const port = await availablePort();
     const url = `http://127.0.0.1:${port}`;
     const first = await startProcess(dataDir, port, children);
+    const session = await ensureSession(url);
     const input = {
       title: "进程重启持久性检查",
       kind: "lyrics",
@@ -107,7 +109,7 @@ test(
     };
     const response = await fetch(`${url}/api/documents`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...sessionHeaders(url) },
       body: JSON.stringify(input),
       signal: AbortSignal.timeout(4000),
     });
@@ -128,12 +130,19 @@ test(
     children.delete(first);
 
     const second = await startProcess(dataDir, port, children);
+    const restoredSession = await fetch(`${url}/api/session`, {
+      headers: sessionHeaders(url),
+      signal: AbortSignal.timeout(4000),
+    }).then((response) => response.json());
+    assert.deepEqual(restoredSession.user, session.user);
     const reopened = await fetch(`${url}/api/documents/${saved.id}`, {
+      headers: sessionHeaders(url),
       signal: AbortSignal.timeout(4000),
     });
     assert.equal(reopened.status, 200);
     assert.deepEqual(await reopened.json(), saved);
     const list = await fetch(`${url}/api/documents`, {
+      headers: sessionHeaders(url),
       signal: AbortSignal.timeout(4000),
     }).then((result) => result.json());
     assert.equal(list.documents.length, 1);

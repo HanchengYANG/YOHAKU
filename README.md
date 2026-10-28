@@ -1,6 +1,8 @@
 # 余白 · 日语阅读与笔记
 
-面向个人使用的日语阅读与笔记工具。按阶段实现，先验收文字导入、持久保存和可校正的振假名排版，再接入真实 AI、图片识别和笔记。
+面向个人使用的日语阅读与笔记工具。第一阶段的阅读、保存与振假名校对已验收；当前接入 ChatGPT 订阅授权、图片草稿和 AI 讨论，真实能力待授权后实测。
+
+每个网站账号单独绑定自己的 AI 授权；朋友通过邀请码注册。OpenAI 是目前唯一实现的 provider，Claude 和 API Base 保持空预留。边界与目录见 [架构说明](docs/architecture.md)。
 
 ## 本机运行
 
@@ -20,7 +22,7 @@ npm run build
 npm start
 ```
 
-打开 <http://127.0.0.1:4317>。默认只接受本机访问；账户与访问控制接入前，不要用反向代理公开这个版本。
+打开 <http://127.0.0.1:4317>。当前绑定本机地址；公网入口和树莓派部署留在后续阶段。
 
 ## 文件结构
 
@@ -28,6 +30,7 @@ npm start
 | --- | --- |
 | `client/` | 阅读界面及样式 |
 | `server/` | HTTP API 和 SQLite 存储 |
+| `server/providers/` | 隔离于业务层的 AI 提供方及其认证／运行时实现 |
 | `shared/` | 正文与振假名数据处理 |
 | `tests/` | 数据、接口和浏览器验证 |
 | `scripts/` | 开发与维护命令 |
@@ -51,5 +54,6 @@ npm run test:browser
 浏览器测试使用独立的 `artifacts/e2e-data/`，不会写入你的 `data/`。默认使用 `/usr/bin/google-chrome`；其他安装路径可用 `CHROME_PATH=/path/to/chrome npm run test:browser` 指定。手机验证使用 Chrome 的触屏及 390px 视口模拟，尚未在真实手机上测试。
 
 第一阶段的操作与验收见 [阶段一验收说明](docs/stage-1.md)。
+第二阶段的授权、图片校对与真实推理验证见 [阶段二说明](docs/stage-2.md)。
 
 源代码与测试样本进入 Git，学习数据不进入 Git。

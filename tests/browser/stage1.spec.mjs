@@ -1,4 +1,9 @@
 import { test, expect } from "@playwright/test";
+import { ensureOwnerSession } from "./session.mjs";
+
+test.beforeEach(async ({ page }) => {
+  await ensureOwnerSession(page.request);
+});
 
 async function deleteDocument(page, id) {
   const current = await (await page.request.get(`/api/documents/${id}`)).json();

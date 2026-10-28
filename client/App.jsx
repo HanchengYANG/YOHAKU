@@ -5,8 +5,62 @@ import Icon from "./components/Icon.jsx";
 import Welcome from "./components/Welcome.jsx";
 import Reader from "./components/Reader.jsx";
 import Editor from "./components/Editor.jsx";
+import AISettings from "./components/AISettings.jsx";
+import ImageImport from "./components/ImageImport.jsx";
+import DocumentChat from "./components/DocumentChat.jsx";
+import AccountGate from "./components/AccountGate.jsx";
+import UserMenu from "./components/UserMenu.jsx";
 
 export default function App() {
+  const [session, setSession] = useState(null);
+  const [sessionError, setSessionError] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    api("/session", { signal: controller.signal })
+      .then(setSession)
+      .catch((cause) => {
+        if (cause.name !== "AbortError") setSessionError(cause.message);
+      });
+    const expired = () => setSession({ user: null, needsSetup: false });
+    window.addEventListener("yohaku:session-expired", expired);
+    return () => {
+      controller.abort();
+      window.removeEventListener("yohaku:session-expired", expired);
+    };
+  }, []);
+  if (sessionError)
+    return (
+      <div className="loading-page">
+        <p>{sessionError}</p>
+        <button
+          className="button secondary"
+          onClick={() => window.location.reload()}
+        >
+          重新连接
+        </button>
+      </div>
+    );
+  if (!session) return <div className="loading-page">正在读取登录状态…</div>;
+  if (!session.user)
+    return (
+      <AccountGate
+        session={session}
+        onAuthenticated={(user) => setSession({ user, needsSetup: false })}
+      />
+    );
+  return (
+    <Workspace
+      key={session.user.id}
+      user={session.user}
+      onLoggedOut={() => {
+        history.replaceState(null, "", window.location.pathname);
+        setSession({ user: null, needsSetup: false });
+      }}
+    />
+  );
+}
+
+function Workspace({ user, onLoggedOut }) {
   const [documents, setDocuments] = useState([]);
   const [activeId, setActiveId] = useState(() => window.location.hash.slice(1));
   const [document, setDocument] = useState(null);
@@ -26,6 +80,11 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showRuby, setShowRuby] = useState(true);
   const [fontSize, setFontSize] = useState(26);
+  const [panel, setPanel] = useState(() =>
+    new URLSearchParams(window.location.search).get("chatgpt") === "connected"
+      ? "settings"
+      : null,
+  );
   const savedDetail = useRef(null);
 
   useEffect(() => {
@@ -121,6 +180,7 @@ export default function App() {
         return;
       }
       setDraft(null);
+      setPanel(null);
       setDirty(false);
       setError("");
       setActiveId(nextId);
@@ -140,6 +200,7 @@ export default function App() {
   const openDocument = (id) => {
     if (!mayLeave()) return;
     setDraft(null);
+    setPanel(null);
     setDirty(false);
     setError("");
     setSidebarOpen(false);
@@ -150,6 +211,7 @@ export default function App() {
   const beginNew = (value) => {
     if (!mayLeave()) return;
     setError("");
+    setPanel(null);
     setSidebarOpen(false);
     setDraft(
       value || {
@@ -174,6 +236,25 @@ export default function App() {
       setDirty(false);
       setError("");
     }
+  };
+  const openPanel = (name) => {
+    if (!mayLeave()) return;
+    setDraft(null);
+    setPanel(name);
+    setDirty(false);
+    setError("");
+    setSidebarOpen(false);
+  };
+  const closePanel = () => {
+    if (!mayLeave()) return;
+    setPanel(null);
+    setDirty(false);
+  };
+  const imageReady = (value) => {
+    setPanel(null);
+    setDraft(value);
+    setEditorSession((n) => n + 1);
+    setDirty(true);
   };
   const save = async (value) => {
     if (saving) return;
@@ -212,6 +293,7 @@ export default function App() {
         body: JSON.stringify({ revision: document.revision }),
       });
       setActiveId("");
+      setPanel(null);
       setDocument(null);
       history.replaceState(null, "", window.location.pathname);
       setRefresh((n) => n + 1);
@@ -241,6 +323,7 @@ export default function App() {
             e.preventDefault();
             if (mayLeave()) {
               setActiveId("");
+              setPanel(null);
               setDraft(null);
               setDirty(false);
               history.replaceState(null, "", window.location.pathname);
@@ -261,6 +344,22 @@ export default function App() {
         >
           <Icon name="plus" size={18} />
           导入文字
+        </button>
+        <button
+          className="button secondary"
+          disabled={saving}
+          onClick={() => openPanel("image")}
+          style={{ marginTop: -24, marginBottom: 24 }}
+        >
+          导入图片
+        </button>
+        <button
+          className="button subtle"
+          disabled={saving}
+          onClick={() => openPanel("settings")}
+          style={{ marginBottom: 18 }}
+        >
+          AI 设置
         </button>
         <div className="shelf-heading">
           <span>
@@ -305,6 +404,11 @@ export default function App() {
             </button>
           ))}
         </nav>
+        <UserMenu
+          user={user}
+          onBeforeLogout={mayLeave}
+          onLoggedOut={onLoggedOut}
+        />
         <div className="sidebar-bottom">
           <span className="local-dot" />
           <span>
@@ -325,7 +429,7 @@ export default function App() {
             </button>
             <span>読む、わかる、残す。</span>
           </div>
-          <span className="stage-tag">第一阶段 · 阅读与校对</span>
+          <span className="stage-tag">第二阶段 · AI 与图片识别</span>
         </header>
         {(error || shelfError) && (
           <div className="error-banner" role="alert">
@@ -342,7 +446,24 @@ export default function App() {
             </button>
           </div>
         )}
-        {draft ? (
+        {panel === "settings" ? (
+          <AISettings onClose={closePanel} />
+        ) : panel === "image" ? (
+          <ImageImport
+            onCancel={closePanel}
+            onReady={imageReady}
+            onDirty={setDirty}
+          />
+        ) : panel === "chat" && document ? (
+          <DocumentChat
+            document={document}
+            onClose={() => {
+              setPanel(null);
+              setDirty(false);
+            }}
+            onDirty={setDirty}
+          />
+        ) : draft ? (
           <Editor
             key={editorSession}
             initial={draft}
@@ -356,6 +477,7 @@ export default function App() {
             document={document}
             onEdit={beginEdit}
             onDelete={remove}
+            onDiscuss={() => openPanel("chat")}
             showRuby={showRuby}
             setShowRuby={setShowRuby}
             fontSize={fontSize}
@@ -389,6 +511,7 @@ export default function App() {
           <Welcome
             onImport={() => beginNew()}
             onSample={() => beginNew(sample)}
+            onImage={() => openPanel("image")}
           />
         )}
       </main>

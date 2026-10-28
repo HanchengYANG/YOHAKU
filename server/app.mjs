@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, chmodSync, existsSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { attachAIRoutes } from "./ai/routes.mjs";
+import { attachAccountRoutes } from "./accounts.mjs";
 import {
   parseText,
   serializeBlocks,
@@ -71,9 +73,27 @@ function validateInput(input, updating = false) {
   return { title: title.trim(), kind, orientation, content, revision };
 }
 
-function parseContent(content, previous = []) {
+function parseContent(content, previous = [], manualReadings = []) {
   try {
     const blocks = parseText(content, previous);
+    if (!Array.isArray(manualReadings) || manualReadings.length > 20000)
+      throw new HttpError(400, "手动注音记录格式无效。");
+    for (const edited of manualReadings) {
+      if (
+        !edited ||
+        typeof edited.blockId !== "string" ||
+        !Number.isInteger(edited.rubyIndex) ||
+        typeof edited.text !== "string" ||
+        typeof edited.reading !== "string"
+      )
+        throw new HttpError(400, "手动注音记录格式无效。");
+      const block = blocks.find((b) => b.id === edited.blockId);
+      const segment = block?.segments.filter((s) => s.reading)[
+        edited.rubyIndex
+      ];
+      if (segment?.text === edited.text && segment.reading === edited.reading)
+        segment.origin = "manual";
+    }
     const text = plainText(blocks);
     if (!text.trim() || text.length > 200_000) {
       throw new HttpError(
@@ -99,6 +119,8 @@ function fromRow(row) {
     revision: row.revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    sourceImageId: row.source_image_id || null,
+    recognition: row.recognition_json ? JSON.parse(row.recognition_json) : null,
   };
 }
 
@@ -119,7 +141,11 @@ function summary(row) {
   };
 }
 
-export function createApp({ dataDir = join(rootDir, "data") } = {}) {
+export function createApp({
+  dataDir = join(rootDir, "data"),
+  callbackUri = `http://127.0.0.1:${process.env.PORT || 4317}/auth/callback`,
+  aiServices,
+} = {}) {
   const storageDir = resolve(dataDir);
   mkdirSync(storageDir, { recursive: true, mode: 0o700 });
   chmodSync(storageDir, 0o700);
@@ -142,8 +168,20 @@ export function createApp({ dataDir = join(rootDir, "data") } = {}) {
     );
   `);
   const read = database.prepare("SELECT * FROM documents WHERE id = ?");
-  const requireDocument = (id) => {
-    const row = read.get(id);
+  const columns = database
+    .prepare("PRAGMA table_info(documents)")
+    .all()
+    .map((column) => column.name);
+  if (!columns.includes("source_image_id"))
+    database.exec("ALTER TABLE documents ADD COLUMN source_image_id TEXT");
+  if (!columns.includes("recognition_json"))
+    database.exec("ALTER TABLE documents ADD COLUMN recognition_json TEXT");
+  if (!columns.includes("owner_id"))
+    database.exec("ALTER TABLE documents ADD COLUMN owner_id TEXT");
+  const requireDocument = (userId, id) => {
+    const row = database
+      .prepare("SELECT * FROM documents WHERE id=? AND owner_id=?")
+      .get(id, userId);
     if (!row) throw new HttpError(404, "找不到这篇材料，可能已经删除。");
     return row;
   };
@@ -187,21 +225,54 @@ export function createApp({ dataDir = join(rootDir, "data") } = {}) {
     next();
   });
   app.use(express.json({ limit: "1mb" }));
+  const accounts = attachAccountRoutes({
+    app,
+    database,
+    onFirstUser: (id) => {
+      database
+        .prepare("UPDATE documents SET owner_id=? WHERE owner_id IS NULL")
+        .run(id);
+      database
+        .prepare("UPDATE image_drafts SET user_id=? WHERE user_id IS NULL")
+        .run(id);
+      database
+        .prepare("UPDATE conversations SET user_id=? WHERE user_id IS NULL")
+        .run(id);
+      database
+        .prepare(
+          "INSERT OR IGNORE INTO app_settings(key,value) VALUES('legacy_owner',?)",
+        )
+        .run(id);
+    },
+  });
+  app.use("/api", (req, res, next) =>
+    req.path === "/health" ? next() : accounts.requireUser(req, res, next),
+  );
+  const ai = attachAIRoutes({
+    app,
+    database,
+    storageDir,
+    callbackUri,
+    services: aiServices,
+  });
 
-  app.get("/api/health", (_req, res) =>
-    res.json({
+  app.get("/api/health", async (req, res) => {
+    const authorization = await ai.statusForUser(req.user?.id);
+    return res.json({
       status: "ok",
       storage: "sqlite",
-      stage: 1,
+      stage: 2,
       capabilities: {
         textImport: true,
-        imageImport: false,
-        ai: false,
+        imageImport: true,
+        ai: authorization.connected,
         speech: false,
         notes: false,
       },
-    }),
-  );
+      aiVerified:
+        authorization.connected && !!authorization.runtime?.lastSuccessfulAt,
+    });
+  });
 
   app.get("/api/documents", (req, res) => {
     const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
@@ -212,28 +283,47 @@ export function createApp({ dataDir = join(rootDir, "data") } = {}) {
       rows = database
         .prepare(
           `SELECT * FROM documents
-        WHERE title LIKE ? ESCAPE '!' OR plain_text LIKE ? ESCAPE '!'
+        WHERE owner_id=? AND (title LIKE ? ESCAPE '!' OR plain_text LIKE ? ESCAPE '!')
         ORDER BY updated_at DESC, id ASC`,
         )
-        .all(pattern, pattern);
+        .all(req.user.id, pattern, pattern);
     } else {
       rows = database
-        .prepare("SELECT * FROM documents ORDER BY updated_at DESC, id ASC")
-        .all();
+        .prepare(
+          "SELECT * FROM documents WHERE owner_id=? ORDER BY updated_at DESC, id ASC",
+        )
+        .all(req.user.id);
     }
     res.json({ documents: rows.map(summary) });
   });
 
-  app.post("/api/documents", (req, res) => {
+  app.post("/api/documents", async (req, res) => {
     const input = validateInput(req.body);
-    const blocks = parseContent(input.content);
+    const sourceImageId = req.body.sourceImageId || null;
+    let recognition = null;
+    if (sourceImageId) {
+      await ai.getImage(req.user.id, sourceImageId);
+      const storedDraft = database
+        .prepare(
+          "SELECT draft_json FROM image_drafts WHERE image_id=? AND user_id=?",
+        )
+        .get(sourceImageId, req.user.id);
+      if (!storedDraft)
+        throw new HttpError(400, "这张图片尚未完成识别，请先识别再保存草稿。");
+      recognition = JSON.parse(storedDraft.draft_json);
+    }
+    const blocks = parseContent(
+      input.content,
+      recognition?.blocks || [],
+      req.body.manualReadings,
+    );
     const id = randomUUID();
     const now = new Date().toISOString();
     database
       .prepare(
         `INSERT INTO documents
-      (id, title, kind, orientation, blocks_json, plain_text, revision, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+      (id, title, kind, orientation, blocks_json, plain_text, revision, created_at, updated_at, owner_id)
+      VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
       )
       .run(
         id,
@@ -244,16 +334,23 @@ export function createApp({ dataDir = join(rootDir, "data") } = {}) {
         plainText(blocks),
         now,
         now,
+        req.user.id,
       );
+    if (recognition)
+      database
+        .prepare(
+          "UPDATE documents SET source_image_id=?,recognition_json=? WHERE id=?",
+        )
+        .run(sourceImageId, JSON.stringify(recognition), id);
     res.status(201).json(fromRow(read.get(id)));
   });
 
   app.get("/api/documents/:id", (req, res) =>
-    res.json(fromRow(requireDocument(req.params.id))),
+    res.json(fromRow(requireDocument(req.user.id, req.params.id))),
   );
 
   app.put("/api/documents/:id", (req, res) => {
-    const old = requireDocument(req.params.id);
+    const old = requireDocument(req.user.id, req.params.id);
     const input = validateInput(req.body, true);
     if (input.revision !== old.revision) {
       throw new HttpError(
@@ -261,7 +358,11 @@ export function createApp({ dataDir = join(rootDir, "data") } = {}) {
         "这篇材料已在其他页面修改。请保留当前文字，重新打开最新版本后再保存。",
       );
     }
-    const blocks = parseContent(input.content, JSON.parse(old.blocks_json));
+    const blocks = parseContent(
+      input.content,
+      JSON.parse(old.blocks_json),
+      req.body.manualReadings,
+    );
     const result = database
       .prepare(
         `UPDATE documents SET title = ?, kind = ?, orientation = ?,
@@ -284,7 +385,7 @@ export function createApp({ dataDir = join(rootDir, "data") } = {}) {
   });
 
   app.delete("/api/documents/:id", (req, res) => {
-    const document = requireDocument(req.params.id);
+    const document = requireDocument(req.user.id, req.params.id);
     const revision = req.body?.revision;
     if (!Number.isSafeInteger(revision) || revision < 1) {
       throw new HttpError(400, "缺少有效的文档版本，请重新打开后再删除。");
@@ -302,7 +403,7 @@ export function createApp({ dataDir = join(rootDir, "data") } = {}) {
   });
 
   app.get("/api/documents/:id/export", (req, res) => {
-    const document = fromRow(requireDocument(req.params.id));
+    const document = fromRow(requireDocument(req.user.id, req.params.id));
     const format = req.query.format || "json";
     if (format !== "json" && format !== "markdown")
       throw new HttpError(400, "请选择 JSON 或 Markdown 导出格式。");
@@ -333,19 +434,36 @@ export function createApp({ dataDir = join(rootDir, "data") } = {}) {
   });
   app.use((_req, res) => res.status(404).json({ error: "页面不存在。" }));
   app.use((error, _req, res, _next) => {
+    if (error.code === "LIMIT_FILE_SIZE")
+      return res
+        .status(413)
+        .json({ error: "图片最大 12 MB，请换一张较小的图片。" });
+    if (error.name === "MulterError")
+      return res
+        .status(400)
+        .json({ error: "请一次上传一张 PNG、JPEG 或 WebP 图片。" });
     if (error.type === "entity.too.large")
       return res.status(413).json({ error: "提交内容过大，请减少正文长度。" });
     if (error.type === "entity.parse.failed")
       return res.status(400).json({ error: "请求格式有误，请重新提交。" });
     const status = error.status || 500;
-    if (status >= 500) console.error("数据库或服务错误：", error.message);
-    res
-      .status(status)
-      .json({
-        error:
-          status >= 500 ? "保存服务暂时遇到问题，请稍后再试。" : error.message,
-      });
+    if (status >= 500 && !error.expose)
+      console.error("数据库或服务错误：", error.message);
+    res.status(status).json({
+      ...(error.code === "WEBSITE_AUTH_REQUIRED" ? { code: error.code } : {}),
+      error:
+        status >= 500 && !error.expose
+          ? "服务暂时遇到问题，请稍后再试。"
+          : error.message,
+    });
   });
 
-  return { app, close: () => database.close() };
+  return {
+    app,
+    ai,
+    close: () => {
+      ai.close();
+      database.close();
+    },
+  };
 }

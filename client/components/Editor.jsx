@@ -20,6 +20,20 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
   const [reading, setReading] = useState("");
   const [message, setMessage] = useState("");
   const [tab, setTab] = useState("text");
+  const sourceImageId =
+    initial.sourceImageId || initial.recognition?.sourceImage?.id;
+  const recognition = initial.recognition || initial;
+  const warnings = Array.isArray(recognition.warnings)
+    ? recognition.warnings
+    : [];
+  const nonBody = Array.isArray(recognition.nonBody) ? recognition.nonBody : [];
+  const [previewMode, setPreviewMode] = useState(
+    sourceImageId ? "image" : "reading",
+  );
+  const [imageError, setImageError] = useState(false);
+  const imageUrl = sourceImageId
+    ? `/api/images/${encodeURIComponent(sourceImageId)}/raw`
+    : null;
   const textarea = useRef(null);
   const readingInput = useRef(null);
   const body = plainText(blocks);
@@ -84,7 +98,26 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
       onSubmit={(e) => {
         e.preventDefault();
         if (!incompleteRuby && !saving)
-          onSave({ ...value, content: serializeBlocks(blocks) });
+          onSave({
+            ...value,
+            content: serializeBlocks(blocks),
+            manualReadings: blocks.flatMap((b) =>
+              b.segments
+                .filter((s) => s.reading)
+                .flatMap((s, rubyIndex) =>
+                  s.origin === "manual"
+                    ? [
+                        {
+                          blockId: b.id,
+                          rubyIndex,
+                          text: s.text,
+                          reading: s.reading,
+                        },
+                      ]
+                    : [],
+                ),
+            ),
+          });
       }}
     >
       <fieldset className="editor-controls" disabled={saving}>
@@ -155,6 +188,77 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
             </select>
           </label>
         </div>
+        {sourceImageId && (
+          <div className="ocr-review-overview">
+            <strong>
+              {initial.id ? "对照原图继续校对" : "这是识别草稿，请对照原图确认"}
+            </strong>
+            <p>
+              检查正文、分行、阅读顺序和读音后再保存。右侧可以切换原图与阅读预览。
+            </p>
+            <details className="ocr-review-details" open={warnings.length > 0}>
+              <summary>
+                识别记录
+                {warnings.length ? ` · ${warnings.length} 条待核对提示` : ""}
+                {nonBody.length ? ` · ${nonBody.length} 条非正文` : ""}
+              </summary>
+              {recognition.readingOrder && (
+                <p className="ocr-reading-order">
+                  <strong>阅读顺序：</strong>
+                  {recognition.readingOrder}
+                </p>
+              )}
+              {warnings.length > 0 && (
+                <div className="ocr-warning-list">
+                  <p className="ocr-history-hint">
+                    以下是初次识别时的提示。修改正文后，原行号可能变化，请结合原图核对。
+                  </p>
+                  <ul>
+                    {warnings.map((warning, index) => (
+                      <li key={index}>
+                        <span className="ocr-warning-location">
+                          {Number.isInteger(warning.blockIndex)
+                            ? `识别时第 ${warning.blockIndex + 1} 行`
+                            : "整张图片"}
+                        </span>
+                        {typeof warning === "string"
+                          ? warning
+                          : warning.message}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {nonBody.length > 0 && (
+                <div className="ocr-nonbody-list">
+                  <h3>与正文分开的内容</h3>
+                  {nonBody.map((item, index) => (
+                    <div className="ocr-nonbody-item" key={index}>
+                      <span>
+                        {{
+                          handwriting: "手写批注",
+                          page_number: "页码",
+                          other: "其他内容",
+                        }[item.type] || "其他内容"}
+                        {item.page === "right"
+                          ? " · 右页"
+                          : item.page === "left"
+                            ? " · 左页"
+                            : ""}
+                      </span>
+                      <p>{item.text}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {!warnings.length && !nonBody.length && (
+                <p className="ocr-history-hint">
+                  识别未单独标出疑点，仍请对照原图检查细小假名和特殊读法。
+                </p>
+              )}
+            </details>
+          </div>
+        )}
         <div className="editor-workspace">
           <section className="source-panel" aria-label="编辑区域">
             <div className="panel-tabs" role="tablist" aria-label="校对方式">
@@ -272,7 +376,19 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                 {rubies.map((r) => (
                   <div className="ruby-edit-row" key={r.key}>
                     <label>
-                      <span lang="ja">{r.text}</span>
+                      <span lang="ja">
+                        {r.text}
+                        <small
+                          className={`ruby-origin ${r.origin || "manual"}`}
+                          lang="zh-CN"
+                        >
+                          {{
+                            source: "原有",
+                            generated: "补充",
+                            manual: "手动",
+                          }[r.origin] || "手动"}
+                        </small>
+                      </span>
                       <input
                         aria-label={`${r.text}的读音（第${r.bi + 1}行）`}
                         lang="ja"
@@ -309,24 +425,84 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
               </div>
             )}
           </section>
-          <section className="preview-panel" aria-label="阅读预览">
+          <section
+            className="preview-panel"
+            aria-label={previewMode === "image" ? "原图对照" : "阅读预览"}
+          >
             <div className="preview-heading">
-              <span>阅读预览</span>
-              <small>随修改更新</small>
-            </div>
-            <div className="preview-content">
-              {body.trim() ? (
-                <RubyText
-                  blocks={blocks}
-                  fontSize={23}
-                  orientation={value.orientation}
-                />
+              {sourceImageId ? (
+                <div
+                  className="ocr-preview-switch"
+                  role="tablist"
+                  aria-label="对照方式"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={previewMode === "image"}
+                    onClick={() => setPreviewMode("image")}
+                  >
+                    原图对照
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={previewMode === "reading"}
+                    onClick={() => setPreviewMode("reading")}
+                  >
+                    阅读预览
+                  </button>
+                </div>
               ) : (
-                <p className="preview-placeholder" lang="ja">
-                  ここから、はじめよう。
-                </p>
+                <span>阅读预览</span>
+              )}
+              {previewMode === "image" ? (
+                <a
+                  className="text-button"
+                  href={imageUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  打开完整原图 <Icon name="arrow" size={12} />
+                </a>
+              ) : (
+                <small>随修改更新</small>
               )}
             </div>
+            {previewMode === "image" ? (
+              <div className="ocr-original-image">
+                {imageError ? (
+                  <p role="alert">原图暂时无法载入，请尝试打开完整原图。</p>
+                ) : (
+                  <a
+                    href={imageUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label="打开完整原始图片"
+                  >
+                    <img
+                      src={imageUrl}
+                      alt="用于校对正文和注音的日语原图"
+                      onError={() => setImageError(true)}
+                    />
+                  </a>
+                )}
+              </div>
+            ) : (
+              <div className="preview-content">
+                {body.trim() ? (
+                  <RubyText
+                    blocks={blocks}
+                    fontSize={23}
+                    orientation={value.orientation}
+                  />
+                ) : (
+                  <p className="preview-placeholder" lang="ja">
+                    ここから、はじめよう。
+                  </p>
+                )}
+              </div>
+            )}
           </section>
         </div>
         <div className="editor-footnote">

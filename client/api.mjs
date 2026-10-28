@@ -7,6 +7,8 @@ export default async function api(path, options) {
   const result = await response
     .json()
     .catch(() => ({ error: "服务没有返回有效结果，请检查本机服务。" }));
+  if (result.code === "WEBSITE_AUTH_REQUIRED")
+    window.dispatchEvent(new Event("yohaku:session-expired"));
   if (!response.ok) throw new Error(result.error || "操作未成功，请重试。");
   return result;
 }

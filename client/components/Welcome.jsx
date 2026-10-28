@@ -2,7 +2,7 @@ import { parseText } from "../../shared/document.mjs";
 import Icon from "./Icon.jsx";
 import RubyText from "./RubyText.jsx";
 
-export default function Welcome({ onImport, onSample }) {
+export default function Welcome({ onImport, onSample, onImage }) {
   const preview = parseText(
     "はーい{口|くち}{開|あ}けてー\n{汚|きたな}い{言葉|ことば}の{歯石|しせき}が{取|と}れないね〜",
   );
@@ -27,6 +27,12 @@ export default function Welcome({ onImport, onSample }) {
           <Icon name="plus" size={18} />
           导入第一篇文字
         </button>
+        {onImage && (
+          <button className="button secondary large" onClick={onImage}>
+            <Icon name="book" size={17} />
+            导入图片
+          </button>
+        )}
         <button className="text-button" onClick={onSample}>
           试试注音示例
           <Icon name="arrow" size={17} />
@@ -49,9 +55,10 @@ export default function Welcome({ onImport, onSample }) {
         </div>
       </div>
       <div className="welcome-footer">
-        <span>01 / 阅读与校对</span>
+        <span>02 / 图片与讨论</span>
         <p>
-          本阶段支持文字导入与保存。图片识别、AI 旁注和朗读将在后续阶段接入。
+          文字可直接导入。连接 ChatGPT 后可尝试图片识别与 AI
+          讨论，识别结果先校对再保存。旁注和朗读尚未接入。
         </p>
       </div>
     </section>
