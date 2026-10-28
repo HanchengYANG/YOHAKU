@@ -281,6 +281,10 @@ test("AI替身接口集成：multipart原图保留，未授权也可上传，识
 
 test("AI替身接口集成：新图读音统一为上下文生成，保存重开保留来源，手工读音仍为manual", async (t) => {
   const app = await setup(t);
+  app.state.ocrResult = { ...recognizedFixture(), orientation: "vertical" };
+  ["heading", "paragraph", "list_item"].forEach((type, index) => {
+    app.state.ocrResult.blocks[index].type = type;
+  });
   const { image } = await upload(app.url);
   const response = await request(
     app.url,
@@ -290,6 +294,9 @@ test("AI替身接口集成：新图读音统一为上下文生成，保存重开
   );
   assert.equal(response.status, 200);
   const draft = response.data;
+  assert.equal(draft.orientation, "horizontal");
+  assert.equal(draft.sourceOrientation, "vertical");
+  assert.deepEqual(draft.blocks.map((block) => block.type), ["heading", "paragraph", "list_item"]);
   assert.equal(draft.sourceImageId, image.id);
   assert.equal(Object.hasOwn(draft.sourceImage, "path"), false);
   // The upstream double deliberately claims source; new OCR cannot retain it.
@@ -325,6 +332,8 @@ test("AI替身接口集成：新图读音统一为上下文生成，保存重开
   assert.equal(document.blocks[0].segments[2].origin, "generated");
   assert.deepEqual(document.recognition.nonBody, draft.nonBody);
   assert.equal(document.recognition.readingPolicy, "ai_context");
+  assert.equal(document.recognition.sourceOrientation, "vertical");
+  assert.deepEqual(document.blocks.map((block) => block.type), ["heading", "paragraph", "list_item"]);
   assert.equal(document.recognition.blocks[0].segments[0].origin, "generated");
   await app.restart();
   const reopened = await request(app.url, `/api/documents/${document.id}`);
@@ -373,6 +382,65 @@ test("AI替身接口集成：新图读音统一为上下文生成，保存重开
     (await request(app.url, `/api/documents/${document.id}`)).data,
     manuallyEdited.data,
   );
+});
+
+test("图片方向接口：同id持久保存，无AI授权也可旋转且不改已保存正文及识别记录", async (t) => {
+  const app = await setup(t);
+  const { image, buffer } = await upload(app.url);
+  assert.equal(image.revision, 1);
+  assert.equal(image.bytes, buffer.length);
+  const initial = await request(app.url, `/api/images/${image.id}`);
+  assert.equal(initial.status, 200);
+  assert.deepEqual(initial.data, image);
+  assert.equal(Object.hasOwn(initial.data, "path"), false);
+  assert.equal(Object.hasOwn(initial.data, "file"), false);
+  const draft = (await request(app.url, `/api/images/${image.id}/recognize`, "POST", {})).data;
+  const saved = await request(app.url, "/api/documents", "POST", {
+    ...draft,
+    manualReadings: [{
+      blockId: draft.blocks[0].id,
+      rubyIndex: 0,
+      text: "背中",
+      reading: "せなか",
+    }],
+  });
+  assert.equal(saved.status, 201);
+  assert.equal(saved.data.blocks[0].segments[0].origin, "manual");
+  app.state.connected = false;
+  const calls = app.state.calls.length;
+  const result = await request(app.url, `/api/images/${image.id}/rotate`, "POST", {
+    quarterTurns: 1, revision: 1,
+  });
+  assert.equal(result.status, 200);
+  assert.equal(result.data.id, image.id);
+  assert.equal(result.data.revision, 2);
+  assert.equal(result.data.orientation, 1);
+  assert.deepEqual([result.data.width, result.data.height], [20, 30]);
+  assert.equal(Object.hasOwn(result.data, "path"), false);
+  assert.equal(Object.hasOwn(result.data, "file"), false);
+  const raw = await fetch(`${app.url}/api/images/${image.id}/raw?revision=2`, {
+    headers: sessionHeaders(app.url),
+  });
+  assert.equal(raw.status, 200);
+  const rotated = Buffer.from(await raw.arrayBuffer());
+  assert.equal(rotated.length, result.data.bytes);
+  assert.equal((await sharp(rotated).metadata()).orientation, undefined);
+  const stale = await request(app.url, `/api/images/${image.id}/rotate`, "POST", {
+    quarterTurns: 1, revision: 1,
+  });
+  assert.equal(stale.status, 409);
+  assert.equal((await request(app.url, `/api/images/${image.id}/rotate`, "POST", {
+    quarterTurns: 4, revision: 2,
+  })).status, 400);
+  assert.equal(app.state.calls.length, calls);
+  await app.restart();
+  assert.deepEqual((await request(app.url, `/api/images/${image.id}`)).data, result.data);
+  assert.deepEqual((await request(app.url, `/api/documents/${saved.data.id}`)).data, saved.data);
+  const reopened = await fetch(`${app.url}/api/images/${image.id}/raw`, {
+    headers: sessionHeaders(app.url),
+  });
+  assert.deepEqual(Buffer.from(await reopened.arrayBuffer()), rotated);
+  assert.equal(app.state.calls.length, calls);
 });
 
 test("AI替身接口集成：完整词与同字不同读音逐处持久，手改一处不影响另一处", async (t) => {
@@ -805,6 +873,7 @@ test("真实网站账户隔离：朋友不能读取主人的材料、原图、�
   for (const path of [
     "/api/documents",
     "/api/ai/status",
+    `/api/images/${image.id}`,
     `/api/images/${image.id}/raw`,
   ]) {
     assert.equal(
@@ -813,6 +882,8 @@ test("真实网站账户隔离：朋友不能读取主人的材料、原图、�
       path,
     );
   }
+  assert.equal((await actorRequest(running.url, null, `/api/images/${image.id}/rotate`,
+    "POST", { quarterTurns: 1, revision: 1 })).status, 401);
   assert.equal(
     (
       await actorRequest(
@@ -921,6 +992,7 @@ test("真实网站账户隔离：朋友不能读取主人的材料、原图、�
     `/api/documents/${document.id}`,
     `/api/documents/${document.id}/export?format=json`,
     `/api/documents/${document.id}/conversations`,
+    `/api/images/${image.id}`,
     `/api/images/${image.id}/raw`,
   ]) {
     assert.equal(
@@ -929,6 +1001,9 @@ test("真实网站账户隔离：朋友不能读取主人的材料、原图、�
       path,
     );
   }
+  assert.equal((await actorRequest(running.url, friendCookie, `/api/images/${image.id}/rotate`,
+    "POST", { quarterTurns: 1, revision: 1 })).status, 404);
+  assert.equal((await request(running.url, `/api/images/${image.id}`)).data.revision, 1);
   assert.equal(
     (
       await actorRequest(

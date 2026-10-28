@@ -73,11 +73,12 @@ const auth = {
 
 const ocrDouble = {
   title: "界面测试草稿（OCR 为测试替身）",
-  kind: "lyrics",
-  orientation: "horizontal",
-  readingOrder: "测试替身：按横排歌词自上而下排列，不代表真实 OCR 结论。",
+  kind: "article",
+  orientation: "vertical",
+  readingOrder: "测试替身：来源竖排，原文整理为段落与学习条目，不代表真实 OCR 结论。",
   blocks: [
     {
+      type: "paragraph",
       confidence: "high",
       sourcePage: "single",
       segments: [
@@ -90,14 +91,31 @@ const ocrDouble = {
         { text: "は", reading: null, origin: null },
       ],
     },
-    { confidence: "high", sourcePage: "single", segments: [] },
+    { type: "paragraph", confidence: "high", sourcePage: "single", segments: [] },
     {
+      type: "paragraph",
       confidence: "uncertain",
       sourcePage: "single",
       segments: [
         { text: "背中", reading: "せなか", origin: "generated" },
         { text: "を", reading: null, origin: null },
         { text: "撫でる", reading: "なでる", origin: "generated" },
+      ],
+    },
+    {
+      type: "heading",
+      confidence: "high",
+      sourcePage: "single",
+      segments: [{ text: "用語（原文）", reading: null, origin: null }],
+    },
+    {
+      type: "list_item",
+      confidence: "high",
+      sourcePage: "single",
+      segments: [
+        { text: "アキックス：「ここで", reading: null, origin: null },
+        { text: "食べる", reading: "たべる", origin: "generated" },
+        { text: "。」", reading: null, origin: null },
       ],
     },
   ],

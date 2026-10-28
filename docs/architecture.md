@@ -36,10 +36,12 @@ shared/ocr.mjs                    业务 OCR Schema、识别提示、验证
 ## 存储归属
 
 - 数据库：`data/yohaku.sqlite`，每条资料有 owner/user ID。
-- 原图：`data/images/`，由 `image_owners` 索引检查所有权，不直接公开整个目录。
+- 图片：`data/images/`，由 `image_owners` 索引检查所有权，不直接公开整个目录。上传从revision 1开始，保存旋转时先写新像素版本，再原子切换元数据指针；同一图片ID继续使用，旧像素内部保留，过期revision拒绝覆盖。
 - AI 授权：`data/users/<userId>/providers/openai/`。
 - Codex 历史：上述提供方目录下的 `runtime/`，再按外部账号区分。
 - 所有真实学习数据、授权和备份都被 Git 忽略。
+
+正文块的可选`type`仅允许paragraph、heading和list_item；旧无类型块按段落显示。模型只整理原文的结构与空白，字词和标点仍为纯文字；页面用受控标签呈现，Markdown导出保留标题与条目，不执行模型HTML。阅读与编辑统一横排，来源方向另存于识别记录。
 
 初次创建站内账号时，旧本机资料归初始管理员。这与管理员创建处于同一数据库事务，失败会整体回滚。此前在本应用完成的 SIWC 授权留在旧目录，只有初始账号可以明确点击「绑定刚才的 ChatGPT 授权」认领；认领保留原注册、主机 ID 和历史，并形成持久外部身份绑定，不默认共享给朋友。
 

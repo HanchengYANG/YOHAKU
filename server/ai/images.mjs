@@ -6,6 +6,7 @@ import {
   readFile,
   rename,
   unlink,
+  stat,
 } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import sharp from "sharp";
@@ -65,6 +66,7 @@ export function createImageStore({ storageDir } = {}) {
   if (typeof storageDir !== "string" || !storageDir)
     throw new Error("需要指定图片存储目录。");
   const directory = resolve(storageDir);
+  const rotations = new Map();
   let initialized;
   const ensureDirectory = () =>
     (initialized ??= mkdir(directory, { recursive: true, mode: 0o700 }).then(
@@ -83,6 +85,8 @@ export function createImageStore({ storageDir } = {}) {
       fail(500, "图片记录无法读取，请检查本地资料备份。");
     }
     const format = formats[metadata?.mimeType];
+    const revision = metadata?.revision === undefined ? 1 : metadata.revision;
+    const updatedAt = metadata?.updatedAt ?? metadata?.createdAt;
     if (
       !metadata ||
       metadata.id !== id ||
@@ -98,10 +102,40 @@ export function createImageStore({ storageDir } = {}) {
       typeof metadata.originalName !== "string" ||
       metadata.originalName !== safeName(metadata.originalName) ||
       typeof metadata.createdAt !== "string" ||
-      !Number.isFinite(Date.parse(metadata.createdAt))
+      !Number.isFinite(Date.parse(metadata.createdAt)) ||
+      !Number.isSafeInteger(revision) ||
+      revision < 1 ||
+      typeof updatedAt !== "string" ||
+      !Number.isFinite(Date.parse(updatedAt))
     ) {
       fail(500, "图片记录损坏，请检查本地资料备份。");
     }
+    let filename = `${id}.${format.extension}`;
+    if (metadata.file !== undefined) {
+      const prefix = `${id}.r${revision}.`,
+        suffix = `.${format.extension}`;
+      if (
+        typeof metadata.file !== "string" ||
+        !metadata.file.startsWith(prefix) ||
+        !metadata.file.endsWith(suffix) ||
+        !uuid.test(metadata.file.slice(prefix.length, -suffix.length))
+      )
+        fail(500, "图片记录损坏，请检查本地资料备份。");
+      filename = metadata.file;
+    } else if (revision !== 1) {
+      fail(500, "图片记录损坏，请检查本地资料备份。");
+    }
+    const path = join(directory, filename);
+    let bytes = metadata.bytes;
+    if (bytes === undefined) {
+      try {
+        bytes = (await stat(path)).size;
+      } catch {
+        fail(404, "原始图片文件已不存在。");
+      }
+    }
+    if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > MAX_BYTES)
+      fail(500, "图片记录损坏，请检查本地资料备份。");
     const swapped = metadata.orientation >= 5;
     return {
       id,
@@ -113,7 +147,10 @@ export function createImageStore({ storageDir } = {}) {
       displayWidth: swapped ? metadata.height : metadata.width,
       displayHeight: swapped ? metadata.width : metadata.height,
       createdAt: metadata.createdAt,
-      path: join(directory, `${id}.${format.extension}`),
+      updatedAt,
+      revision,
+      bytes,
+      path,
     };
   }
 
@@ -153,6 +190,7 @@ export function createImageStore({ storageDir } = {}) {
     }
     await ensureDirectory();
     const id = randomUUID();
+    const now = new Date().toISOString();
     const record = {
       id,
       mimeType,
@@ -163,7 +201,10 @@ export function createImageStore({ storageDir } = {}) {
         metadata.orientation >= 1 && metadata.orientation <= 8
           ? metadata.orientation
           : 1,
-      createdAt: new Date().toISOString(),
+      createdAt: now,
+      updatedAt: now,
+      revision: 1,
+      bytes: buffer.length,
     };
     const path = join(directory, `${id}.${format.extension}`);
     const recordPath = join(directory, `${id}.json`);
@@ -186,8 +227,10 @@ export function createImageStore({ storageDir } = {}) {
     return get(id);
   }
 
-  async function read(id, { normalizeOrientation = false } = {}) {
+  async function read(id, { normalizeOrientation = false, revision } = {}) {
     const metadata = await get(id);
+    if (revision !== undefined && revision !== metadata.revision)
+      fail(409, "图片方向已变化，请重新打开后再识别。");
     let buffer;
     try {
       buffer = await readFile(metadata.path);
@@ -210,5 +253,80 @@ export function createImageStore({ storageDir } = {}) {
     }
   }
 
-  return { save, get, read };
+  async function rotate(id, { quarterTurns, revision } = {}) {
+    requireId(id);
+    if (
+      ![1, 2, 3].includes(quarterTurns) ||
+      !Number.isSafeInteger(revision) ||
+      revision < 1
+    )
+      fail(400, "请提供有效的旋转角度和图片版本。");
+    const operation = (rotations.get(id) || Promise.resolve())
+      .catch(() => {})
+      .then(async () => {
+        const current = await get(id);
+        if (current.revision !== revision)
+          fail(409, "图片方向已被更新，请重新打开原图后再旋转。");
+        if (revision >= Number.MAX_SAFE_INTEGER)
+          fail(409, "图片版本无法继续更新，请重新导入。");
+        let output;
+        try {
+          output = await sharp(await read(id), {
+            limitInputPixels: MAX_PIXELS,
+            failOn: "warning",
+          })
+            .autoOrient()
+            .rotate(quarterTurns * 90)
+            .toFormat(
+              formats[current.mimeType].format,
+              current.mimeType === "image/png" ? {} : { quality: 95 },
+            )
+            .toBuffer({ resolveWithObject: true });
+        } catch {
+          fail(415, "图片方向无法处理，原图未更改，请重新导入有效图片。");
+        }
+        if (output.data.length > MAX_BYTES)
+          fail(413, "旋转后的图片超过12 MB，原图未更改。");
+        const updatedAt = new Date().toISOString();
+        const file = `${id}.r${revision + 1}.${randomUUID()}.${formats[current.mimeType].extension}`;
+        const path = join(directory, file);
+        const temporary = join(directory, `${id}.json.tmp-${randomUUID()}`);
+        const { path: previousPath, ...publicMetadata } = current;
+        const record = {
+          ...publicMetadata,
+          width: output.info.width,
+          height: output.info.height,
+          displayWidth: output.info.width,
+          displayHeight: output.info.height,
+          orientation: 1,
+          bytes: output.data.length,
+          revision: revision + 1,
+          updatedAt,
+          file,
+        };
+        try {
+          await writeFile(path, output.data, { flag: "wx", mode: 0o600 });
+          await writeFile(temporary, JSON.stringify(record), {
+            flag: "wx", mode: 0o600,
+          });
+          // Old pixel versions remain readable until this atomic pointer switch.
+          await rename(temporary, join(directory, `${id}.json`));
+        } catch {
+          await Promise.all(
+            [path, temporary].map((file) => unlink(file).catch(() => {})),
+          );
+          fail(500, "旋转图片未保存，原图未更改，请重试。");
+        }
+        const { file: storedFile, ...result } = record;
+        return { ...result, path };
+      });
+    rotations.set(id, operation);
+    try {
+      return await operation;
+    } finally {
+      if (rotations.get(id) === operation) rotations.delete(id);
+    }
+  }
+
+  return { save, get, read, rotate };
 }

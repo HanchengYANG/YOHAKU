@@ -131,6 +131,32 @@
   line-height: 1.8;
   padding: 40px 22px;
 }
+.image-direction-status {
+  margin: 0 0 18px;
+  padding: 12px 16px;
+  border-left: 3px solid #bfad78;
+  background: #f5f1df;
+  color: #7e775e;
+  font-size: 11px;
+  line-height: 1.8;
+}
+.image-direction-status p {
+  margin: 0 0 5px;
+}
+.image-direction-status [role="alert"] {
+  color: #9a6146;
+}
+.image-direction-status .text-button {
+  font-size: 11px;
+}
+.ocr-image-controls .button {
+  min-height: 30px;
+  padding: 6px 8px;
+  font-size: 11px;
+}
+.ocr-image-controls > small {
+  font-size: 10px;
+}
 .ruby-edit-row .ruby-origin {
   display: block;
   width: fit-content;

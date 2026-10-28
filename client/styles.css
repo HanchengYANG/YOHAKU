@@ -488,6 +488,8 @@ textarea::placeholder {
   color: #2c362c;
   letter-spacing: 0.035em;
   overflow-wrap: anywhere;
+  writing-mode: horizontal-tb;
+  max-width: 100%;
 }
 .japanese-text ruby {
   ruby-position: over;
@@ -505,6 +507,58 @@ textarea::placeholder {
 .text-line {
   white-space: pre-wrap;
   min-height: 2.5em;
+  margin: 0;
+}
+.japanese-text .text-heading {
+  margin: 0.5em 0 0.2em;
+  font-size: 1.15em;
+  font-weight: 600;
+  line-height: 2;
+}
+.ruby-text-list {
+  margin: 0.25em 0;
+  padding-left: 1.5em;
+}
+.japanese-text .ruby-occurrence {
+  display: inline;
+  max-width: 100%;
+  padding: 1px 3px;
+  border: 1px solid #c5cc80;
+  border-radius: 3px;
+  background: #f0f2cb;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+  white-space: pre-wrap;
+  vertical-align: baseline;
+  cursor: pointer;
+}
+.japanese-text .ruby-occurrence.selected {
+  border-color: #476740;
+  background: #476740;
+  color: #fff;
+}
+.japanese-text .ruby-occurrence.selected rt {
+  color: #e3ecd8;
+}
+.japanese-text .ruby-occurrence:focus-visible {
+  outline: 3px solid #9bac5e;
+  outline-offset: 3px;
+}
+.japanese-text .ruby-occurrence.unavailable {
+  border-color: #d5d5cb;
+  background: #e6e6dd;
+  color: #7d8073;
+  cursor: not-allowed;
+}
+.ruby-active-occurrence {
+  padding: 2px 3px;
+  border-radius: 3px;
+  background: #fff0b7;
+  color: inherit;
+  box-shadow: 0 0 0 2px #d5b760;
+  scroll-margin: 100px;
 }
 .empty-line {
   min-height: 1.3em;
@@ -512,23 +566,6 @@ textarea::placeholder {
 }
 .ruby-hidden rt {
   visibility: hidden;
-}
-.japanese-text.vertical {
-  writing-mode: vertical-rl;
-  text-orientation: mixed;
-  max-width: 100%;
-  height: min(62vh, 620px);
-  min-height: 340px;
-  overflow-x: auto;
-  padding-top: 5px;
-  margin-left: auto;
-}
-.japanese-text.vertical .text-line {
-  min-height: auto;
-  min-width: 2.5em;
-}
-.japanese-text.vertical .empty-line {
-  min-width: 1.3em;
 }
 .reader-page {
   width: min(960px, calc(100% - 100px));
@@ -846,7 +883,7 @@ textarea::placeholder {
   color: #7b886e;
   font-size: 11px;
 }
-.batch-editor input:not([type="checkbox"]) {
+.batch-editor input {
   display: block;
   width: 100%;
   margin-top: 7px;
@@ -874,46 +911,6 @@ textarea::placeholder {
 }
 .batch-result-heading .text-button {
   font-size: 11px;
-}
-.batch-results {
-  max-height: 340px;
-  overflow-y: auto;
-}
-.batch-occurrence {
-  display: flex;
-  gap: 10px;
-  padding: 12px 23px;
-  border-bottom: 1px solid #e7eadf;
-  cursor: pointer;
-}
-.batch-occurrence input {
-  flex: none;
-  margin: 3px 0 0;
-  accent-color: #627f52;
-}
-.batch-occurrence-content {
-  display: grid;
-  min-width: 0;
-  gap: 6px;
-  font-size: 13px;
-  line-height: 1.8;
-  overflow-wrap: anywhere;
-}
-.batch-occurrence-content small {
-  font-size: 10px;
-  color: #88947a;
-}
-.batch-occurrence mark {
-  padding: 1px 3px;
-  background: #e6edda;
-  color: #405d37;
-}
-.batch-occurrence.unavailable {
-  background: #f2f2eb;
-  cursor: default;
-}
-.batch-occurrence-content .batch-occurrence-reason {
-  color: #9b7145;
 }
 .preview-panel {
   min-width: 0;
@@ -974,10 +971,23 @@ textarea::placeholder {
   padding: 28px 28px 35px;
   min-height: 420px;
 }
+.editor-workspace .preview-content {
+  max-height: min(690px, 70vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.preview-selection-hint {
+  margin: 0 0 18px;
+  padding: 9px 12px;
+  border-radius: 4px;
+  background: #f1f2e6;
+  color: #758264;
+  font-size: 11px;
+  line-height: 1.8;
+}
 .preview-placeholder {
   font-family: "Noto Serif CJK JP", serif;
-  writing-mode: vertical-rl;
-  height: 280px;
+  min-height: 200px;
   margin: 18px auto;
   color: #b1b9a4;
   font-size: 20px;
@@ -996,6 +1006,9 @@ textarea::placeholder {
   gap: 10px;
   padding: 10px 16px 10px 23px;
   border-bottom: 1px solid #eceee4;
+}
+.ruby-edit-row[data-active="true"] {
+  background: #eef1df;
 }
 .ruby-edit-row > label {
   display: flex;
@@ -1350,10 +1363,6 @@ textarea::placeholder {
   .batch-result-heading {
     margin-left: 18px;
     margin-right: 18px;
-  }
-  .batch-occurrence {
-    padding-left: 18px;
-    padding-right: 18px;
   }
   .panel-tabs {
     gap: 20px;

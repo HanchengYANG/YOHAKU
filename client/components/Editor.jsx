@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   parseText,
   plainText,
@@ -10,11 +10,24 @@ import {
   annotateOccurrences,
 } from "../../shared/document.mjs";
 import { kinds } from "../constants.mjs";
+import api from "../api.mjs";
 import Icon from "./Icon.jsx";
 import RubyText from "./RubyText.jsx";
 
 export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
-  const [value, setValue] = useState(initial);
+  const [value, setValue] = useState(() => ({
+    ...initial,
+    orientation: "horizontal",
+  }));
+  const [contentDirty, setContentDirty] = useState(
+    () =>
+      !initial.id &&
+      !!(
+        initial.content?.trim() ||
+        initial.sourceImageId ||
+        initial.recognition?.sourceImage?.id
+      ),
+  );
   const [blocks, setBlocks] = useState(() =>
     parseText(initial.content, initial.blocks || []),
   );
@@ -26,6 +39,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
   const [batchSearch, setBatchSearch] = useState(null);
   const [batchSelected, setBatchSelected] = useState([]);
   const [batchReading, setBatchReading] = useState("");
+  const [activeRange, setActiveRange] = useState(null);
   const sourceImageId =
     initial.sourceImageId || initial.recognition?.sourceImage?.id;
   const recognition = initial.recognition || initial;
@@ -40,10 +54,112 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
   const [imageSize, setImageSize] = useState(null);
   const [imageRotation, setImageRotation] = useState(0);
   const [imageZoom, setImageZoom] = useState(100);
+  const [imageMetadata, setImageMetadata] = useState(null);
+  const [imageMetadataLoading, setImageMetadataLoading] =
+    useState(!!sourceImageId);
+  const [imageMetadataError, setImageMetadataError] = useState("");
+  const [imageSaveError, setImageSaveError] = useState("");
+  const [imageConflict, setImageConflict] = useState(false);
+  const [imageSaving, setImageSaving] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const metadataRequest = useRef(0);
+  const rotationRequest = useRef(null);
+  const submitLock = useRef(false);
+  const busy = saving || imageSaving || submitting;
   const imageSideways = imageRotation % 2 === 1;
   const imageUrl = sourceImageId
-    ? `/api/images/${encodeURIComponent(sourceImageId)}/raw`
+    ? `/api/images/${encodeURIComponent(sourceImageId)}/raw${imageMetadata ? `?revision=${imageMetadata.revision}` : ""}`
     : null;
+  useEffect(() => {
+    onDirty(contentDirty || imageRotation !== 0);
+  }, [contentDirty, imageRotation, onDirty]);
+  const loadImageMetadata = async (resetRotation = false) => {
+    if (!sourceImageId) return;
+    const request = ++metadataRequest.current;
+    setImageMetadataLoading(true);
+    setImageMetadataError("");
+    try {
+      const metadata = await api(
+        `/images/${encodeURIComponent(sourceImageId)}`,
+      );
+      if (request !== metadataRequest.current) return;
+      setImageMetadata(metadata);
+      setImageError(false);
+      if (resetRotation) {
+        setImageRotation(0);
+        setImageSize({
+          width: metadata.displayWidth || metadata.width,
+          height: metadata.displayHeight || metadata.height,
+        });
+        setImageSaveError("");
+        setImageConflict(false);
+      }
+    } catch (error) {
+      if (request === metadataRequest.current)
+        setImageMetadataError(error.message);
+    } finally {
+      if (request === metadataRequest.current) setImageMetadataLoading(false);
+    }
+  };
+  useEffect(() => {
+    loadImageMetadata();
+    return () => {
+      metadataRequest.current++;
+    };
+  }, [sourceImageId]);
+  const saveImageDirection = () => {
+    if (rotationRequest.current) return rotationRequest.current;
+    if (imageRotation === 0) return Promise.resolve();
+    const request = Promise.resolve().then(async () => {
+      setImageSaving(true);
+      setImageSaveError("");
+      try {
+        if (!imageMetadata || imageMetadataLoading)
+          throw new Error("尚未读取到图片版本，请先重新读取图片信息。");
+        const response = await fetch(
+          `/api/images/${encodeURIComponent(sourceImageId)}/rotate`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              quarterTurns: (4 - imageRotation) % 4,
+              revision: imageMetadata.revision,
+            }),
+          },
+        );
+        const result = await response.json().catch(() => ({
+          error: "服务没有返回有效结果，请重试保存图片方向。",
+        }));
+        if (result.code === "WEBSITE_AUTH_REQUIRED")
+          window.dispatchEvent(new Event("yohaku:session-expired"));
+        if (!response.ok) {
+          setImageConflict(response.status === 409);
+          throw new Error(
+            response.status === 409
+              ? "图片已在其他页面修改。请重新载入当前图片，再确认方向；正文修改仍保留。"
+              : result.error || "图片方向未保存，请重试。",
+          );
+        }
+        if (!Number.isInteger(result.revision)) {
+          setImageConflict(true);
+          throw new Error("图片版本返回异常，请重新载入当前图片后确认方向。");
+        }
+        setImageMetadata(result);
+        setImageRotation(0);
+        setImageSize(null);
+        setImageError(false);
+        setImageConflict(false);
+      } catch (error) {
+        setImageSaveError(error.message);
+        throw error;
+      } finally {
+        setImageSaving(false);
+        rotationRequest.current = null;
+      }
+    });
+    rotationRequest.current = request;
+    return request;
+  };
   const textarea = useRef(null);
   const readingInput = useRef(null);
   const body = plainText(blocks);
@@ -55,16 +171,27 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
   const batchAvailable = batchResults.filter((item) => item.canAnnotate);
   const allBatchSelected =
     batchAvailable.length > 0 && batchSelected.length === batchAvailable.length;
+  const toggleBatchOccurrence = (key) => {
+    if (
+      batchSearch?.blocks !== blocks ||
+      !batchAvailable.some((item) => item.key === key)
+    )
+      return;
+    setBatchSelected((old) =>
+      old.includes(key) ? old.filter((item) => item !== key) : [...old, key],
+    );
+  };
   const update = (patch) => {
     setValue((old) => ({ ...old, ...patch }));
-    onDirty();
+    setContentDirty(true);
   };
-  const updateBlocks = (next) => {
+  const updateBlocks = (next, preserveActive = false) => {
     setBlocks(next);
     setSelection(null);
     setBatchSelected([]);
     setBatchSearch((old) => old && { query: old.query, blocks: next });
-    onDirty();
+    if (!preserveActive) setActiveRange(null);
+    setContentDirty(true);
   };
   const findBatch = (query = batchTerm) => {
     const term = query.trim();
@@ -73,6 +200,8 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
       setBatchTerm(term);
       setBatchSelected([]);
       setBatchSearch({ query: term, blocks });
+      setActiveRange(null);
+      setPreviewMode("reading");
       setMessage("");
     } catch (error) {
       setMessage(error.message);
@@ -131,23 +260,40 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
     next[blockIndex].segments[segmentIndex].reading = text;
     next[blockIndex].segments[segmentIndex].origin =
       text !== null ? "manual" : null;
-    updateBlocks(next);
+    updateBlocks(next, text !== null);
   };
-  const rubies = blocks.flatMap((b, bi) =>
-    b.segments.flatMap((s, si) =>
-      s.reading !== null ? [{ ...s, bi, si, key: `${b.id}:${si}` }] : [],
-    ),
-  );
+  let offset = 0;
+  const rubies = blocks.flatMap((b, bi) => {
+    const entries = b.segments.flatMap((s, si) => {
+      const start = offset;
+      offset += s.text.length;
+      return s.reading !== null
+        ? [{ ...s, bi, si, start, end: offset, key: `${b.id}:${si}` }]
+        : [];
+    });
+    offset++;
+    return entries;
+  });
+  const locateRuby = (ruby) => {
+    setActiveRange({ start: ruby.start, end: ruby.end });
+    setPreviewMode("reading");
+  };
   const incompleteRuby = rubies.some((r) => !r.reading.trim());
 
   return (
     <form
       className="editor-page"
-      onSubmit={(e) => {
+      onSubmit={async (e) => {
         e.preventDefault();
-        if (!incompleteRuby && !saving)
-          onSave({
+        if (incompleteRuby || busy || submitLock.current) return;
+        submitLock.current = true;
+        setSubmitting(true);
+        try {
+          await saveImageDirection();
+          await onSave({
             ...value,
+            orientation: "horizontal",
+            blocks,
             content: serializeBlocks(blocks),
             manualReadings: blocks.flatMap((b) =>
               b.segments
@@ -166,9 +312,15 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                 ),
             ),
           });
+        } catch (error) {
+          setMessage(error.message);
+        } finally {
+          submitLock.current = false;
+          setSubmitting(false);
+        }
       }}
     >
-      <fieldset className="editor-controls" disabled={saving}>
+      <fieldset className="editor-controls" disabled={busy}>
         <div className="editor-heading">
           <div>
             <span className="eyebrow">
@@ -181,7 +333,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
               type="button"
               className="button subtle"
               onClick={onCancel}
-              disabled={saving}
+              disabled={busy}
             >
               取消
             </button>
@@ -189,11 +341,11 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
               type="submit"
               className="button primary"
               disabled={
-                saving || !value.title.trim() || !body.trim() || incompleteRuby
+                busy || !value.title.trim() || !body.trim() || incompleteRuby
               }
             >
               <Icon name="check" size={17} />
-              {saving ? "正在保存…" : "保存并阅读"}
+              {busy ? "正在保存…" : "保存并阅读"}
             </button>
           </div>
         </div>
@@ -222,17 +374,6 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                   {label}
                 </option>
               ))}
-            </select>
-          </label>
-          <label>
-            阅读方向
-            <select
-              aria-label="阅读方向"
-              value={value.orientation}
-              onChange={(e) => update({ orientation: e.target.value })}
-            >
-              <option value="horizontal">横排</option>
-              <option value="vertical">竖排</option>
             </select>
           </label>
         </div>
@@ -308,6 +449,43 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
             </details>
           </div>
         )}
+        {sourceImageId &&
+          (imageMetadataError || imageSaveError || imageRotation !== 0) && (
+            <div className="image-direction-status">
+              {imageRotation !== 0 && (
+                <p role="status">
+                  图片方向尚未保存。“保存并阅读”会先保存图片方向，再保存正文。
+                </p>
+              )}
+              {(imageMetadataError || imageSaveError) && (
+                <p role="alert">{imageSaveError || imageMetadataError}</p>
+              )}
+              {imageConflict ? (
+                <>
+                  <p>重新载入将取消本页未保存的旋转，保留正文修改。</p>
+                  <button
+                    type="button"
+                    className="text-button"
+                    disabled={busy || imageMetadataLoading}
+                    onClick={() => loadImageMetadata(true)}
+                  >
+                    重新载入当前图片
+                  </button>
+                </>
+              ) : (
+                imageMetadataError && (
+                  <button
+                    type="button"
+                    className="text-button"
+                    disabled={busy || imageMetadataLoading}
+                    onClick={() => loadImageMetadata()}
+                  >
+                    重新读取图片信息
+                  </button>
+                )
+              )}
+            </div>
+          )}
         <div className="editor-workspace">
           <section className="source-panel" aria-label="编辑区域">
             <div className="panel-tabs" role="tablist" aria-label="校对方式">
@@ -337,7 +515,10 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                 aria-selected={tab === "batch"}
                 aria-controls="batch-editor-panel"
                 id="batch-editor-tab"
-                onClick={() => setTab("batch")}
+                onClick={() => {
+                  setTab("batch");
+                  setPreviewMode("reading");
+                }}
               >
                 批量注音
               </button>
@@ -447,8 +628,15 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                   </div>
                 )}
                 {rubies.map((r) => (
-                  <div className="ruby-edit-row" key={r.key}>
-                    <label>
+                  <div
+                    className="ruby-edit-row"
+                    key={r.key}
+                    data-active={
+                      activeRange?.start === r.start &&
+                      activeRange?.end === r.end
+                    }
+                  >
+                    <label onClick={() => locateRuby(r)}>
                       <span lang="ja">
                         {r.text}
                         <small
@@ -466,6 +654,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                         aria-label={`${r.text}的读音（第${r.bi + 1}行）`}
                         lang="ja"
                         value={r.reading}
+                        onFocus={() => locateRuby(r)}
                         onChange={(e) =>
                           changeReading(r.bi, r.si, e.target.value)
                         }
@@ -491,7 +680,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                 aria-labelledby="batch-editor-tab"
               >
                 <p className="panel-hint">
-                  查找完整词，再勾选要修改的位置。只有点击应用后，选中的位置才会改变。
+                  查找完整词，在原文预览中点选要修改的位置；高亮为命中，深色为已选。只有点击应用后才会改变读音。
                 </p>
                 <div className="batch-search-row">
                   <label>
@@ -550,53 +739,10 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                         {allBatchSelected ? "取消全选" : "全选可修改的位置"}
                       </button>
                     </div>
-                    <div
-                      className="batch-results"
-                      role="group"
-                      aria-label="要批量标注的位置"
-                    >
-                      {batchResults.map((item, index) => (
-                        <label
-                          className={`batch-occurrence ${item.canAnnotate ? "" : "unavailable"}`}
-                          key={item.key}
-                        >
-                          <input
-                            type="checkbox"
-                            aria-label={`选择第${index + 1}处${batchSearch.query}（第${item.blockIndex + 1}行）`}
-                            checked={batchSelected.includes(item.key)}
-                            disabled={!item.canAnnotate}
-                            onChange={(event) =>
-                              setBatchSelected((old) =>
-                                event.target.checked
-                                  ? [...old, item.key]
-                                  : old.filter((key) => key !== item.key),
-                              )
-                            }
-                          />
-                          <span className="batch-occurrence-content">
-                            <small>
-                              第 {item.blockIndex + 1} 行 · 当前读音：
-                              {item.currentReading ||
-                                (item.canAnnotate ? "未标注" : "包含已有注音")}
-                            </small>
-                            <span lang="ja">
-                              {item.before}
-                              <mark>{batchSearch.query}</mark>
-                              {item.after}
-                            </span>
-                            {!item.canAnnotate && (
-                              <small className="batch-occurrence-reason">
-                                {item.reason}
-                              </small>
-                            )}
-                          </span>
-                        </label>
-                      ))}
-                    </div>
                     {batchAvailable.length < batchResults.length && (
                       <p className="panel-hint">
                         有 {batchResults.length - batchAvailable.length}{" "}
-                        处只匹配了已有注音的一部分，不能勾选。请改查完整词后修改。
+                        处只匹配了已有注音的一部分，原文中已标为灰色，不能选择。请改查完整词后修改。
                       </p>
                     )}
                     {batchResults.length === 0 && (
@@ -702,7 +848,12 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                   <button
                     type="button"
                     className="text-button"
-                    disabled={!imageSize || imageError}
+                    disabled={
+                      !imageSize ||
+                      imageError ||
+                      !imageMetadata ||
+                      imageMetadataLoading
+                    }
                     onClick={() => setImageRotation((turns) => (turns + 1) % 4)}
                   >
                     向左旋转90°
@@ -723,6 +874,29 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                       <option value={300}>300%</option>
                     </select>
                   </label>
+                  <button
+                    type="button"
+                    className="button secondary"
+                    disabled={
+                      !imageRotation ||
+                      !imageMetadata ||
+                      imageMetadataLoading ||
+                      busy
+                    }
+                    onClick={async () => {
+                      try {
+                        await saveImageDirection();
+                        setMessage("图片方向已保存，正文和注音保持原样。");
+                      } catch {
+                        /* The image error above keeps the pending rotation available for retry. */
+                      }
+                    }}
+                  >
+                    {imageSaving ? "正在保存图片方向…" : "保存图片方向"}
+                  </button>
+                  {imageMetadataLoading && (
+                    <small role="status">正在读取图片信息…</small>
+                  )}
                 </div>
                 <div className="ocr-original-image">
                   {imageError ? (
@@ -744,6 +918,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                       }}
                     >
                       <img
+                        key={imageUrl}
                         src={imageUrl}
                         alt="用于校对正文和注音的日语原图"
                         style={{
@@ -765,12 +940,27 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving }) {
                 </div>
               </>
             ) : (
-              <div className="preview-content">
+              <div
+                className="preview-content"
+                role={tab === "batch" ? "group" : undefined}
+                aria-label={
+                  tab === "batch" ? "完整原文中的批量注音位置" : undefined
+                }
+              >
+                {tab === "batch" && batchResults.length > 0 && (
+                  <p className="preview-selection-hint">
+                    在下方原文中点选高亮词，可用 Tab 和空格选择。深色为已选，共{" "}
+                    {batchSelected.length} 处。
+                  </p>
+                )}
                 {body.trim() ? (
                   <RubyText
                     blocks={blocks}
                     fontSize={23}
-                    orientation={value.orientation}
+                    activeRange={tab === "ruby" ? activeRange : null}
+                    occurrences={tab === "batch" ? batchResults : []}
+                    selectedKeys={batchSelected}
+                    onOccurrenceToggle={toggleBatchOccurrence}
                   />
                 ) : (
                   <p className="preview-placeholder" lang="ja">

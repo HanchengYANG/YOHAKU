@@ -239,46 +239,77 @@ test("无效材料显示错误，搜索书架后仍可重试", async ({ page }) 
   ).toBeVisible();
 });
 
-test("词组注音示例支持竖排，注音位于字词右侧", async ({ page }, info) => {
+test("原词示例与完整词注音统一横排，注音在上方并能保存重开", async ({ page }, info) => {
   await page.goto("/");
   await page.getByRole("button", { name: "试试注音示例" }).click();
+  await expect(page.getByRole("combobox", { name: "阅读方向" })).toHaveCount(0);
+  const preview = page.getByRole("region", { name: "阅读预览", exact: true });
+  await expect(preview.locator(".japanese-text")).toHaveCSS(
+    "writing-mode",
+    "horizontal-tb",
+  );
+  const originalReadings = [
+    "くち", "あ", "きたな", "ことば", "しせき", "と", "ぼく", "う",
+    "ひ", "そら", "せなか", "な", "こえ", "き", "ひ",
+  ];
+  await expect(preview.locator("rt")).toHaveText(originalReadings);
+  const body = page.getByRole("textbox", { name: "日语正文" });
+  const originalText = await body.inputValue();
+  await body.fill(`${originalText}\n食べる`);
+  await selectWord(page, originalText.length + 1, originalText.length + 4);
   await page
-    .getByRole("combobox", { name: "阅读方向" })
-    .selectOption("vertical");
+    .getByRole("textbox", { name: "假名读音", exact: true })
+    .fill("たべる");
+  await page.getByRole("button", { name: "添加注音" }).click();
+  await expect(preview.locator("rt")).toHaveText([...originalReadings, "たべる"]);
   await page.getByRole("button", { name: "保存并阅读" }).click();
   const article = page.getByRole("article", { name: "日语原文" });
   await expect(article.locator(".japanese-text")).toHaveCSS(
     "writing-mode",
-    "vertical-rl",
+    "horizontal-tb",
   );
+  await expect(article.locator("rt")).toHaveText([...originalReadings, "たべる"]);
+  await expect(article.locator(".text-line")).toHaveCount(6);
+  const wholeWord = article.locator("ruby").last();
+  expect(await wholeWord.evaluate((el) => el.firstChild.textContent)).toBe("食べる");
   const position = await article
     .locator("ruby")
-    .first()
+    .last()
     .evaluate((el) => {
       const rt = el.querySelector("rt").getBoundingClientRect();
       const range = document.createRange();
       range.selectNodeContents(el.firstChild);
       const base = range.getBoundingClientRect();
-      return { rtLeft: rt.left, baseMiddle: base.left + base.width / 2 };
+      return {
+        rtBottom: rt.bottom,
+        baseMiddle: base.top + base.height / 2,
+        rtHeight: rt.height,
+        baseHeight: base.height,
+      };
     });
-  expect(position.rtLeft).toBeGreaterThan(position.baseMiddle);
-  await expect(article.locator("rt")).toContainText([
-    "くち",
-    "あ",
-    "きたな",
-    "ことば",
-    "しせき",
-    "と",
+  expect(position.rtBottom).toBeLessThan(position.baseMiddle);
+  expect(position.rtHeight).toBeLessThan(position.baseHeight);
+  const id = await page.evaluate(() => location.hash.slice(1));
+  const saved = await (await page.request.get(`/api/documents/${id}`)).json();
+  expect(saved.orientation).toBe("horizontal");
+  expect(saved.content).toContain("{食べる|たべる}");
+  expect(saved.blocks.at(-1).segments).toEqual([
+    { text: "食べる", reading: "たべる", origin: "manual" },
   ]);
+  await page.reload();
+  await expect(article.locator(".japanese-text")).toHaveCSS("writing-mode", "horizontal-tb");
+  await expect(article.locator("rt")).toHaveText([...originalReadings, "たべる"]);
+  expect(await article.locator("ruby").last().evaluate((el) => el.firstChild.textContent))
+    .toBe("食べる");
+  expect(await (await page.request.get(`/api/documents/${id}`)).json()).toEqual(saved);
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBe(true);
   await page.screenshot({
-    path: `artifacts/stage1-vertical-${info.project.name}.png`,
+    path: `artifacts/stage1-horizontal-whole-word-${info.project.name}.png`,
     fullPage: true,
   });
-  const id = await page.evaluate(() => location.hash.slice(1));
   await deleteDocument(page, id);
 });

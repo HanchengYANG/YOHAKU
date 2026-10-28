@@ -3,6 +3,7 @@
 import { test, expect } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import sharp from "sharp";
 import { ensureOwnerSession, testOwner } from "./session.mjs";
 
 const accountFlowTitle = "网站账号登录、退出与邀请码注册使用真实会话和资料隔离";
@@ -15,6 +16,54 @@ const imagePath = fileURLToPath(
 );
 const callback =
   "/auth/callback?state=ui-test-state&code=ui-test-code&client_id=ui-test-client";
+const ocrText = "僕が生まれた日の空は\n\n背中を撫でる\n用語（原文）\nアキックス：「ここで食べる。」";
+const ocrTypes = ["paragraph", "paragraph", "paragraph", "heading", "list_item"];
+
+async function renderedText(locator) {
+  return locator.locator(".text-line").evaluateAll((lines) =>
+    lines.map((line) => {
+      const copy = line.cloneNode(true);
+      copy.querySelectorAll("rt, rp").forEach((node) => node.remove());
+      return copy.textContent;
+    }).join("\n"),
+  );
+}
+
+async function getDocument(page, id) {
+  const response = await page.request.get(`/api/documents/${id}`);
+  expect(response.ok()).toBe(true);
+  return response.json();
+}
+
+async function importDraft(page) {
+  await openImageImport(page);
+  await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(imagePath);
+  const reply = page.waitForResponse((res) =>
+    /\/api\/images\/[^/]+\/recognize$/.test(new URL(res.url()).pathname),
+  );
+  await page.getByRole("button", { name: "识别图片", exact: true }).click();
+  const response = await reply;
+  expect(response.ok()).toBe(true);
+  return response.json();
+}
+
+async function createImageDocument(page) {
+  const draft = await importDraft(page);
+  await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
+  await expect(page.getByRole("article", { name: "日语原文", exact: true })).toBeVisible();
+  const document = await getDocument(page, await page.evaluate(() => location.hash.slice(1)));
+  return { draft, document };
+}
+
+async function currentImage(page, id) {
+  const metadata = await page.request.get(`/api/images/${id}`);
+  expect(metadata.ok()).toBe(true);
+  const raw = await page.request.get(`/api/images/${id}/raw`);
+  expect(raw.ok()).toBe(true);
+  const bytes = await raw.body();
+  const pixels = await sharp(bytes).metadata();
+  return { metadata: await metadata.json(), bytes, pixels };
+}
 
 async function openSettings(page) {
   // OAuth return may finish navigation before React has loaded the website
@@ -483,7 +532,8 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
     )
     .toBe(true);
   const imageUrl = await originalImage.getAttribute("src");
-  expect(imageUrl).toMatch(/^\/api\/images\/[a-f0-9-]+\/raw$/);
+  expect(imageUrl).toMatch(/^\/api\/images\/[a-f0-9-]+\/raw(?:\?revision=\d+)?$/);
+  const rawPath = new URL(imageUrl, "http://127.0.0.1:4319").pathname;
   const raw = await page.request.get(imageUrl);
   expect(raw.ok()).toBe(true);
   expect(await raw.body()).toEqual(await readFile(imagePath));
@@ -506,6 +556,10 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
   });
   await page.getByRole("tab", { name: "阅读预览", exact: true }).click();
   const preview = page.getByRole("region", { name: "阅读预览", exact: true });
+  await expect(preview.locator(".japanese-text")).toHaveCSS("writing-mode", "horizontal-tb");
+  await expect(preview.locator("h2.text-heading")).toHaveText("用語（原文）");
+  await expect(preview.locator("ul.ruby-text-list > li.text-line")).toHaveCount(1);
+  expect(await renderedText(preview)).toBe(ocrText);
   await expect(preview.locator("rt")).toContainText([
     "ぼく",
     "うまれた",
@@ -552,6 +606,11 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
     await page.request.get(`/api/documents/${documentId}`)
   ).json();
   expect(saved.sourceImageId).toBeTruthy();
+  expect(saved.orientation).toBe("horizontal");
+  expect(saved.recognition.sourceOrientation).toBe("vertical");
+  expect(saved.recognition.orientation).toBe("horizontal");
+  expect(saved.blocks.map((block) => block.type)).toEqual(ocrTypes);
+  expect(saved.recognition.blocks.map((block) => block.type)).toEqual(ocrTypes);
   expect(saved.content).toContain("{空|くう}");
   expect(saved.blocks[0].segments.find((s) => s.text === "空").origin).toBe(
     "manual",
@@ -573,10 +632,15 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
     true,
   );
   await page.reload();
+  const article = page.getByRole("article", { name: "日语原文", exact: true });
+  await expect(article.locator("h2.text-heading")).toHaveText("用語（原文）");
+  await expect(article.locator("ul.ruby-text-list > li.text-line")).toHaveCount(1);
+  await expect(article.locator(".japanese-text")).toHaveCSS("writing-mode", "horizontal-tb");
+  expect(await renderedText(article)).toBe(ocrText);
   await page.locator(".reader-recognition-details > summary").click();
   await expect(
     page.getByRole("link", { name: "查看完整原图", exact: true }),
-  ).toHaveAttribute("href", imageUrl);
+  ).toHaveAttribute("href", rawPath);
   await page
     .getByRole("button", { name: "校对文字与注音", exact: true })
     .click();
@@ -695,35 +759,51 @@ test("批量注音只修改明确选中的词语位置，保存后保留各自�
   const search = batch.getByRole("button", { name: "查找位置", exact: true });
   await query.fill("食");
   await search.click();
-  await expect(batch.getByRole("checkbox")).toHaveCount(1);
-  await expect(batch.getByRole("checkbox")).toBeDisabled();
+  const completeText = page.getByRole("group", { name: "完整原文中的批量注音位置", exact: true });
+  await expect(completeText.locator("mark.ruby-occurrence.unavailable")).toHaveCount(1);
+  await expect(completeText.locator("mark.ruby-occurrence.unavailable")).toHaveAttribute("aria-disabled", "true");
+  await expect(completeText.locator("button.ruby-occurrence")).toHaveCount(0);
+  await expect(completeText.locator("rt")).toHaveText(["たべる"]);
   await expect(batch).toContainText("完整");
 
   await query.fill("名字");
   await search.click();
-  const occurrences = batch.getByRole("checkbox");
+  const occurrences = completeText.locator("button.ruby-occurrence");
+  const selected = completeText.locator('button.ruby-occurrence[aria-pressed="true"]');
   await expect(occurrences).toHaveCount(4);
-  await expect(batch.locator('input[type="checkbox"]:checked')).toHaveCount(0);
-  await occurrences.nth(0).check();
+  await expect(batch.getByRole("checkbox")).toHaveCount(0);
+  expect(await renderedText(completeText)).toBe(expectedBody);
+  await expect(selected).toHaveCount(0);
+  if (info.project.name === "phone") await occurrences.nth(0).tap();
+  else await occurrences.nth(0).click();
+  await expect(occurrences.nth(0)).toHaveAttribute("aria-pressed", "true");
+  await expect(occurrences.nth(1)).toHaveAttribute("aria-pressed", "false");
+  expect(await occurrences.nth(0).evaluate((el) => getComputedStyle(el).backgroundColor))
+    .not.toBe(await occurrences.nth(1).evaluate((el) => getComputedStyle(el).backgroundColor));
+  await occurrences.nth(1).focus();
+  await occurrences.nth(1).press("Space");
+  await expect(selected).toHaveCount(2);
+  await occurrences.nth(1).press("Enter");
+  await expect(selected).toHaveCount(1);
   await query.fill("名字 ");
   await expect(occurrences).toHaveCount(0);
   await search.click();
-  await expect(batch.locator('input[type="checkbox"]:checked')).toHaveCount(0);
-  await occurrences.nth(0).check();
+  await expect(selected).toHaveCount(0);
+  await occurrences.nth(0).click();
   await page.getByRole("tab", { name: "正文编辑", exact: true }).click();
   const body = page.getByRole("textbox", { name: "日语正文", exact: true });
   await body.fill(`${expectedBody} `);
   await page.getByRole("tab", { name: "批量注音", exact: true }).click();
-  await expect(batch.locator('input[type="checkbox"]:checked')).toHaveCount(0);
+  await expect(selected).toHaveCount(0);
   await page.getByRole("tab", { name: "正文编辑", exact: true }).click();
   await body.fill(expectedBody);
   await page.getByRole("tab", { name: "批量注音", exact: true }).click();
   await batch
     .getByRole("button", { name: "全选可修改的位置", exact: true })
     .click();
-  await expect(batch.locator('input[type="checkbox"]:checked')).toHaveCount(4);
+  await expect(selected).toHaveCount(4);
   await batch.getByRole("button", { name: "取消全选", exact: true }).click();
-  await expect(batch.locator('input[type="checkbox"]:checked')).toHaveCount(0);
+  await expect(selected).toHaveCount(0);
   await batch
     .getByRole("button", { name: "全选可修改的位置", exact: true })
     .click();
@@ -744,9 +824,9 @@ test("批量注音只修改明确选中的词语位置，保存后保留各自�
     "みょうじ",
     "みょうじ",
   ]);
-  await expect(batch.locator('input[type="checkbox"]:checked')).toHaveCount(0);
-  await occurrences.nth(1).check();
-  await occurrences.nth(3).check();
+  await expect(selected).toHaveCount(0);
+  await occurrences.nth(1).click();
+  await occurrences.nth(3).click();
   await reading.fill("ミンツー");
   await batch
     .getByRole("button", { name: "应用到选中的 2 处", exact: true })
@@ -800,7 +880,28 @@ test("批量注音只修改明确选中的词语位置，保存后保留各自�
   await expect(page.locator(".ruby-edit-row .ruby-origin.manual")).toHaveCount(
     5,
   );
+  const nameReadings = page.getByRole("textbox", { name: /^名字的读音/ });
+  await nameReadings.nth(0).focus();
+  const active = page.locator("mark.ruby-active-occurrence");
+  await expect(active).toHaveCount(1);
+  await expect(page.locator('.ruby-edit-row[data-active="true"]')).toHaveCount(1);
+  await expect(active.locator("xpath=..")).toContainText("一人目の");
+  await nameReadings.nth(2).focus();
+  await expect(active).toHaveCount(1);
+  await expect(active.locator("xpath=..")).toContainText("三人目の");
+  await expect(page.locator('.ruby-edit-row[data-active="true"] input')).toHaveAttribute("aria-label", "名字的读音（第4行）");
+  await page.getByRole("button", {
+    name: "移除名字的注音（第4行）", exact: true,
+  }).click();
+  await expect(active).toHaveCount(0);
+  await expect(page.locator('.ruby-edit-row[data-active="true"]')).toHaveCount(0);
+  expect(await renderedText(page.getByRole("region", { name: "阅读预览", exact: true }))).toBe(expectedBody);
+  page.once("dialog", async (dialog) => {
+    expect(dialog.type()).toBe("confirm");
+    await dialog.accept();
+  });
   await page.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(page.getByRole("article", { name: "日语原文", exact: true }).locator("rt")).toHaveText(expectedReadings);
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= innerWidth,
@@ -813,6 +914,224 @@ test("批量注音只修改明确选中的词语位置，保存后保留各自�
       })
     ).status(),
   ).toBe(204);
+});
+
+test("长文末尾注音定位只滚动预览内部，输入焦点与全文保持", async ({ page }, info) => {
+  const lines = Array.from({ length: 60 }, (_, index) =>
+    `第${index + 1}段の{名字|みょうじ}は、この段落で確認する。`,
+  );
+  const content = ["冒頭の記録。", ...lines, "末尾の記録。"].join("\n");
+  const expectedBody = content.replaceAll("{名字|みょうじ}", "名字");
+  const response = await page.request.post("/api/documents", {
+    data: { title: "長文の逐处联动测试", kind: "article", orientation: "horizontal", content },
+  });
+  expect(response.status()).toBe(201);
+  const document = await response.json();
+  await page.goto(`/#${document.id}`);
+  await page.getByRole("button", { name: "校对文字与注音", exact: true }).click();
+  await page.getByRole("tab", { name: /注音校正/ }).click();
+  expect(await page.locator(".ruby-editor").evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+  const reading = page.getByRole("textbox", { name: "名字的读音（第61行）", exact: true });
+  // Bring the last control into view before focus triggers preview positioning.
+  // A subsequent document-level jump would move this visible input away.
+  await reading.scrollIntoViewIfNeeded();
+  const pageBeforeFocus = await page.evaluate(() => window.scrollY);
+  await reading.focus();
+  await expect.poll(() => page.locator(".ruby-editor").evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+  const mark = page.locator("mark.ruby-active-occurrence");
+  await expect(mark).toHaveCount(1);
+  const pane = page.locator(".preview-content");
+  await expect.poll(() => pane.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+  const geometry = await pane.evaluate((el) => {
+    const box = el.getBoundingClientRect();
+    const active = el.querySelector("mark.ruby-active-occurrence").getBoundingClientRect();
+    return {
+      overflow: el.scrollHeight > el.clientHeight,
+      top: box.top + el.clientTop,
+      bottom: box.top + el.clientTop + el.clientHeight,
+      markTop: active.top,
+      markBottom: active.bottom,
+    };
+  });
+  expect(geometry.overflow).toBe(true);
+  expect(geometry.markTop).toBeGreaterThanOrEqual(geometry.top - 1);
+  expect(geometry.markBottom).toBeLessThanOrEqual(geometry.bottom + 1);
+  await expect(reading).toBeFocused();
+  const inputBounds = await reading.boundingBox();
+  expect(inputBounds.y).toBeGreaterThanOrEqual(0);
+  expect(inputBounds.y + inputBounds.height).toBeLessThanOrEqual(page.viewportSize().height);
+  expect(Math.abs(await page.evaluate(() => window.scrollY) - pageBeforeFocus)).toBeLessThanOrEqual(2);
+  await expect(mark.locator("xpath=..")).toContainText("第60段の");
+  if (info.project.name === "desktop") {
+    const columns = await page.locator(".editor-workspace").evaluate((el) => {
+      const source = el.querySelector(".source-panel").getBoundingClientRect();
+      const preview = el.querySelector(".preview-panel").getBoundingClientRect();
+      return { sourceRight: source.right, previewLeft: preview.left, sourceTop: source.top, previewTop: preview.top };
+    });
+    expect(columns.sourceRight).toBeLessThanOrEqual(columns.previewLeft + 1);
+    expect(Math.abs(columns.sourceTop - columns.previewTop)).toBeLessThan(2);
+    expect(geometry.markTop).toBeGreaterThanOrEqual(0);
+    expect(geometry.markBottom).toBeLessThanOrEqual(page.viewportSize().height);
+  }
+  const pageBeforeTyping = await page.evaluate(() => window.scrollY);
+  await reading.press("End");
+  await reading.pressSequentially("ー");
+  await expect(reading).toHaveValue("みょうじー");
+  await expect(reading).toBeFocused();
+  await expect(mark).toHaveCount(1);
+  expect(Math.abs(await page.evaluate(() => window.scrollY) - pageBeforeTyping)).toBeLessThanOrEqual(2);
+  const afterTyping = await reading.boundingBox();
+  expect(Math.abs(afterTyping.y - inputBounds.y)).toBeLessThanOrEqual(2);
+  expect(await renderedText(pane)).toBe(expectedBody);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "取消", exact: true }).click();
+  const article = page.getByRole("article", { name: "日语原文", exact: true });
+  await expect(article).toBeVisible();
+  expect(await renderedText(article)).toBe(expectedBody);
+  expect((await page.request.delete(`/api/documents/${document.id}`, {
+    data: { revision: document.revision },
+  })).status()).toBe(204);
+});
+
+test("显式保存图片方向更新真实像素，失败可重试且不丢正文", async ({ page }) => {
+  await enableTestAccount(page);
+  const { document } = await createImageDocument(page);
+  const imageId = document.sourceImageId;
+  const before = await currentImage(page, imageId);
+  const fixtureBytes = await readFile(imagePath);
+  expect(before.bytes).toEqual(fixtureBytes);
+  await page.getByRole("button", { name: "校对文字与注音", exact: true }).click();
+  const body = page.getByRole("textbox", { name: "日语正文", exact: true });
+  const edited = `${ocrText}\n追記は残す。`;
+  await body.fill(edited);
+  const rotate = page.getByRole("button", { name: "向左旋转90°", exact: true });
+  await expect(rotate).toBeEnabled();
+  await rotate.click();
+  const image = page.getByAltText("用于校对正文和注音的日语原图", { exact: true });
+  await expect.poll(() => image.evaluate((el) => {
+    const box = el.getBoundingClientRect();
+    return box.width / box.height;
+  })).toBeCloseTo(before.pixels.height / before.pixels.width, 2);
+  const rotatePath = `/api/images/${imageId}/rotate`;
+  // Explicit HTTP fault injection, unrelated to real model availability.
+  const failRotation = (route) => route.fulfill({
+    status: 503,
+    contentType: "application/json",
+    body: JSON.stringify({ error: "测试故障：图片方向保存暂时失败。" }),
+  });
+  await page.route(`**${rotatePath}`, failRotation);
+  await page.getByRole("button", { name: "保存图片方向", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("图片方向保存暂时失败");
+  await expect(body).toHaveValue(edited);
+  await expect(page.getByRole("status").filter({ hasText: "图片方向尚未保存" })).toBeVisible();
+  const failed = await currentImage(page, imageId);
+  expect(failed.metadata.revision).toBe(before.metadata.revision);
+  expect(failed.bytes).toEqual(before.bytes);
+  await page.unroute(`**${rotatePath}`, failRotation);
+
+  const rotatedReply = page.waitForResponse((res) =>
+    new URL(res.url()).pathname === rotatePath && res.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "保存图片方向", exact: true }).click();
+  const rotated = await rotatedReply;
+  expect(rotated.status()).toBe(200);
+  expect(rotated.request().postDataJSON()).toEqual({
+    quarterTurns: 3, revision: before.metadata.revision,
+  });
+  const after = await currentImage(page, imageId);
+  expect(after.metadata.id).toBe(imageId);
+  expect(after.metadata.revision).toBe(before.metadata.revision + 1);
+  expect([after.pixels.width, after.pixels.height]).toEqual([before.pixels.height, before.pixels.width]);
+  expect([after.metadata.width, after.metadata.height]).toEqual([after.pixels.width, after.pixels.height]);
+  expect(after.bytes).not.toEqual(before.bytes);
+  await expect.poll(() => image.evaluate((el) => [el.naturalWidth, el.naturalHeight])).toEqual([
+    before.pixels.height, before.pixels.width,
+  ]);
+  await expect(body).toHaveValue(edited);
+  expect((await getDocument(page, document.id)).revision).toBe(document.revision);
+  await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
+  await page.reload();
+  const article = page.getByRole("article", { name: "日语原文", exact: true });
+  await expect(article).toBeVisible();
+  expect(await renderedText(article)).toBe(edited);
+  await page.getByRole("button", { name: "校对文字与注音", exact: true }).click();
+  await expect.poll(() => image.evaluate((el) => [el.naturalWidth, el.naturalHeight])).toEqual([
+    before.pixels.height, before.pixels.width,
+  ]);
+  await expect(page.getByRole("button", { name: "保存图片方向", exact: true })).toBeDisabled();
+  const matrix = await image.evaluate((el) => {
+    const m = new DOMMatrixReadOnly(getComputedStyle(el).transform);
+    return [m.a, m.b, m.c, m.d];
+  });
+  expect(matrix).toEqual([1, 0, 0, 1]);
+  expect(await readFile(imagePath)).toEqual(fixtureBytes);
+  const saved = await getDocument(page, document.id);
+  expect((await page.request.delete(`/api/documents/${document.id}`, {
+    data: { revision: saved.revision },
+  })).status()).toBe(204);
+});
+
+test("图片方向冲突重载保留正文，保存并阅读先旋转后持久正文", async ({ page }) => {
+  await enableTestAccount(page);
+  const { document } = await createImageDocument(page);
+  const imageId = document.sourceImageId;
+  const before = await currentImage(page, imageId);
+  await page.getByRole("button", { name: "校对文字与注音", exact: true }).click();
+  const body = page.getByRole("textbox", { name: "日语正文", exact: true });
+  const edited = `${ocrText}\n衝突しても本文を残す。`;
+  await body.fill(edited);
+  const rotate = page.getByRole("button", { name: "向左旋转90°", exact: true });
+  await expect(rotate).toBeEnabled();
+  await rotate.click();
+  // Another real API operation changes the file/version while this editor has
+  // the old revision; the following 409 is produced by the production server.
+  const changedElsewhere = await page.request.post(`/api/images/${imageId}/rotate`, {
+    data: { quarterTurns: 1, revision: before.metadata.revision },
+  });
+  expect(changedElsewhere.status()).toBe(200);
+  const external = await changedElsewhere.json();
+  await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("其他页面修改");
+  await expect(body).toHaveValue(edited);
+  expect((await getDocument(page, document.id)).revision).toBe(document.revision);
+  await page.getByRole("button", { name: "重新载入当前图片", exact: true }).click();
+  await expect(body).toHaveValue(edited);
+  const image = page.getByAltText("用于校对正文和注音的日语原图", { exact: true });
+  await expect.poll(() => image.evaluate((el) => [el.naturalWidth, el.naturalHeight])).toEqual([
+    before.pixels.height, before.pixels.width,
+  ]);
+  await expect(page.getByRole("button", { name: "保存图片方向", exact: true })).toBeDisabled();
+  expect((await currentImage(page, imageId)).metadata.revision).toBe(external.revision);
+  await rotate.click();
+  const mutations = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (request.method() === "POST" && path === `/api/images/${imageId}/rotate`)
+      mutations.push({ kind: "rotate", data: request.postDataJSON() });
+    if (request.method() === "PUT" && path === `/api/documents/${document.id}`)
+      mutations.push({ kind: "document" });
+  });
+  await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
+  const article = page.getByRole("article", { name: "日语原文", exact: true });
+  await expect(article).toBeVisible();
+  expect(mutations).toEqual([
+    { kind: "rotate", data: { quarterTurns: 3, revision: external.revision } },
+    { kind: "document" },
+  ]);
+  const after = await currentImage(page, imageId);
+  expect(after.metadata.revision).toBe(before.metadata.revision + 2);
+  expect([after.pixels.width, after.pixels.height]).toEqual([before.pixels.width, before.pixels.height]);
+  const saved = await getDocument(page, document.id);
+  expect(saved.revision).toBe(document.revision + 1);
+  expect(saved.blocks.map((b) => b.segments.map((s) => s.text).join("")).join("\n")).toBe(edited);
+  expect(saved.blocks.slice(0, ocrTypes.length).map((b) => b.type)).toEqual(ocrTypes);
+  await page.reload();
+  await expect(article).toBeVisible();
+  expect(await renderedText(article)).toBe(edited);
+  expect((await page.request.delete(`/api/documents/${document.id}`, {
+    data: { revision: saved.revision },
+  })).status()).toBe(204);
 });
 
 test(accountFlowTitle, async ({ page, playwright, baseURL }, info) => {

@@ -217,3 +217,24 @@ test("batch annotations use UTF-16 offsets with intact Unicode context", () => {
   assert.equal(longContext.before, "😀".repeat(12));
   assert.equal(longContext.after, "𠮷".repeat(12));
 });
+
+test("structured layout survives text correction and batch ruby edits without changing original words", () => {
+  const original = parseText("{登場人物|とうじょうじんぶつ}\n{名字|みょうじ}は田中です。\n「まだ？」……「はい。」");
+  original[0].type = "heading";
+  original[1].type = "list_item";
+  original[2].type = "paragraph";
+  const reopened = parseText(serializeBlocks(original), original);
+  assert.deepEqual(reopened, original);
+  const corrected = editPlainText(original, plainText(original).replace("田中", "山田")).blocks;
+  assert.deepEqual(corrected.map((block) => block.type), ["heading", "list_item", "paragraph"]);
+  assert.equal(corrected[1].id, original[1].id);
+  const matches = findTextOccurrences(corrected, "名字");
+  const annotated = annotateOccurrences(corrected, "名字", matches.map((match) => match.key), "ミンツー");
+  assert.equal(plainText(annotated), plainText(corrected));
+  assert.deepEqual(annotated.map((block) => block.type), ["heading", "list_item", "paragraph"]);
+  assert.equal(annotated[1].segments[0].reading, "ミンツー");
+  assert.equal(annotated[2].segments[0].text, "「まだ？」……「はい。」");
+  const inserted = editPlainText(original, `新しい行\n${plainText(original)}`).blocks;
+  assert.equal(inserted[0].type, undefined);
+  assert.equal(inserted[1].type, "heading");
+});

@@ -414,6 +414,18 @@ export function attachAIRoutes({
     res.set("X-Content-Type-Options", "nosniff");
     res.type(image.mimeType).send(await images.read(image.id));
   });
+  app.get("/api/images/:id", async (req, res) => {
+    res.set("Cache-Control", "private, no-store");
+    res.json(publicImage(await getImage(req.user.id, req.params.id)));
+  });
+  app.post("/api/images/:id/rotate", async (req, res) => {
+    await getImage(req.user.id, req.params.id);
+    const image = await images.rotate(req.params.id, {
+      quarterTurns: req.body?.quarterTurns,
+      revision: req.body?.revision,
+    });
+    res.json(publicImage(image));
+  });
   app.post("/api/images/:id/recognize", async (req, res) => {
     const image = await getImage(req.user.id, req.params.id);
     await withProvider(
@@ -423,6 +435,7 @@ export function attachAIRoutes({
         const { accountId, expectedSubject } = await identity(req, provider);
         const pixels = await images.read(image.id, {
           normalizeOrientation: true,
+          revision: image.revision,
         });
         const result = await provider.runtime.run({
           prompt: OCR_PROMPT,
@@ -444,6 +457,8 @@ export function attachAIRoutes({
             if (segment.reading !== null) segment.origin = "generated";
         draft = {
           ...draft,
+          sourceOrientation: draft.orientation,
+          orientation: "horizontal",
           readingPolicy: "ai_context",
           content: serializeBlocks(draft.blocks),
           sourceImageId: image.id,

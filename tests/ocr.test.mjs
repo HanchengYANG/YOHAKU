@@ -15,6 +15,7 @@ const result = () => ({
   readingOrder: "本页横排，从上到下、从左到右。",
   blocks: [
     {
+      type: "paragraph",
       confidence: "high",
       sourcePage: "single",
       segments: [
@@ -23,8 +24,9 @@ const result = () => ({
         { text: "撫でる", reading: "なでる", origin: "generated" },
       ],
     },
-    { confidence: "high", sourcePage: "single", segments: [] },
+    { type: "paragraph", confidence: "high", sourcePage: "single", segments: [] },
     {
+      type: "paragraph",
       confidence: "uncertain",
       sourcePage: "single",
       segments: [
@@ -88,6 +90,8 @@ test("历史source草稿继续保留特殊读音和竖排页序，不改写旧�
   );
   assert.equal(parsed.blocks[0].segments[0].reading, "そら");
   assert.equal(parsed.blocks[0].segments[0].origin, "source");
+  assert.ok(parsed.blocks.every((block) => block.type === "paragraph"));
+  assert.ok(raw.blocks.every((block) => !Object.hasOwn(block, "type")));
   assert.deepEqual(raw.blocks[0].segments[0], {
     text: "宇宙",
     reading: "そら",
@@ -95,6 +99,46 @@ test("历史source草稿继续保留特殊读音和竖排页序，不改写旧�
   });
   assert.deepEqual(parsed.blocks[1].segments, raw.blocks[1].segments);
   assert.match(OCR_PROMPT, /先读右页、再读左页/);
+});
+
+test("受控块类型与空块规范化不改原词标点或任何segment，输入保持不变", () => {
+  const raw = result();
+  raw.blocks = [
+    {
+      type: "heading", confidence: "high", sourcePage: "single",
+      segments: [{ text: "登場人物（第２章）", reading: null, origin: null }],
+    },
+    {
+      type: "list_item", confidence: "high", sourcePage: "single",
+      segments: [{ text: "アキックスの牧野さん：「ええ……。」", reading: null, origin: null }],
+    },
+    {
+      type: "paragraph", confidence: "high", sourcePage: "single",
+      segments: [{ text: "説明の続き。", reading: null, origin: null }],
+    },
+    { type: "heading", confidence: "high", sourcePage: "single", segments: [] },
+  ];
+  raw.warnings = [];
+  const original = structuredClone(raw);
+  const parsed = validateOcr(raw);
+  assert.deepEqual(parsed.blocks.map((block) => block.type), [
+    "heading", "list_item", "paragraph", "paragraph",
+  ]);
+  assert.deepEqual(
+    parsed.blocks.map((block) => block.segments),
+    original.blocks.map((block) => block.segments),
+  );
+  assert.deepEqual(raw, original);
+  assert.equal(raw.blocks[3].type, "heading");
+  const blockSchema = OCR_SCHEMA.properties.blocks.items;
+  assert.ok(blockSchema.required.includes("type"));
+  assert.deepEqual(blockSchema.properties.type.enum, [
+    "paragraph", "heading", "list_item",
+  ]);
+  for (const type of ["html", "script", "bullet", "", null, {}, 1]) {
+    raw.blocks[0].type = type;
+    assert.throws(() => validateOcr(raw), /正文块类型/);
+  }
 });
 
 test("按语境提供的同词不同读音与含送假名的完整词形不会被全局替换或拆分", () => {

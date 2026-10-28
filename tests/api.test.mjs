@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { once } from "node:events";
 import { request as httpRequest } from "node:http";
 import { createApp } from "../server/app.mjs";
+import { DatabaseSync } from "node:sqlite";
 import { ensureSession, sessionHeaders } from "./helpers/session.mjs";
 
 async function start(dataDir) {
@@ -74,6 +75,45 @@ const sample = {
   orientation: "horizontal",
   content: "{僕|ぼく}が{生|う}まれた{日|ひ}\n\n{背中|せなか}を撫でる",
 };
+
+test("旧竖排资料统一横排输出，受控标题条目保存重开与Markdown导出保持结构", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "yohaku-layout-"));
+  let running = await start(dataDir);
+  t.after(async () => {
+    await running.stop();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+  const content = "{登場人物|とうじょうじんぶつ}\n{眞人|まひと}　お母さんを亡くした、11歳の少年。\n「まだ？」……「はい。」";
+  const created = await request(running.url, "/api/documents", "POST", {
+    ...sample, content, orientation: "vertical",
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.orientation, "horizontal");
+  const blocks = created.data.blocks;
+  ["heading", "list_item", "paragraph"].forEach((type, index) => { blocks[index].type = type; });
+  const db = new DatabaseSync(join(dataDir, "yohaku.sqlite"));
+  db.prepare("UPDATE documents SET orientation='vertical',blocks_json=? WHERE id=?")
+    .run(JSON.stringify(blocks), created.data.id);
+  db.close();
+  const legacy = await request(running.url, `/api/documents/${created.data.id}`);
+  assert.equal(legacy.data.orientation, "horizontal");
+  assert.equal(legacy.data.sourceOrientation, "vertical");
+  const saved = await request(running.url, `/api/documents/${created.data.id}`, "PUT", {
+    ...legacy.data, title: "人物紹介", orientation: "vertical",
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.data.orientation, "horizontal");
+  assert.equal(saved.data.content, content);
+  assert.deepEqual(saved.data.blocks.map((block) => block.type), ["heading", "list_item", "paragraph"]);
+  await running.stop();
+  running = await start(dataDir);
+  const reopened = await request(running.url, `/api/documents/${created.data.id}`);
+  assert.deepEqual(reopened.data, saved.data);
+  const markdown = await request(running.url, `/api/documents/${created.data.id}/export?format=markdown`);
+  assert.match(markdown.data, /\n## <ruby>登場人物/);
+  assert.match(markdown.data, /\n- <ruby>眞人/);
+  assert.ok(markdown.data.includes("「まだ？」……「はい。」"));
+});
 
 test("材料 API 的真实存储、重开、版本保护和导出", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "yohaku-api-"));

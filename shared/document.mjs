@@ -1,7 +1,14 @@
 // Braces that introduce ruby syntax are escaped with a backslash in literal text.
 // A block is one physical line, including empty lines in lyrics.
 const origins = new Set(["manual", "source", "generated"]);
+const blockTypes = new Set(["paragraph", "heading", "list_item"]);
 const escapePart = (text) => text.replace(/[\\{}|]/g, "\\$&");
+
+function retainBlockType(block, previous) {
+  return blockTypes.has(previous?.type)
+    ? { ...block, type: previous.type }
+    : block;
+}
 
 function readPart(line, start, separators) {
   let value = "";
@@ -112,7 +119,10 @@ export function parseText(content, previousBlocks = []) {
     const old = oldByLine.get(key)?.shift();
     if (old) {
       used.add(old.id);
-      return { id: old.id, segments: retainOrigins(segments, old.segments) };
+      return retainBlockType(
+        { id: old.id, segments: retainOrigins(segments, old.segments) },
+        old,
+      );
     }
     return { id: null, segments };
   });
@@ -128,6 +138,7 @@ export function parseText(content, previousBlocks = []) {
       used.add(old.id);
       // Repeated words consume provenance in their original occurrence order.
       block.segments = retainOrigins(block.segments, old.segments);
+      if (blockTypes.has(old.type)) block.type = old.type;
     }
   });
   return blocks;
@@ -313,6 +324,7 @@ export function editPlainText(blocks, text) {
     .join("\n");
   const oldPlain = blocks.map((b) => ({
     id: b.id,
+    ...(blockTypes.has(b.type) ? { type: b.type } : {}),
     segments: [{ text: plainText([b]), reading: null, origin: null }],
   }));
   const next = parseText(raw, oldPlain);
@@ -339,8 +351,10 @@ export function editPlainText(blocks, text) {
     if (
       oldCounts.get(newText) !== newCounts.get(newText) &&
       Math.max(oldCounts.get(newText) || 0, newCounts.get(newText) || 0) > 1
-    )
+    ) {
+      delete block.type;
       continue;
+    }
     if (oldText === newText) {
       block.segments = structuredClone(old.segments);
       old.segments.forEach((s, i) => {

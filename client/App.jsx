@@ -469,7 +469,7 @@ function Workspace({ user, onLoggedOut }) {
             initial={draft}
             onSave={save}
             onCancel={cancelEdit}
-            onDirty={() => setDirty(true)}
+            onDirty={(next = true) => setDirty(next)}
             saving={saving}
           />
         ) : document ? (

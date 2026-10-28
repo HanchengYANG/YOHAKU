@@ -34,17 +34,20 @@ const htmlEscape = (value) =>
 
 function markdown(document) {
   const paragraphs = document.blocks
-    .map((block) =>
-      block.segments
+    .map((block) => {
+      const text = block.segments
         .map((segment) => {
           const base = htmlEscape(segment.text);
           return segment.reading
             ? `<ruby>${base}<rp>（</rp><rt>${htmlEscape(segment.reading)}</rt><rp>）</rp></ruby>`
             : base;
         })
-        .join(""),
-    )
-    .map((line) => (line ? `${line}  ` : ""))
+        .join("");
+      if (!text) return "";
+      if (block.type === "heading") return `\n## ${text}\n`;
+      if (block.type === "list_item") return `- ${text}`;
+      return `${text}  `;
+    })
     .join("\n");
   return `# ${htmlEscape(document.title)}\n\n${paragraphs}\n`;
 }
@@ -70,7 +73,7 @@ function validateInput(input, updating = false) {
   if (updating && (!Number.isSafeInteger(revision) || revision < 1)) {
     throw new HttpError(400, "缺少有效的文档版本，请重新打开后再保存。");
   }
-  return { title: title.trim(), kind, orientation, content, revision };
+  return { title: title.trim(), kind, orientation: "horizontal", content, revision };
 }
 
 function parseContent(content, previous = [], manualReadings = []) {
@@ -109,18 +112,22 @@ function parseContent(content, previous = [], manualReadings = []) {
 
 function fromRow(row) {
   const blocks = JSON.parse(row.blocks_json);
+  const recognition = row.recognition_json ? JSON.parse(row.recognition_json) : null;
   return {
     id: row.id,
     title: row.title,
     kind: row.kind,
-    orientation: row.orientation,
+    orientation: "horizontal",
+    sourceOrientation:
+      recognition?.sourceOrientation || recognition?.orientation ||
+      row.orientation,
     content: serializeBlocks(blocks),
     blocks,
     revision: row.revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     sourceImageId: row.source_image_id || null,
-    recognition: row.recognition_json ? JSON.parse(row.recognition_json) : null,
+    recognition,
   };
 }
 
