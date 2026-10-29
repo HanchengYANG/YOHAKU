@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { VitePWA } from "vite-plugin-pwa";
 
 const tlsCertificate = process.env.TLS_CERT;
 const tlsKey = process.env.TLS_KEY;
@@ -12,7 +13,33 @@ const https =
     : undefined;
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    VitePWA({
+      registerType: "autoUpdate",
+      // The manifest and app icons are kept as hand-written files under public/.
+      manifest: false,
+      // PWAManager registers the service worker through useRegisterSW.
+      injectRegister: null,
+      workbox: {
+        globPatterns: ["**/*.{js,css,html,webp,png,ico}"],
+        // Navigation falls back to the cached app shell; API routes and the
+        // OAuth callback must always reach the server.
+        navigateFallback: "index.html",
+        navigateFallbackDenylist: [
+          /^\/api(?:\/|$)/,
+          /^\/auth\/callback(?:[/?]|$)/,
+        ],
+      },
+      devOptions: {
+        // Only the HTTPS dev server registers a service worker, so the app is
+        // installable from a phone there. Plain HTTP development stays free of
+        // service-worker caching.
+        enabled: Boolean(https),
+        type: "module",
+      },
+    }),
+  ],
   server: {
     host: process.env.HOST || "127.0.0.1",
     port: 5173,
