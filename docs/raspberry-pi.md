@@ -37,6 +37,7 @@ ln -s deploy/instances/production.env .env.deploy
 | `TLS_MODE` | `local-ca` 创建独立 CA 和站点证书；`self-signed` 单张自签；`existing` 仅使用已有文件。未配置时兼容旧实例，使用 `self-signed` |
 | `TLS_CA_CERT`、`TLS_CA_KEY` | CA 公开证书及签发私钥路径；`local-ca` 必填且与站点文件分开，CA 私钥仅供部署脚本使用 |
 | `TLS_CERT_DAYS`、`TLS_CA_DAYS` | 新站点证书与新 CA 的有效天数，默认 365 / 3650 |
+| `DEPLOY_TEST_HTTP_TIMEOUT_MS` | 部署时账号测试请求的等待毫秒数，默认 30000，供较慢服务器配置；不影响应用超时或密码哈希参数 |
 
 站点来源支持 DNS 名称和 IPv4 地址，外部端口可与服务器监听端口不同。
 Node 始终仅监听本机，Nginx 保留外部请求 Host 中的端口。未配置的 Host 和提交来源仍会被拒绝。

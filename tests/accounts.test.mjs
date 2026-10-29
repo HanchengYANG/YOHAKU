@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { attachAccountRoutes } from "../server/accounts.mjs";
 
 const password = "example-password-for-tests-only";
+const requestTimeoutMs = Number(process.env.YOHAKU_TEST_HTTP_TIMEOUT_MS || 5000);
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 
 async function fixture(t, options = {}) {
@@ -62,7 +63,7 @@ async function fixture(t, options = {}) {
         ...(cookie ? { Cookie: cookie } : {}),
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(requestTimeoutMs),
     });
     const setCookie = response.headers.get("set-cookie");
     return {

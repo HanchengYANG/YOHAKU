@@ -32,7 +32,7 @@ if [[ -d "$DATA_DIR" ]]; then
 fi
 npm ci
 # Serialize crypto-heavy account fixtures on small servers.
-node --test --test-concurrency=1 tests/*.test.mjs
+YOHAKU_TEST_HTTP_TIMEOUT_MS="$DEPLOY_TEST_HTTP_TIMEOUT_MS" node --test --test-concurrency=1 tests/*.test.mjs
 npm run build
 sudo bash "$APP_DIR/scripts/pi-setup-system.sh" "$DEPLOY_CONFIG"
 if [[ -n "$TLS_CA_CERT" ]]; then

@@ -46,7 +46,7 @@ test("部署模板使用实例中的路径、端口与来源，运行环境不�
 });
 
 test("部署配置在系统变更前拒绝不安全路径、无效端口和来源", async (t) => {
-  for (const extra of ["PORT=0", "PORT=65536", "PORT=443\nHTTPS_PORT=443", "PUBLIC_ORIGINS=https://outside.example/path", "TLS_KEY='/tmp/key with spaces'", "TLS_CA_CERT='/tmp/root with spaces'", "TLS_MODE=local-ca", "TLS_MODE=auto", "TLS_CERT_DAYS=0", "TLS_CERT=/same\nTLS_KEY=/same", "PUBLIC_ORIGIN=http://reader.example"]) {
+  for (const extra of ["PORT=0", "PORT=65536", "PORT=443\nHTTPS_PORT=443", "PUBLIC_ORIGINS=https://outside.example/path", "TLS_KEY='/tmp/key with spaces'", "TLS_CA_CERT='/tmp/root with spaces'", "TLS_MODE=local-ca", "TLS_MODE=auto", "TLS_CERT_DAYS=0", "DEPLOY_TEST_HTTP_TIMEOUT_MS=0", "TLS_CERT=/same\nTLS_KEY=/same", "PUBLIC_ORIGIN=http://reader.example"]) {
     const { config } = await fixture(t, extra + "\n");
     assert.throws(() => run(config, ":"), /Deployment configuration/);
   }
