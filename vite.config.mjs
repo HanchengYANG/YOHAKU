@@ -69,7 +69,7 @@ export default defineConfig({
         navigateFallbackDenylist: [
           /^\/api(?:\/|$)/,
           /^\/auth\//,
-          /^\/yohaku-dev\.crt(?:$|\?)/,
+          /^\/yohaku(?:-dev)?\.crt(?:$|\?)/,
         ],
       },
       devOptions: {

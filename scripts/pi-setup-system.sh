@@ -12,15 +12,11 @@ if ! command -v nginx >/dev/null || ! command -v openssl >/dev/null; then
   apt-get update
   apt-get install -y nginx openssl
 fi
-for directory in "$(dirname "$TLS_CERT")" "$(dirname "$TLS_KEY")"; do
-  if [[ ! -d "$directory" ]]; then install -d -m 700 "$directory"; fi
-done
-if [[ ! -e "$TLS_KEY" && ! -e "$TLS_CERT" ]]; then
-  openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 365 \
-    -keyout "$TLS_KEY" -out "$TLS_CERT" \
-    -subj "/CN=$CERT_HOST" -addext "subjectAltName=$CERT_SAN"
-fi
-[[ -f "$TLS_KEY" && -f "$TLS_CERT" ]] || deploy_error 'Both TLS_CERT and TLS_KEY must exist.'
+source "$(dirname "$0")/pi-certificates.sh"
+configure_certificates
+# Nginx reads only the DER public root; TLS private keys remain root-only.
+install -d -m 755 /var/lib/yohaku
+export_public_certificate /var/lib/yohaku/certificates/yohaku.crt
 # Render private values outside Git. The runtime receives only application values,
 # not deployment SSH settings or the whole shell configuration.
 install -d -m 700 /etc/yohaku

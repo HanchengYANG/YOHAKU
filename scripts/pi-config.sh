@@ -13,17 +13,29 @@ load_deploy_config() {
     deploy_error 'Use a private untracked instance, not the committed example.'
   fi
   APP_USER= APP_DIR= PUBLIC_ORIGIN= PUBLIC_ORIGINS= DEPLOY_KEY= DATA_DIR=
+  TLS_MODE=self-signed TLS_CA_CERT= TLS_CA_KEY= TLS_CERT_DAYS=365 TLS_CA_DAYS=3650
   GIT_REMOTE=origin GIT_BRANCH=main PORT=4317 HTTPS_PORT=443
   TLS_CERT=/etc/nginx/yohaku/tls.crt TLS_KEY=/etc/nginx/yohaku/tls.key
   # An administrator explicitly selects this local file; it is trusted shell input.
   source "$DEPLOY_CONFIG"
+  [[ "$TLS_CERT" != "$TLS_KEY" ]] || deploy_error 'Use separate files for the server certificate and key.'
+  case "$TLS_MODE" in
+    self-signed) TLS_CA_CERT=${TLS_CA_CERT:-$TLS_CERT}
+      [[ "$TLS_CA_CERT" == "$TLS_CERT" ]] || deploy_error 'Self-signed mode uses TLS_CERT as its trust anchor.' ;;
+    local-ca)
+      [[ -n "$TLS_CA_CERT" && -n "$TLS_CA_KEY" ]] || deploy_error 'Local CA mode requires explicit TLS_CA_CERT and TLS_CA_KEY paths.'
+      [[ "$TLS_CA_CERT" != "$TLS_CA_KEY" && "$TLS_CERT" != "$TLS_CA_CERT" && "$TLS_CERT" != "$TLS_CA_KEY" && "$TLS_KEY" != "$TLS_CA_CERT" && "$TLS_KEY" != "$TLS_CA_KEY" ]] || deploy_error 'Use separate files for the CA and server certificate/key.' ;;
+    existing) ;;
+    *) deploy_error 'TLS_MODE must be self-signed, local-ca, or existing.' ;;
+  esac
+  [[ "$TLS_CERT_DAYS" =~ ^[1-9][0-9]{0,3}$ && "$TLS_CA_DAYS" =~ ^[1-9][0-9]{0,4}$ ]] || deploy_error 'Certificate lifetimes must be positive days.'
   [[ "$APP_USER" =~ ^[a-z_][a-z0-9_-]*$ && "$APP_USER" != root ]] || deploy_error 'APP_USER must be an existing non-root user.'
   APP_HOME=$(getent passwd "$APP_USER" | cut -d: -f6) || deploy_error 'APP_USER does not exist.'
   APP_GROUP=$(id -gn "$APP_USER") || deploy_error 'APP_USER does not exist.'
   [[ "$APP_DIR" =~ ^/[a-zA-Z0-9_./-]+$ && -f "$APP_DIR/.nvmrc" ]] || deploy_error 'APP_DIR must be an existing project path without spaces.'
   APP_DIR=$(realpath -e "$APP_DIR")
   DATA_DIR=${DATA_DIR:-$APP_DIR/data}
-  for config in "$APP_HOME" "$DATA_DIR" "$TLS_CERT" "$TLS_KEY" "$DEPLOY_CONFIG"; do
+  for config in "$APP_HOME" "$DATA_DIR" "$TLS_CERT" "$TLS_KEY" "$DEPLOY_CONFIG" ${TLS_CA_CERT:+"$TLS_CA_CERT"} ${TLS_CA_KEY:+"$TLS_CA_KEY"}; do
     [[ "$config" =~ ^/[a-zA-Z0-9_./-]+$ ]] || deploy_error 'Use absolute paths without spaces or shell characters.'
   done
   [[ -z "$DEPLOY_KEY" || "$DEPLOY_KEY" =~ ^/[a-zA-Z0-9_./-]+$ ]] || deploy_error 'DEPLOY_KEY must be an absolute path without spaces.'

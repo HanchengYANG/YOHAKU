@@ -27,6 +27,11 @@ test("部署模板使用实例中的路径、端口与来源，运行环境不�
   assert.match(nginx, /server_name reader\.example outside\.example;/);
   assert.match(nginx, /127\.0\.0\.1:5321/);
   assert.match(nginx, /Host \$http_host/);
+  assert.match(nginx, /location = \/yohaku\.crt/);
+  assert.match(nginx, /alias \/var\/lib\/yohaku\/certificates\/yohaku\.crt;/);
+  assert.match(nginx, /default_type application\/x-x509-ca-cert;/);
+  assert.match(nginx, /add_header Content-Disposition \$yohaku_certificate_disposition;/);
+  assert.match(nginx, /limit_except GET \{ deny all; \}/);
   const service = run(config, 'render_deploy_template "$1/deploy/yohaku.service"');
   assert.ok(service.includes(`WorkingDirectory=${project}`));
   assert.match(service, /EnvironmentFile=\/etc\/yohaku\/runtime.env/);
@@ -37,10 +42,11 @@ test("部署模板使用实例中的路径、端口与来源，运行环境不�
   assert.doesNotMatch(nginx + service + runtime, /@[A-Z_]+@/);
   assert.doesNotMatch(runtime, /DEPLOY_KEY|GIT_BRANCH|example-key/);
   assert.equal(run(config, 'printf "%s" "$CERT_SAN"'), "DNS:reader.example,DNS:outside.example");
+  assert.equal(run(config, 'printf "%s" "$TLS_CA_CERT"'), "/etc/nginx/yohaku/tls.crt");
 });
 
 test("部署配置在系统变更前拒绝不安全路径、无效端口和来源", async (t) => {
-  for (const extra of ["PORT=0", "PORT=65536", "PORT=443\nHTTPS_PORT=443", "PUBLIC_ORIGINS=https://outside.example/path", "TLS_KEY='/tmp/key with spaces'", "PUBLIC_ORIGIN=http://reader.example"]) {
+  for (const extra of ["PORT=0", "PORT=65536", "PORT=443\nHTTPS_PORT=443", "PUBLIC_ORIGINS=https://outside.example/path", "TLS_KEY='/tmp/key with spaces'", "TLS_CA_CERT='/tmp/root with spaces'", "TLS_MODE=local-ca", "TLS_MODE=auto", "TLS_CERT_DAYS=0", "TLS_CERT=/same\nTLS_KEY=/same", "PUBLIC_ORIGIN=http://reader.example"]) {
     const { config } = await fixture(t, extra + "\n");
     assert.throws(() => run(config, ":"), /Deployment configuration/);
   }

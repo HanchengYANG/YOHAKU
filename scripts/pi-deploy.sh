@@ -20,6 +20,8 @@ git pull --ff-only "$GIT_REMOTE" "$GIT_BRANCH"
 load_deploy_config "$DEPLOY_CONFIG"
 [[ -x "$NODE_BIN/node" ]] || { echo 'Run scripts/pi-install-runtime.sh first.' >&2; exit 1; }
 export PATH="$NODE_BIN:$PATH"
+# Validate or create only the configured certificate pairs before downtime.
+sudo bash "$APP_DIR/scripts/pi-certificates.sh" "$DEPLOY_CONFIG"
 sudo systemctl stop yohaku.service
 trap 'echo "Deployment failed. Inspect journalctl -u yohaku; service may be stopped. Check the data backup before recovering." >&2' ERR
 if [[ -d "$DATA_DIR" ]]; then
@@ -33,6 +35,13 @@ npm ci
 node --test --test-concurrency=1 tests/*.test.mjs
 npm run build
 sudo bash "$APP_DIR/scripts/pi-setup-system.sh" "$DEPLOY_CONFIG"
-curl --insecure --fail --silent --show-error "$PUBLIC_ORIGIN/api/health"
+if [[ -n "$TLS_CA_CERT" ]]; then
+  verify_certificate=$(mktemp)
+  trap 'rm -- "$verify_certificate"' EXIT
+  openssl x509 -inform DER -in /var/lib/yohaku/certificates/yohaku.crt -out "$verify_certificate"
+  curl --cacert "$verify_certificate" --fail --silent --show-error "$PUBLIC_ORIGIN/api/health"
+else
+  curl --fail --silent --show-error "$PUBLIC_ORIGIN/api/health"
+fi
 printf '\nDeployed commit: '
 git rev-parse --short HEAD
