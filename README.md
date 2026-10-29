@@ -31,7 +31,24 @@ npm ci
 npm run dev
 ```
 
-打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。前端由 Vite 提供，API 默认运行在 `127.0.0.1:4317`。
+打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。前端由 Vite 提供，API 默认运行在 `127.0.0.1:4317`。`npm run dev` 会读取根目录的 `.env`（模板见 `.env.example`，命令行变量优先），局域网、HTTPS 等配置写进去后无需额外参数。
+
+### 在手机上访问开发环境
+
+手机通过局域网访问时需要 HTTPS，Service Worker 和 PWA 安装都依赖它。直接执行：
+
+```bash
+npm run dev:https
+```
+
+脚本会自动探测本机局域网 IP、按需调用 `scripts/dev-tls.sh` 在 `~/.local/share/yohaku/dev/` 生成（或在 IP 变更时更新）自签证书，并启动 HTTPS 开发环境。若希望日常 `npm run dev` 默认启用，可 `cp .env.example .env` 并取消注释其中的局域网一节（`HOST=lan` 与 `TLS_*`）。
+
+然后在手机上信任这张证书：
+
+- iPhone：把 `~/.local/share/yohaku/dev/cert.pem` 传到手机（如 AirDrop）并安装描述文件，再到「设置 → 通用 → 关于本机 → 证书信任设置」开启完全信任。
+- Android：把同一文件传到手机，在「设置 → 安全 → 加密与凭据 → 安装证书 → CA 证书」安装。
+
+> 这张证书带有 CA 权限：信任它的手机会同时信任任何用 `key.pem` 签发的证书。私钥只留在本机，测试结束后从手机删除证书（iPhone：「设置 → 通用 → VPN 与设备管理」；Android：「加密与凭据 → 用户凭据」）。
 
 ### 构建后运行
 
