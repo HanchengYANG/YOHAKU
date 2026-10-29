@@ -43,10 +43,10 @@ npm run dev:https
 
 脚本会自动探测本机局域网 IP、按需调用 `scripts/dev-tls.sh` 在 `~/.local/share/yohaku/dev/` 生成（或在 IP 变更时更新）自签证书，并启动 HTTPS 开发环境。若希望日常 `npm run dev` 默认启用，可 `cp .env.example .env` 并取消注释其中的局域网一节（`HOST=lan` 与 `TLS_*`）。
 
-然后在手机上信任这张证书：
+然后在手机上信任这张证书。第一次打开地址时浏览器会提示连接不安全，选择继续访问；页面底部会出现「下载证书」按钮。证书也可以直接从 `https://<局域网IP>:5173/yohaku-dev.crt` 下载，启动时终端会打印这个地址。
 
-- iPhone：把 `~/.local/share/yohaku/dev/cert.pem` 传到手机（如 AirDrop）并安装描述文件，再到「设置 → 通用 → 关于本机 → 证书信任设置」开启完全信任。
-- Android：把同一文件传到手机，在「设置 → 安全 → 加密与凭据 → 安装证书 → CA 证书」安装。
+- iPhone：用 Safari 下载后，到「设置 → 已下载描述文件」安装，再到「设置 → 通用 → 关于本机 → 证书信任设置」开启完全信任。
+- Android：下载后到「设置 → 安全 → 加密与凭据 → 安装证书 → CA 证书」，选择下载的 `yohaku-dev.crt`。
 
 > 这张证书带有 CA 权限：信任它的手机会同时信任任何用 `key.pem` 签发的证书。私钥只留在本机，测试结束后从手机删除证书（iPhone：「设置 → 通用 → VPN 与设备管理」；Android：「加密与凭据 → 用户凭据」）。
 

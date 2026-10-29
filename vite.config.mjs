@@ -12,9 +12,49 @@ const https =
     ? { key: readFileSync(tlsKey), cert: readFileSync(tlsCertificate) }
     : undefined;
 
+// Public path of the developer certificate download (see devCertificate).
+const DEV_CERT_PATH = "/yohaku-dev.crt";
+
+// Serves the public half of the developer certificate from the HTTPS dev
+// server, so a phone can download and trust it from the page it already has
+// open. The certificate is sent in every TLS handshake anyway; the private key
+// is never served. The client learns the path through __YOHAKU_DEV_CERT__,
+// which is empty in builds and for plain HTTP development.
+function devCertificate(certificate) {
+  return {
+    name: "yohaku-dev-certificate",
+    config: (_config, { command }) => ({
+      define: {
+        __YOHAKU_DEV_CERT__: JSON.stringify(
+          command === "serve" && certificate ? DEV_CERT_PATH : "",
+        ),
+      },
+    }),
+    configureServer(server) {
+      if (!certificate) return;
+      server.middlewares.use(DEV_CERT_PATH, (req, res, next) => {
+        if (req.method !== "GET" && req.method !== "HEAD") return next();
+        // iOS Safari offers to install a profile for this MIME type. Android
+        // refuses CA installs from the browser, so save it as a plain download
+        // to install from Settings instead.
+        const ios = /iphone|ipad|ipod|macintosh/i.test(req.headers["user-agent"] || "");
+        res.setHeader(
+          "Content-Type",
+          ios ? "application/x-x509-ca-cert" : "application/octet-stream",
+        );
+        if (!ios)
+          res.setHeader("Content-Disposition", 'attachment; filename="yohaku-dev.crt"');
+        res.setHeader("Cache-Control", "no-store");
+        res.end(req.method === "HEAD" ? undefined : certificate);
+      });
+    },
+  };
+}
+
 export default defineConfig({
   plugins: [
     react(),
+    devCertificate(https?.cert),
     VitePWA({
       registerType: "autoUpdate",
       // The manifest and app icons are kept as hand-written files under public/.
@@ -23,12 +63,13 @@ export default defineConfig({
       injectRegister: null,
       workbox: {
         globPatterns: ["**/*.{js,css,html,webp,png,ico}"],
-        // Navigation falls back to the cached app shell; API routes and the
-        // OAuth callback must always reach the server.
+        // Navigation falls back to the cached app shell; API routes, the OAuth
+        // callback, and the dev certificate download must always reach the server.
         navigateFallback: "index.html",
         navigateFallbackDenylist: [
           /^\/api(?:\/|$)/,
           /^\/auth\/callback(?:[/?]|$)/,
+          /^\/yohaku-dev\.crt(?:$|\?)/,
         ],
       },
       devOptions: {

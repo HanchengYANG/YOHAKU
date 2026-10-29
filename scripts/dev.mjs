@@ -126,6 +126,7 @@ if (!loopbackHosts.has(publicHost) && !process.env.PUBLIC_ORIGIN)
 console.log(
   `开发环境：${scheme}://${urlHost}:5173  （.env${loadedDotEnv ? " 已加载" : " 未配置"}）`,
 );
+if (tlsKey) console.log(`开发证书：${scheme}://${urlHost}:5173/yohaku-dev.crt`);
 
 const server = spawn(process.execPath, ["--watch", "server/index.mjs"], {
   stdio: "inherit",
