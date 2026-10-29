@@ -14,7 +14,63 @@
     bottom: env(safe-area-inset-bottom, 0px);
     left: env(safe-area-inset-left, 0px);
   }
-  .toast {
+  .toast,
+  .pwa-banner {
     bottom: calc(24px + env(safe-area-inset-bottom, 0px));
   }
+}
+
+/* PWA banners float over every screen without blocking the UI. */
+.pwa-banner {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 24px;
+  z-index: 60;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  width: fit-content;
+  max-width: min(92vw, 440px);
+  margin-inline: auto;
+  padding: 12px 16px;
+  border-radius: 14px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: #f5efdf;
+  background: var(--ink);
+  border: 1px solid #49635b;
+  box-shadow: 0 10px 30px #1a2f2a66;
+}
+.pwa-banner > span {
+  flex: 1 1 14em;
+}
+/* Actions wrap below the text when the banner is too narrow for one row. */
+.pwa-banner-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+.pwa-banner .button {
+  min-height: 0;
+  padding: 7px 14px;
+  text-decoration: none;
+  font-size: 13px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.pwa-banner .button.primary {
+  color: var(--ink);
+  background: #efdec0;
+  border-color: #efdec0;
+}
+.pwa-banner .button.primary:hover:not(:disabled) {
+  background: #f8e9ce;
+  border-color: #f8e9ce;
+}
+.pwa-banner .button.subtle {
+  color: #cfdcce;
+}
+.pwa-banner .button.subtle:hover:not(:disabled) {
+  background: #ffffff12;
 }

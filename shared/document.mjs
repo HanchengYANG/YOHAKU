@@ -1,3 +1,5 @@
+import { randomUuid } from "./random-uuid.mjs";
+
 // Braces that introduce ruby syntax are escaped with a backslash in literal text.
 // A block is one physical line, including empty lines in lyrics.
 const origins = new Set(["manual", "source", "generated"]);
@@ -133,7 +135,7 @@ export function parseText(content, previousBlocks = []) {
       lines.length === previousBlocks.length && !used.has(previousBlocks[i]?.id)
         ? previousBlocks[i]
         : null;
-    block.id = old?.id ?? crypto.randomUUID();
+    block.id = old?.id ?? randomUuid();
     if (old) {
       used.add(old.id);
       // Repeated words consume provenance in their original occurrence order.

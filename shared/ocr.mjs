@@ -1,3 +1,5 @@
+import { randomUuid } from "./random-uuid.mjs";
+
 const pageValues = ["single", "right", "left", "unknown"];
 const kindValues = ["lyrics", "article", "textbook", "book"];
 const orientationValues = ["horizontal", "vertical"];
@@ -203,7 +205,7 @@ export function validateOcr(raw) {
       return { text: value, reading, origin };
     });
     return {
-      id: crypto.randomUUID(),
+      id: randomUuid(),
       type: segments.length ? type : "paragraph",
       segments,
       confidence: choice(block.confidence, ["high", "uncertain"], "行可信度"),

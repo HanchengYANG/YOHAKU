@@ -5,6 +5,7 @@ __pycache__/
 # Local test images are not published.
 /fixtures/
 dist/
+dev-dist/
 data/
 artifacts/
 .env
