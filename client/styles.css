@@ -89,8 +89,8 @@ summary:focus-visible {
 .brand {
   display: flex;
   align-items: center;
-  gap: 13px;
-  margin: 0 8px 36px;
+  gap: 12px;
+  margin: 0 4px 20px;
   width: fit-content;
 }
 .brand-mark {
@@ -99,24 +99,61 @@ summary:focus-visible {
   place-items: center;
   background: #315b4e;
   color: #f3f0e7;
-  font-size: 25px;
-  width: 42px;
-  height: 47px;
+  font-size: 24px;
+  width: 40px;
+  height: 44px;
   border-radius: 3px 12px 3px 3px;
+  flex-shrink: 0;
+}
+.brand-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.brand-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
 }
 .brand strong {
   display: block;
   font-family: "Noto Serif CJK SC", serif;
-  font-size: 25px;
-  letter-spacing: 5px;
+  font-size: 23px;
+  letter-spacing: 4px;
   font-weight: 600;
+}
+.brand-en {
+  font-size: 9px;
+  letter-spacing: 2px;
+  color: #7a8179;
+  font-weight: 500;
 }
 .brand small {
   display: block;
   font-size: 10px;
   color: #7a8179;
-  letter-spacing: 2px;
-  margin-top: 3px;
+  letter-spacing: 1.5px;
+  margin-top: 2px;
+}
+.sidebar-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 22px;
+}
+.sidebar-primary-action {
+  width: 100%;
+  min-height: 40px;
+}
+.sidebar-secondary-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.sidebar-secondary-actions .button {
+  min-height: 36px;
+  padding: 6px 8px;
+  font-size: 12px;
 }
 .button {
   display: inline-flex;
@@ -308,63 +345,45 @@ textarea::placeholder {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.sidebar-bottom {
-  border-top: 1px solid #dedfd4;
-  padding: 19px 5px 0;
+.sidebar-footer {
+  margin-top: auto;
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  flex-direction: column;
+  gap: 0;
+}
+.sidebar-admin-row {
+  border-top: 1px solid #dedfd4;
+  padding: 11px 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.sidebar-settings-button {
   font-size: 11px;
-  color: #7d8878;
+  padding: 3px 0;
 }
-.sidebar-bottom small {
-  display: block;
-  font-size: 10px;
-  color: #99a08f;
-  margin-top: 4px;
-}
-.local-dot {
+.ai-dot {
   display: inline-block;
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: #7f9c72;
-  margin-top: 5px;
+  background: #899a8d;
 }
-.version {
-  margin-left: auto;
-  font-family: Georgia, serif;
-  color: #adb39f;
-  font-size: 17px;
+.ai-dot.connected {
+  background: #77b28c;
 }
 .main-panel {
   margin-left: 256px;
   min-height: 100dvh;
 }
 .topbar {
-  min-height: 79px;
-  border-bottom: 1px solid var(--line);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 45px;
-  gap: 15px;
+  display: none;
 }
-.topbar-title {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  font-size: 12px;
-  color: #9ba292;
-  letter-spacing: 1.7px;
-}
-.stage-tag {
-  color: #8a937f;
-  font-size: 10px;
-  letter-spacing: 0.7px;
-  background: #ecefe5;
-  padding: 6px 10px;
-  border-radius: 4px;
+.topbar-brand {
+  font-family: "Noto Serif CJK SC", serif;
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: 2px;
 }
 .mobile-menu {
   display: none;
@@ -569,7 +588,7 @@ textarea::placeholder {
 }
 .reader-page {
   width: min(960px, calc(100% - 100px));
-  margin: 53px auto 35px;
+  margin: 38px auto 35px;
 }
 .document-meta {
   display: flex;
@@ -589,7 +608,7 @@ textarea::placeholder {
   justify-content: space-between;
   align-items: center;
   gap: 20px;
-  margin: 14px 0 27px;
+  margin: 12px 0 20px;
 }
 .reader-title-row h1 {
   font-family: "Noto Serif CJK SC", serif;
@@ -609,12 +628,28 @@ textarea::placeholder {
 }
 .reader-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 14px;
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  padding: 9px 0;
-  margin-bottom: 28px;
+  justify-content: space-between;
+  gap: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #faf6ec;
+  padding: 8px 12px;
+  margin-bottom: 24px;
+}
+.reader-toolbar-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+.reader-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
 }
 .reader-toolbar .button {
   font-size: 11px;
@@ -630,7 +665,7 @@ textarea::placeholder {
   gap: 8px;
   color: #929b87;
   font-size: 11px;
-  padding-left: 15px;
+  padding-left: 14px;
   border-left: 1px solid #dfe3d6;
 }
 .font-control input {
@@ -644,12 +679,12 @@ textarea::placeholder {
   font-size: 10px;
 }
 .edit-action {
-  margin-left: auto;
+  margin-left: 0;
 }
 .reading-sheet {
   background: #fdfcf9;
   border: 1px solid #e8e8de;
-  border-radius: 3px;
+  border-radius: 6px;
   padding: 42px 44px;
   min-height: 380px;
 }
@@ -672,8 +707,9 @@ textarea::placeholder {
 }
 .export-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 16px;
+  gap: 14px;
 }
 .export-actions .text-button {
   font-size: 10px;
@@ -689,7 +725,7 @@ textarea::placeholder {
 }
 .editor-page {
   width: min(1100px, calc(100% - 80px));
-  margin: 35px auto;
+  margin: 24px auto 32px;
 }
 .editor-controls {
   border: 0;
@@ -702,7 +738,7 @@ textarea::placeholder {
   justify-content: space-between;
   align-items: center;
   gap: 20px;
-  margin-bottom: 25px;
+  margin-bottom: 16px;
 }
 .eyebrow {
   font-size: 10px;
@@ -712,8 +748,8 @@ textarea::placeholder {
 .editor-heading h1 {
   font-family: "Noto Serif CJK SC", serif;
   font-weight: 500;
-  font-size: 25px;
-  margin: 8px 0 0;
+  font-size: 24px;
+  margin: 6px 0 0;
   letter-spacing: 1px;
 }
 .editor-actions {
@@ -727,7 +763,7 @@ textarea::placeholder {
 .metadata-form {
   display: flex;
   gap: 15px;
-  margin-bottom: 25px;
+  margin-bottom: 16px;
 }
 .metadata-form label {
   display: flex;
@@ -1121,9 +1157,6 @@ textarea::placeholder {
   .main-panel {
     margin-left: 230px;
   }
-  .topbar {
-    padding: 0 30px;
-  }
   .welcome,
   .reader-page {
     width: calc(100% - 65px);
@@ -1195,18 +1228,12 @@ textarea::placeholder {
     margin-left: -6px;
   }
   .topbar {
-    min-height: 65px;
-    padding: 0 20px;
-  }
-  .topbar-title {
-    font-size: 10px;
-    gap: 7px;
-    letter-spacing: 1px;
-  }
-  .stage-tag {
-    font-size: 9px;
-    padding: 5px 7px;
-    letter-spacing: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 52px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--line);
   }
   .welcome {
     width: calc(100% - 44px);
@@ -1273,14 +1300,18 @@ textarea::placeholder {
   }
   .reader-toolbar {
     flex-wrap: wrap;
-    gap: 5px;
-    padding: 8px 0;
-    margin-bottom: 20px;
+    gap: 6px 8px;
+    padding: 8px 10px;
+    margin-bottom: 18px;
+  }
+  .reader-toolbar-main,
+  .reader-toolbar-actions {
+    gap: 6px;
   }
   .reader-toolbar .button {
     font-size: 10px;
-    padding: 7px 6px;
-    gap: 5px;
+    padding: 6px 8px;
+    gap: 4px;
   }
   .font-control {
     font-size: 10px;
@@ -1301,33 +1332,33 @@ textarea::placeholder {
     margin-top: 13px;
   }
   .export-actions {
-    gap: 18px;
+    gap: 12px;
   }
   .editor-page {
     width: calc(100% - 32px);
-    margin-top: 25px;
+    margin-top: 18px;
   }
   .editor-heading {
     align-items: flex-start;
-    gap: 15px;
-    margin-bottom: 22px;
+    gap: 12px;
+    margin-bottom: 14px;
   }
   .editor-heading h1 {
-    font-size: 21px;
+    font-size: 20px;
   }
   .editor-actions {
-    gap: 1px;
-    padding-top: 10px;
+    gap: 4px;
+    padding-top: 6px;
   }
   .editor-actions .button {
-    padding: 8px;
+    padding: 7px 8px;
     font-size: 11px;
-    gap: 5px;
+    gap: 4px;
   }
   .metadata-form {
     flex-wrap: wrap;
-    gap: 13px;
-    margin-bottom: 20px;
+    gap: 10px;
+    margin-bottom: 14px;
   }
   .title-field {
     flex-basis: 100%;

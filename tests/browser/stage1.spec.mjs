@@ -33,14 +33,17 @@ test("导入、选区注音、校对、保存重开、导出及手机布局", as
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto("/");
   await expect(
-    page.getByRole("heading", { name: /从一段想读的/ }),
+    page.getByRole("region", { name: "阅读首页", exact: true }),
   ).toBeVisible();
   await page.screenshot({
     path: `artifacts/stage1-welcome-${info.project.name}.png`,
     fullPage: true,
   });
+  if (await page.getByRole("button", { name: "打开书架", exact: true }).isVisible()) {
+    await page.getByRole("button", { name: "打开书架", exact: true }).click();
+  }
   await page
-    .getByRole("button", { name: "导入第一篇文字", exact: true })
+    .getByRole("button", { name: "导入文字", exact: true })
     .click();
   await page
     .getByRole("textbox", { name: "材料标题" })
@@ -149,7 +152,11 @@ test("未保存离开会确认，新建能清空旧草稿，慢速保存期间�
   page,
 }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "试试注音示例" }).click();
+  if (await page.getByRole("button", { name: "打开书架", exact: true }).isVisible()) {
+    await page.getByRole("button", { name: "打开书架", exact: true }).click();
+  }
+  await page.getByRole("button", { name: "导入文字", exact: true }).click();
+  await page.getByRole("textbox", { name: "日语正文" }).fill("未保存草稿");
   page.once("dialog", (dialog) => dialog.dismiss());
   await page.getByRole("button", { name: "取消", exact: true }).click();
   await expect(page.getByRole("textbox", { name: "日语正文" })).toBeVisible();
@@ -240,8 +247,19 @@ test("无效材料显示错误，搜索书架后仍可重试", async ({ page }) 
 });
 
 test("原词示例与完整词注音统一横排，注音在上方并能保存重开", async ({ page }, info) => {
-  await page.goto("/");
-  await page.getByRole("button", { name: "试试注音示例" }).click();
+  const created = await page.request.post("/api/documents", {
+    data: {
+      title: "把读音放回字词上方",
+      kind: "lyrics",
+      orientation: "horizontal",
+      content:
+        "はーい{口|くち}{開|あ}けてー\n{汚|きたな}い{言葉|ことば}の{歯石|しせき}が{取|と}れないね〜\n\n{僕|ぼく}が{生|う}まれた{日|ひ}の{空|そら}は\n{背中|せなか}を{撫|な}でる{声|こえ}を{聞|き}いたあの{日|ひ}",
+    },
+  });
+  expect(created.ok()).toBe(true);
+  const initial = await created.json();
+  await page.goto(`/#${initial.id}`);
+  await page.getByRole("button", { name: "校对文字与注音", exact: true }).click();
   await expect(page.getByRole("combobox", { name: "阅读方向" })).toHaveCount(0);
   const preview = page.getByRole("region", { name: "阅读预览", exact: true });
   await expect(preview.locator(".japanese-text")).toHaveCSS(
@@ -370,7 +388,7 @@ test("假名锚点只让汉字显示注音，前后缀与多汉字整词保存�
   await deleteDocument(page, initial.id);
 });
 
-test("首页图片实际加载，最近阅读使用已保存书籍和材料并能正确打开", async ({ page }, info) => {
+test("首页书案概览、当前阅读与最近阅读使用已保存书籍和材料并能正确打开", async ({ page }, info) => {
   const suffix = info.project.name;
   let documentId;
   let bookId;
@@ -393,15 +411,8 @@ test("首页图片实际加载，最近阅读使用已保存书籍和材料并�
     expect(pageResponse.status()).toBe(201);
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: /从一段想读的/ })).toBeVisible();
-    for (const alt of ["午后书桌上的书页与茶", "书本与书签的阅读静物"]) {
-      const asset = page.getByAltText(alt, { exact: true });
-      await expect(asset).toBeVisible();
-      await asset.scrollIntoViewIfNeeded();
-      await expect.poll(() => asset.evaluate((image) => image.complete && image.naturalWidth > 0)).toBe(true);
-      expect(await asset.getAttribute("src")).toMatch(/\.webp(?:\?.*)?$/);
-    }
-    await page.evaluate(() => window.scrollTo(0, 0));
+    await expect(page.getByRole("region", { name: "阅读首页", exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "我的阅读资料", exact: true })).toBeVisible();
     const recent = page.getByRole("region", { name: "最近阅读", exact: true });
     await expect(recent).toBeVisible();
     await expect(recent.getByRole("button", { name: `打开书籍：${book.title}`, exact: true })).toBeVisible();
@@ -423,7 +434,10 @@ test("首页图片实际加载，最近阅读使用已保存书籍和材料并�
     await expect(page.getByRole("article", { name: "日语原文", exact: true }).locator("rt")).toHaveText(["ほん", "よ"]);
     await expect(page.getByRole("navigation", { name: "书页导航", exact: true })).toHaveCount(0);
     await page.goto("/");
-    await page.getByRole("button", { name: "创建一本书", exact: true }).click();
+    if (await page.getByRole("button", { name: "打开书架", exact: true }).isVisible()) {
+      await page.getByRole("button", { name: "打开书架", exact: true }).click();
+    }
+    await page.getByRole("button", { name: "新建书籍", exact: true }).click();
     await expect(page.getByRole("heading", { name: "新建书籍", exact: true })).toBeVisible();
     await expect(page.getByRole("textbox", { name: "书籍名称", exact: true })).toBeVisible();
     expect(browserErrors).toEqual([]);

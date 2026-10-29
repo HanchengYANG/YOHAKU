@@ -68,7 +68,7 @@ export default defineConfig({
         navigateFallback: "index.html",
         navigateFallbackDenylist: [
           /^\/api(?:\/|$)/,
-          /^\/auth\/callback(?:[/?]|$)/,
+          /^\/auth\//,
           /^\/yohaku-dev\.crt(?:$|\?)/,
         ],
       },

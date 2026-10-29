@@ -78,29 +78,32 @@ summary:focus-visible {
 .sidebar .user-menu-header strong {
   color: #fbf4e6;
 }
+.sidebar .brand-en {
+  color: #a5b9ab;
+}
 .sidebar .brand small {
   color: #b6cbbd;
 }
-.sidebar > .button.primary {
+.sidebar .button.primary {
   color: var(--ink);
   background: #efdec0;
   border-color: #efdec0;
 }
-.sidebar > .button.primary:hover:not(:disabled) {
+.sidebar .button.primary:hover:not(:disabled) {
   background: #f8e9ce;
   border-color: #f8e9ce;
 }
-.sidebar > .button.secondary {
+.sidebar .button.secondary {
   color: #eee9dc;
   background: #ffffff0a;
   border-color: #ffffff30;
 }
-.sidebar > .button.secondary:hover:not(:disabled),
-.sidebar > .button.subtle:hover:not(:disabled) {
+.sidebar .button.secondary:hover:not(:disabled),
+.sidebar .button.subtle:hover:not(:disabled) {
   background: #ffffff12;
   border-color: #ffffff40;
 }
-.sidebar > .button.subtle,
+.sidebar .button.subtle,
 .sidebar .text-button {
   color: #d3dfd2;
 }
@@ -168,19 +171,18 @@ summary:focus-visible {
   background: #9bbbc2;
 }
 .sidebar .account-user-menu,
-.sidebar .sidebar-bottom {
+.sidebar .sidebar-admin-row {
   border-color: #ffffff24;
 }
-.sidebar .sidebar-bottom,
 .sidebar .user-menu-header small {
   color: #bacdbb;
 }
-.sidebar .sidebar-bottom small,
-.sidebar .version {
-  color: #a9c0ac;
+.sidebar .ai-dot {
+  background: #899a8d;
 }
-.sidebar .local-dot {
-  background: #d7ab7e;
+.sidebar .ai-dot.connected {
+  background: #77b28c;
+  box-shadow: 0 0 6px #77b28c80;
 }
 .sidebar .user-menu-error {
   color: #efb595;
@@ -210,12 +212,8 @@ summary:focus-visible {
   background: #faf7ef;
   border-bottom-color: var(--line);
 }
-.topbar-title {
-  color: #5b6e63;
-}
-.stage-tag {
-  background: #f1dfd1;
-  color: #9b4c32;
+.topbar-brand {
+  color: var(--ink);
 }
 .eyebrow {
   color: var(--rust-dark);
@@ -438,10 +436,10 @@ summary:focus-visible {
 .account-gate {
   position: relative;
   isolation: isolate;
-  background: #eee8dc;
+  background: #f5f1e8;
 }
 .account-gate .brand-mark {
-  background: var(--ink);
+  background: var(--rust);
 }
 .account-gate-brand small,
 .account-gate-description,
@@ -462,17 +460,6 @@ summary:focus-visible {
   color: #637056;
   background: #f0ead9;
   border-left-color: #b78a60;
-}
-@media (min-width: 1100px) {
-  .account-gate::before {
-    content: "";
-    position: fixed;
-    inset: 0 0 0 auto;
-    width: 36%;
-    z-index: -1;
-    border-left: 1px solid #d0c4ae;
-    background: url("./assets/reading-room.webp") 58% center / cover;
-  }
 }
 @media (prefers-reduced-motion: reduce) {
   .sidebar,

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import api from "./api.mjs";
-import { kinds, sample } from "./constants.mjs";
+import { kinds } from "./constants.mjs";
 import Icon from "./components/Icon.jsx";
 import Welcome from "./components/Welcome.jsx";
 import Reader from "./components/Reader.jsx";
@@ -280,6 +280,8 @@ function Workspace({ user, onLoggedOut }) {
     setDirty(!!value);
   };
   const beginEdit = () => {
+    if (!mayLeave()) return;
+    setPanel(null);
     setDraft({ ...document });
     setEditorSession((n) => n + 1);
     setDirty(false);
@@ -471,54 +473,49 @@ function Workspace({ user, onLoggedOut }) {
           }}
         >
           <span className="brand-mark">余</span>
-          <span>
-            <strong>余白</strong>
-            <small>日语阅读与笔记</small>
+          <span className="brand-copy">
+            <span className="brand-title-row">
+              <strong>余白</strong>
+              <span className="brand-en">YOHAKU</span>
+            </span>
+            <small>多语阅读与笔记</small>
           </span>
         </a>
-        <button
-          className="button primary add-button"
-          disabled={saving}
-          onClick={() => beginNew()}
-        >
-          <Icon name="plus" size={18} />
-          导入文字
-        </button>
-        <button
-          className="button secondary"
-          disabled={saving}
-          onClick={() => openPanel("image")}
-          style={{ marginTop: -24, marginBottom: 24 }}
-        >
-          导入图片
-        </button>
-        {user.isAdmin && (
+        <div className="sidebar-actions">
           <button
-            className="button subtle"
+            className="button primary sidebar-primary-action"
             disabled={saving}
-            onClick={() => openPanel("settings")}
-            style={{ marginBottom: 18 }}
+            onClick={() => openPanel("image")}
           >
-            AI 设置
+            <Icon name="plus" size={16} />
+            导入图片
           </button>
-        )}
-        <button
-          className="button secondary"
-          disabled={saving || bookBusy}
-          onClick={() => openPanel("newBook")}
-          style={{ marginBottom: 18 }}
-        >
-          新建书籍
-        </button>
+          <div className="sidebar-secondary-actions">
+            <button
+              className="button secondary"
+              disabled={saving}
+              onClick={() => beginNew()}
+            >
+              导入文字
+            </button>
+            <button
+              className="button secondary"
+              disabled={saving || bookBusy}
+              onClick={() => openPanel("newBook")}
+            >
+              新建书籍
+            </button>
+          </div>
+        </div>
         <div className="shelf-heading">
           <span>
-            <Icon name="book" size={16} />
+            <Icon name="book" size={15} />
             我的书架
           </span>
           <span className="count">{documents.length + shelfBooks.length}</span>
         </div>
         <label className="search-box">
-          <Icon name="search" size={16} />
+          <Icon name="search" size={15} />
           <input
             aria-label="搜索书架"
             placeholder="搜索标题或正文"
@@ -531,9 +528,7 @@ function Workspace({ user, onLoggedOut }) {
           {loading && <p className="shelf-empty">正在打开书架…</p>}
           {!loading && documents.length === 0 && shelfBooks.length === 0 && (
             <p className="shelf-empty">
-              {query
-                ? "没有找到匹配的材料。"
-                : "还没有材料。\n从一段喜欢的日语开始。"}
+              {query ? "没有找到匹配的材料。" : "还没有材料。"}
             </p>
           )}
           {shelfBooks.map((item) => (
@@ -568,32 +563,37 @@ function Workspace({ user, onLoggedOut }) {
             </button>
           ))}
         </nav>
-        <UserMenu
-          user={user}
-          onBeforeLogout={mayLeave}
-          onLoggedOut={onLoggedOut}
-        />
-        <div className="sidebar-bottom">
-          <span className="local-dot" />
-          <span>
-            本机书架<small>资料保存在当前电脑</small>
-          </span>
-          <span className="version">01</span>
+        <div className="sidebar-footer">
+          {user.isAdmin && (
+            <div className="sidebar-admin-row">
+              <button
+                className={`text-button sidebar-settings-button ${panel === "settings" ? "active" : ""}`}
+                type="button"
+                disabled={saving}
+                onClick={() => openPanel("settings")}
+              >
+                <span className="ai-dot" aria-hidden="true" />
+                AI 设置
+              </button>
+            </div>
+          )}
+          <UserMenu
+            user={user}
+            onBeforeLogout={mayLeave}
+            onLoggedOut={onLoggedOut}
+          />
         </div>
       </aside>
       <main className="main-panel">
         <header className="topbar">
-          <div className="topbar-title">
-            <button
-              className="icon-button mobile-menu"
-              aria-label="打开书架"
-              onClick={() => setSidebarOpen(true)}
-            >
-              <Icon name="menu" />
-            </button>
-            <span>読む、わかる、残す。</span>
-          </div>
-          <span className="stage-tag">第二阶段 · AI 与图片识别</span>
+          <button
+            className="icon-button mobile-menu"
+            aria-label="打开书架"
+            onClick={() => setSidebarOpen(true)}
+          >
+            <Icon name="menu" />
+          </button>
+          <span className="topbar-brand">余白</span>
         </header>
         {(error || shelfError) && (
           <div className="error-banner" role="alert">
@@ -628,15 +628,6 @@ function Workspace({ user, onLoggedOut }) {
             onReady={imageReady}
             onDirty={setDirty}
           />
-        ) : panel === "chat" && document ? (
-          <DocumentChat
-            document={document}
-            onClose={() => {
-              setPanel(null);
-              setDirty(false);
-            }}
-            onDirty={setDirty}
-          />
         ) : draft ? (
           <Editor
             key={editorSession}
@@ -649,41 +640,55 @@ function Workspace({ user, onLoggedOut }) {
             onCreateBook={createBook}
           />
         ) : document ? (
-          <>
-          {book ? (
-            <BookNavigation
-              book={book}
-              currentPageId={document.id}
-              onOpenBook={() => openBook(book.id)}
-              onOpenPage={openDocument}
-              onAddImage={() => beginBookPage(true)}
-              disabled={saving || bookBusy}
-            />
-          ) : document.bookId ? (
-            <div className="book-promotion">
-              <button className="text-button" onClick={() => openBook(document.bookId)}>打开所属书籍</button>
-              <span>目录暂未加载，正文已保存，可重新打开书籍。</span>
+          <div className={`reader-workspace ${panel === "chat" ? "has-chat" : ""}`}>
+            <div className="reader-main-column">
+              {book ? (
+                <BookNavigation
+                  book={book}
+                  currentPageId={document.id}
+                  onOpenBook={() => openBook(book.id)}
+                  onOpenPage={openDocument}
+                  onAddImage={() => beginBookPage(true)}
+                  disabled={saving || bookBusy}
+                />
+              ) : document.bookId ? (
+                <div className="book-promotion">
+                  <button className="text-button" onClick={() => openBook(document.bookId)}>打开所属书籍</button>
+                  <span>目录暂未加载，正文已保存，可重新打开书籍。</span>
+                </div>
+              ) : null}
+              <Reader
+                document={document}
+                onEdit={beginEdit}
+                onDelete={remove}
+                onDiscuss={() => (panel === "chat" ? closePanel() : openPanel("chat"))}
+                chatOpen={panel === "chat"}
+                onPromoteBook={
+                  !document.bookId
+                    ? () => {
+                        if (!mayLeave()) return;
+                        openPanel("newBook");
+                        setPromotion(document);
+                      }
+                    : null
+                }
+                showRuby={showRuby}
+                setShowRuby={setShowRuby}
+                fontSize={fontSize}
+                setFontSize={setFontSize}
+              />
             </div>
-          ) : (
-            <div className="book-promotion">
-              <button className="text-button" onClick={() => {
-                openPanel("newBook");
-                setPromotion(document);
-              }}>转为书籍</button>
-              <span>将这份材料作为第1页，再继续添加其他页面。</span>
-            </div>
-          )}
-          <Reader
-            document={document}
-            onEdit={beginEdit}
-            onDelete={remove}
-            onDiscuss={() => openPanel("chat")}
-            showRuby={showRuby}
-            setShowRuby={setShowRuby}
-            fontSize={fontSize}
-            setFontSize={setFontSize}
-          />
-          </>
+            {panel === "chat" && (
+              <DocumentChat
+                document={document}
+                onClose={() => {
+                  setPanel(null);
+                  setDirty(false);
+                }}
+                onDirty={setDirty}
+              />
+            )}
+          </div>
         ) : book && activeId.startsWith("book/") ? (
           <BookView
             book={book}
@@ -721,10 +726,6 @@ function Workspace({ user, onLoggedOut }) {
           </div>
         ) : (
           <Welcome
-            onImport={() => beginNew()}
-            onSample={() => beginNew(sample)}
-            onImage={() => openPanel("image")}
-            onCreateBook={() => openPanel("newBook")}
             onOpenBook={openBook}
             onOpenDocument={openDocument}
             books={books}

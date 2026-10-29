@@ -123,6 +123,24 @@ const urlHost =
 if (!loopbackHosts.has(publicHost) && !process.env.PUBLIC_ORIGIN)
   process.env.PUBLIC_ORIGIN = `${scheme}://${urlHost}:5173`;
 
+const apiPort = process.env.PORT || "4317";
+if (process.env.PUBLIC_ORIGIN) {
+  const localOrigins = [
+    `http://127.0.0.1:${apiPort}`,
+    `http://localhost:${apiPort}`,
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+    "https://127.0.0.1:5173",
+    "https://localhost:5173",
+  ];
+  const existing = (process.env.PUBLIC_ORIGINS || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  process.env.PUBLIC_ORIGINS = [
+    ...new Set([...existing, ...localOrigins]),
+  ].join(",");
+}
 console.log(
   `开发环境：${scheme}://${urlHost}:5173  （.env${loadedDotEnv ? " 已加载" : " 未配置"}）`,
 );

@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "余白 · 日语阅读与笔记",
+  "name": "余白 · 多语阅读与笔记",
   "short_name": "余白",
-  "description": "给喜欢的日语，留一点余白。阅读、注音与笔记。",
+  "description": "多语阅读与笔记。",
   "lang": "zh-CN",
   "start_url": "/",
   "scope": "/",

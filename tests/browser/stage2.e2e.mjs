@@ -84,7 +84,7 @@ async function currentImage(page, id) {
 async function openSettings(page) {
   // OAuth return may finish navigation before React has loaded the website
   // session. Wait for the workspace before deciding whether its drawer exists.
-  await expect(page.locator(".topbar")).toBeVisible();
+  await expect(page.locator(".main-panel")).toBeVisible();
   if (
     await page
       .getByRole("region", { name: "AI 授权设置", exact: true })
@@ -115,8 +115,15 @@ async function enableTestAccount(page) {
 
 async function openImageImport(page) {
   await page.goto("/");
+  await expect(page.locator(".main-panel")).toBeVisible();
+  if (
+    await page
+      .getByRole("button", { name: "打开书架", exact: true })
+      .isVisible()
+  ) {
+    await page.getByRole("button", { name: "打开书架", exact: true }).click();
+  }
   await page
-    .getByRole("main")
     .getByRole("button", { name: "导入图片", exact: true })
     .click();
   await expect(
@@ -859,16 +866,16 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
   await expect(article.locator("ul.ruby-text-list > li.text-line")).toHaveCount(0);
   await expect(article.locator(".japanese-text")).toHaveCSS("writing-mode", "horizontal-tb");
   expect(await renderedText(article)).toBe(ocrText);
-  await page.locator(".reader-recognition-details > summary").click();
-  await expect(
-    page.getByRole("link", { name: "查看完整原图", exact: true }),
-  ).toHaveAttribute("href", rawPath);
+  await expect(page.locator(".reader-recognition-details")).toHaveCount(0);
   await page
     .getByRole("button", { name: "校对文字与注音", exact: true })
     .click();
   await expect(
     page.getByRole("region", { name: "原图对照", exact: true }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "打开完整原图", exact: true }),
+  ).toHaveAttribute("href", new RegExp(`^${rawPath}(?:\\?revision=\\d+)?$`));
   await page.getByRole("tab", { name: /注音校正/ }).click();
   await expect(
     page.getByRole("textbox", { name: "空的读音（第1行）", exact: true }),
@@ -1410,7 +1417,7 @@ test(accountFlowTitle, async ({ page, playwright, baseURL }, info) => {
     expect((await page.request.get("/api/documents")).status()).toBe(401);
     await page.goto("/");
     await expect(
-      page.getByRole("heading", { name: "回到你的书架", exact: true }),
+      page.getByRole("region", { name: "登录网站账号", exact: true }),
     ).toBeVisible();
     await page
       .getByRole("textbox", { name: "网站账号", exact: true })
@@ -1420,7 +1427,7 @@ test(accountFlowTitle, async ({ page, playwright, baseURL }, info) => {
       .fill(testOwner.password);
     await page.getByRole("button", { name: "登录书架", exact: true }).click();
     await expect(
-      page.getByRole("heading", { name: /从一段想读的/ }),
+      page.getByRole("region", { name: "阅读首页", exact: true }),
     ).toBeVisible();
     if (
       await page
@@ -1453,7 +1460,7 @@ test(accountFlowTitle, async ({ page, playwright, baseURL }, info) => {
     });
     await menu.getByRole("button", { name: "退出", exact: true }).click();
     await expect(
-      page.getByRole("heading", { name: "回到你的书架", exact: true }),
+      page.getByRole("region", { name: "登录网站账号", exact: true }),
     ).toBeVisible();
     expect((await page.request.get("/api/documents")).status()).toBe(401);
     await page
@@ -1471,7 +1478,7 @@ test(accountFlowTitle, async ({ page, playwright, baseURL }, info) => {
       .fill(inviteToken);
     await page.getByRole("button", { name: "注册并登录", exact: true }).click();
     await expect(
-      page.getByRole("heading", { name: /从一段想读的/ }),
+      page.getByRole("region", { name: "阅读首页", exact: true }),
     ).toBeVisible();
     if (
       await page
@@ -1501,7 +1508,7 @@ test(accountFlowTitle, async ({ page, playwright, baseURL }, info) => {
     });
     await menu.getByRole("button", { name: "退出", exact: true }).click();
     await expect(
-      page.getByRole("heading", { name: "回到你的书架", exact: true }),
+      page.getByRole("region", { name: "登录网站账号", exact: true }),
     ).toBeVisible();
     expect((await page.request.get("/api/documents")).status()).toBe(401);
   } finally {

@@ -8,7 +8,8 @@ export const ASSISTANT_INSTRUCTIONS = `你是余白的日语阅读助教。主�
 
 // Empty environment selection is an official experimental RPC in this exact
 // verified CLI version. Fail closed before any turn on a different version.
-export const SUPPORTED_CODEX_VERSION = "0.160.1";
+export const SUPPORTED_CODEX_VERSION = "0.163.0";
+export const SUPPORTED_CODEX_VERSIONS = new Set(["0.160.1", "0.163.0"]);
 
 export function createCodexRuntime({
   auth,
@@ -347,8 +348,8 @@ export function createCodexRuntime({
         capabilities: { experimentalApi: true },
       });
       if (
-        !initialized?.userAgent?.startsWith(
-          `yohaku_reader/${SUPPORTED_CODEX_VERSION} `,
+        ![...SUPPORTED_CODEX_VERSIONS].some((version) =>
+          initialized?.userAgent?.startsWith(`yohaku_reader/${version} `),
         )
       ) {
         throw failure(
