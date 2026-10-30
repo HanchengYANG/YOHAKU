@@ -227,3 +227,48 @@ test("句子交界可选择后句插入，普通编辑保持稳定ID，分句失
     expect(bodyText((await current(page,document.id)).bodyHtml)).toBe(bodyText(saved.bodyHtml));
   } finally {await remove(page,document.id);}
 });
+
+test("编辑器删除对话后撤销和重做保留文字且不会恢复失效问答标记", async ({page},info)=>{
+  const document=await importText(page,`删除后编辑历史 ${info.project.name}`);
+  try {
+    await selectArticleText(page,"背中");
+    await page.getByRole("dialog",{name:"划词提问"}).getByRole("button",{name:"翻译",exact:true}).click();
+    const chat=page.getByRole("region",{name:"原文 AI 讨论",exact:true});
+    await expect(chat.locator(".qa-group")).toHaveCount(1);
+    await chat.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();
+    await page.getByRole("button",{name:"校对文字与注音",exact:true}).click();
+    const body=page.getByRole("textbox",{name:"日语正文",exact:true});
+    const original=await body.inputValue();
+    const middle=original.replace("遠い","広い"), newest=original.replace("遠い","青い");
+    await body.fill(middle);
+    await body.fill(newest);
+    await page.getByRole("button",{name:"撤销",exact:true}).click();
+    await expect(body).toHaveValue(middle);
+    const structure=page.locator(".editor-structure-preview");
+    await structure.locator("summary").click();
+    await structure.locator("[data-qa-group-ids]").first().click();
+    const overlay=page.locator(".editor-chat-overlay");
+    await expect(overlay.locator(".qa-group")).toHaveCount(1);
+    page.once("dialog",dialog=>dialog.accept());
+    await overlay.getByRole("button",{name:"删除文章对话",exact:true}).click();
+    await expect(structure.locator("[data-qa-group-ids]")).toHaveCount(0);
+    await overlay.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();
+    await page.getByRole("button",{name:"撤销",exact:true}).click();
+    await expect(body).toHaveValue(original);
+    await expect(structure.locator("[data-qa-group-ids]")).toHaveCount(0);
+    await page.getByRole("button",{name:"重做",exact:true}).click();
+    await expect(body).toHaveValue(middle);
+    await expect(structure.locator("[data-qa-group-ids]")).toHaveCount(0);
+    await page.getByRole("button",{name:"重做",exact:true}).click();
+    await expect(body).toHaveValue(newest);
+    await expect(structure.locator("[data-qa-group-ids]")).toHaveCount(0);
+    const response=page.waitForResponse(response=>response.request().method()==="PUT"&&new URL(response.url()).pathname===`/api/documents/${document.id}`);
+    await page.getByRole("button",{name:"保存并阅读",exact:true}).click();
+    expect((await response).ok()).toBe(true);
+    await expect(page.getByRole("article",{name:"日语原文",exact:true})).toBeVisible();
+    const saved=await current(page,document.id);
+    expect(bodyText(saved.bodyHtml)).toBe(newest);
+    expect(bodyRanges(saved.bodyHtml).qa).toHaveLength(0);
+    expect((await(await page.request.get(`/api/documents/${document.id}/conversations`)).json()).conversations).toEqual([]);
+  } finally {await remove(page,document.id);}
+});

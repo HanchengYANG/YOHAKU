@@ -1290,7 +1290,20 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
           onDocumentChanged={async () => {
             const [latest,history] = await Promise.all([api(`/documents/${encodeURIComponent(initial.id)}`),api(`/documents/${encodeURIComponent(initial.id)}/conversations`)]);
             setValue((old) => ({...old,revision:latest.revision}));
-            if (!history.conversations?.length) { const clean = removeQaMarks(htmlRef.current); setBodyHtml(clean); htmlRef.current=clean; initialQaIds.current=[]; }
+            if (!history.conversations?.length) {
+              const clean = removeQaMarks(htmlRef.current);
+              setBodyHtml(clean);
+              htmlRef.current = clean;
+              initialQaIds.current = [];
+              // Deleting the conversation also invalidates its marks in every
+              // draft snapshot; text, readings and source history remain undoable.
+              for (const snapshots of [undoHistory, redoHistory]) {
+                snapshots.current = snapshots.current.map((snapshot) => ({
+                  ...snapshot,
+                  html: removeQaMarks(snapshot.html),
+                }));
+              }
+            }
           }} />
       </div>, window.document.body)}
     </form>
