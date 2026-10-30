@@ -522,3 +522,11 @@
     transform: none;
   }
 }
+
+.home-task-card { display:flex; align-items:center; gap:16px; width:100%; margin:24px 0 0; padding:20px; border:1px solid var(--line); border-radius:8px; background:var(--paper); color:var(--ink); text-align:left; cursor:pointer; font:inherit; }
+.home-task-card > span { flex:1; min-width:0; }
+.home-task-card strong { display:block; font-size:16px; font-weight:500; }
+.home-task-card small { display:block; margin-top:7px; color:var(--muted); font-size:12px; line-height:1.7; }
+.home-task-card .count { display:inline-block; margin-left:5px; font-size:12px; }
+.home-task-card:hover { border-color:var(--ink); }
+@media(max-width:760px) { .home-task-card { padding:16px; gap:12px; } .home-task-card strong { font-size:14px; } }

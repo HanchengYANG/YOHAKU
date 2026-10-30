@@ -1,7 +1,24 @@
 const labels = {
   draft: "待提交", queued: "排队中", running: "处理中", blocked: "等待恢复",
-  needs_attention: "有图片待处理", ready: "待校对", cancelled: "已停止",
+  needs_attention: "有图片待处理", ready: "待校对", paused: "已暂停", cancelled: "已停止",
 };
+
+export const imageTasksChangedEvent = "image-tasks-changed";
+
+export function notifyImageTasksChanged() {
+  window.dispatchEvent(new Event(imageTasksChangedEvent));
+}
+
+export function taskDisplayName(task) {
+  if (!task) return "";
+  const created = new Date(task.createdAt), pad = (number) => String(number).padStart(2, "0");
+  const date = Number.isFinite(created.getTime())
+    ? `${created.getFullYear()}-${pad(created.getMonth() + 1)}-${pad(created.getDate())} ${pad(created.getHours())}:${pad(created.getMinutes())}:${pad(created.getSeconds())}` : "";
+  const names = [...new Set([task.bookTitle || task.newBookTitle, task.targetTitle, task.title].map((value) => String(value || "").trim()).filter(Boolean))];
+  if (!names.length && task.items?.length) names.push(`${task.items[0].name} · ${taskCounts(task).total} 张`);
+  const shortId = String(task.id || "").replace(/[^a-z0-9]/gi, "").slice(0, 8);
+  return [date, ...names, shortId && `#${shortId}`].filter(Boolean).join(" · ");
+}
 
 export function taskStateLabel(task) {
   return task?.appliedDocumentId ? "已保存" : labels[task?.state] || "正在读取";
@@ -35,7 +52,7 @@ export function taskCounts(task) {
 export function taskDuration(task, now = Date.now()) {
   const start = Date.parse(task?.startedAt || task?.submittedAt || task?.createdAt);
   if (!Number.isFinite(start)) return "";
-  const end = ["ready", "needs_attention", "cancelled"].includes(task?.state) ? Date.parse(task.completedAt || task.updatedAt) : now;
+  const end = ["ready", "needs_attention", "paused", "cancelled"].includes(task?.state) ? Date.parse(task.completedAt || task.updatedAt) : now;
   const seconds = Math.max(0, Math.floor(((Number.isFinite(end) ? end : now) - start) / 1000));
   return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
 }

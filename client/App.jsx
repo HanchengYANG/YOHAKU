@@ -10,6 +10,7 @@ import Editor from "./components/Editor.jsx";
 import AISettings from "./components/AISettings.jsx";
 import ImageImport from "./components/ImageImport.jsx";
 import { TaskList, TaskDetail } from "./components/ImageTasks.jsx";
+import { imageTasksChangedEvent, notifyImageTasksChanged } from "./image-tasks.mjs";
 import DocumentChat from "./components/DocumentChat.jsx";
 import AccountGate from "./components/AccountGate.jsx";
 import UserMenu from "./components/UserMenu.jsx";
@@ -127,6 +128,7 @@ function Workspace({ user, onLoggedOut }) {
   const [saveFailure, setSaveFailure] = useState(null);
   const [notice, setNotice] = useState("");
   const [taskCounts, setTaskCounts] = useState({});
+  const [activeTaskCount, setActiveTaskCount] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showRuby, setShowRuby] = useState(true);
   const [fontSize, setFontSize] = useState(26);
@@ -157,8 +159,8 @@ function Workspace({ user, onLoggedOut }) {
       const current = ++sequence;
       controller?.abort(); controller = new AbortController();
       try {
-        const result = await api("/image-tasks?limit=1", { signal:controller.signal });
-        if (!stopped && current === sequence) setTaskCounts(result.counts || {});
+        const result = await api("/image-tasks?scope=active&limit=1", { signal:controller.signal });
+        if (!stopped && current === sequence) { setTaskCounts(result.counts || {}); setActiveTaskCount(result.activeCount || 0); }
       } catch { /* Task views display connection errors without interrupting reading. */ }
       finally { if (!stopped && current === sequence) timer = setTimeout(poll, 5000); }
     };
@@ -166,9 +168,9 @@ function Workspace({ user, onLoggedOut }) {
       if (window.document.visibilityState === "hidden") { sequence++; clearTimeout(timer); controller?.abort(); }
       else void poll();
     };
-    void poll(); window.document.addEventListener("visibilitychange", visible); window.addEventListener("online", poll);
+    void poll(); window.document.addEventListener("visibilitychange", visible); window.addEventListener("online", poll); window.addEventListener(imageTasksChangedEvent, poll);
     return () => { stopped = true; clearTimeout(timer); controller?.abort();
-      window.document.removeEventListener("visibilitychange", visible); window.removeEventListener("online", poll); };
+      window.document.removeEventListener("visibilitychange", visible); window.removeEventListener("online", poll); window.removeEventListener(imageTasksChangedEvent, poll); };
   }, []);
 
   useEffect(() => {
@@ -408,6 +410,13 @@ function Workspace({ user, onLoggedOut }) {
     setDirty(false);
     setNotice("任务已提交，可以离开此页面");
   };
+  const taskDeleted = () => {
+    if (!mounted.current) return;
+    setImportTask(null); setPanel(null); setDraft(null); setDirty(false); setError("");
+    setActiveId("tasks"); history.replaceState(null, "", "#tasks");
+    notifyImageTasksChanged();
+    setNotice("任务已删除");
+  };
   const resumeTaskDraft = (task) => {
     setImportTask(task);
     setImportSession((current) => current + 1);
@@ -515,6 +524,7 @@ function Workspace({ user, onLoggedOut }) {
             resultVersion:value.taskResultVersion, document:value } : value),
         },
       );
+      if (value.taskId) notifyImageTasksChanged();
       if (!mounted.current) return;
       const parent = result.bookId
         ? await api(`/books/${encodeURIComponent(result.bookId)}`).catch(() => null)
@@ -533,7 +543,7 @@ function Workspace({ user, onLoggedOut }) {
     } catch (e) {
       if (mounted.current) {
         setError(e.message);
-        setSaveFailure({ status:e.status, message:e.message, taskId:value.taskId, id:value.id });
+        setSaveFailure({ status:e.status, code:e.code, message:e.message, taskId:value.taskId, id:value.id });
       }
     } finally {
       if (mounted.current) setSaving(false);
@@ -699,14 +709,14 @@ function Workspace({ user, onLoggedOut }) {
               新建书籍
             </button>
           </div>
-          <button className="button secondary sidebar-task-link" disabled={saving || bookBusy}
+          {activeTaskCount > 0 && <button className="button secondary sidebar-task-link" disabled={saving || bookBusy}
             onClick={() => openDocument("tasks")}>
             <Icon name="menu" size={16} />任务与导入草稿
-            {!!(taskCounts.queued || taskCounts.running || taskCounts.blocked) &&
-              <span className="count">处理中 {(taskCounts.queued || 0) + (taskCounts.running || 0) + (taskCounts.blocked || 0)}</span>}
-            {!!(taskCounts.ready || taskCounts.needs_attention) &&
-              <span className="count">待处理 {(taskCounts.ready || 0) + (taskCounts.needs_attention || 0)}</span>}
-          </button>
+            {!!(taskCounts.queued || taskCounts.running) &&
+              <span className="count">处理中 {(taskCounts.queued || 0) + (taskCounts.running || 0)}</span>}
+            {activeTaskCount > (taskCounts.queued || 0) + (taskCounts.running || 0) &&
+              <span className="count">待处理 {activeTaskCount - (taskCounts.queued || 0) - (taskCounts.running || 0)}</span>}
+          </button>}
         </div>
         <div className="shelf-heading">
           <span>
@@ -830,6 +840,7 @@ function Workspace({ user, onLoggedOut }) {
             initialTask={importTask}
             onTaskCreated={taskCreated}
             onSubmitted={taskSubmitted}
+            onDeleted={taskDeleted}
             onCancel={() => openDocument("tasks")}
             onDirty={setDirty}
             articles={articleTargets}
@@ -962,6 +973,9 @@ function Workspace({ user, onLoggedOut }) {
             books={books}
             documents={libraryDocuments}
             loading={loading}
+            activeTaskCount={activeTaskCount}
+            taskCounts={taskCounts}
+            onOpenTasks={() => openDocument("tasks")}
           />
         )}
       </main>

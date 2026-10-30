@@ -14,6 +14,8 @@ const canonical = (value) => Array.isArray(value) ? value.map(canonical)
   : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
 const adoptionHash = (document, resultVersion) => createHash("sha256")
   .update(JSON.stringify(canonical({ document, resultVersion }))).digest("hex");
+const processingStates = ["queued", "running", "blocked"];
+const staleResult = () => fail(409, "任务已恢复处理，无法保存。请先手动复制留存当前编辑内容，再重新打开最新结果。", "TASK_RESULT_STALE");
 
 function textInput(value, maximum, label, { empty = true } = {}) {
   if (typeof value !== "string" || value.length > maximum || (!empty && !value.trim()))
@@ -34,6 +36,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
       next_run_at INTEGER NOT NULL DEFAULT 0, queue_order INTEGER NOT NULL DEFAULT 0,
       result_version INTEGER, applied_document_id TEXT, applied_at TEXT,
       applied_input_hash TEXT, applied_copies_json TEXT NOT NULL DEFAULT '{}',
+      deleted_at TEXT,
       UNIQUE(user_id,idempotency_key)
     );
     CREATE INDEX IF NOT EXISTS image_tasks_user ON image_tasks(user_id,updated_at);
@@ -52,13 +55,23 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   const taskColumns = database.prepare("PRAGMA table_info(image_tasks)").all().map((column) => column.name);
   if (!taskColumns.includes("applied_input_hash")) database.exec("ALTER TABLE image_tasks ADD COLUMN applied_input_hash TEXT");
   if (!taskColumns.includes("applied_copies_json")) database.exec("ALTER TABLE image_tasks ADD COLUMN applied_copies_json TEXT NOT NULL DEFAULT '{}'");
+  if (!taskColumns.includes("deleted_at")) database.exec("ALTER TABLE image_tasks ADD COLUMN deleted_at TEXT");
   let closed = false, timer = null, active = null;
   const submittingImages = new Map();
   let queueOrder = database.prepare("SELECT coalesce(max(queue_order),0) AS value FROM image_tasks").get().value;
   const iso = () => new Date(now()).toISOString();
-  const getRow = database.prepare("SELECT * FROM image_tasks WHERE id=? AND user_id=?");
+  const getRow = database.prepare("SELECT * FROM image_tasks WHERE id=? AND user_id=? AND deleted_at IS NULL");
   const getItems = database.prepare("SELECT * FROM image_task_items WHERE task_id=? ORDER BY position,id");
   const getItem = database.prepare("SELECT * FROM image_task_items WHERE task_id=? AND id=?");
+  for (const row of database.prepare("SELECT id,user_id,input_json FROM image_tasks").all()) {
+    const input = parse(row.input_json);
+    if (input.bookTitle !== undefined && input.targetTitle !== undefined) continue;
+    let titles = {};
+    try { titles = validateDestination(row.user_id, input, { allowMissing: true }) || {}; } catch { /* Missing legacy destinations must not prevent startup. */ }
+    database.prepare("UPDATE image_tasks SET input_json=? WHERE id=?").run(json({ ...input,
+      bookTitle: input.bookTitle ?? (titles.bookTitle || input.newBookTitle || ""),
+      targetTitle: input.targetTitle ?? titles.targetTitle ?? "" }), row.id);
+  }
 
   function transaction(work) {
     database.exec("BEGIN IMMEDIATE");
@@ -67,7 +80,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   }
   function requireTask(userId, id) {
     const row = getRow.get(id, userId);
-    if (!row) throw fail(404, "找不到你账号下的图片任务。");
+    if (!row) throw fail(404, "找不到你账号下的图片任务。", "TASK_UNAVAILABLE");
     return row;
   }
   function expectVersion(row, version) {
@@ -88,6 +101,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
     if ((createNewBook || newBookTitle) && (bookId || targetId)) throw fail(400, "新建书籍不能同时指定已有书籍或文章。");
     const checked = validate ? validateDestination(userId, { bookId, targetId }) || {} : {};
     return { title: textInput(input.title || "", 160, "文章标题"), bookId, targetId, newBookTitle, createNewBook,
+      bookTitle: checked.bookTitle || (createNewBook ? newBookTitle : ""), targetTitle: checked.targetTitle || "",
       targetRevision: checked.targetRevision ?? checked.revision ?? null };
   }
   function describeItem(item) {
@@ -102,7 +116,13 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   }
   function present(row, items = getItems.all(row.id)) {
     const described = items.map(describeItem);
-    return { id: row.id, state: row.state, version: row.version, ...parse(row.input_json),
+    const input = parse(row.input_json);
+    let legacyTitles = {};
+    if (input.bookTitle === undefined || input.targetTitle === undefined) {
+      try { legacyTitles = validateDestination(row.user_id, input) || {}; } catch { /* Deleted destinations keep their stored task input. */ }
+    }
+    return { id: row.id, state: row.state, version: row.version, ...input,
+      bookTitle: input.bookTitle ?? (legacyTitles.bookTitle || input.newBookTitle || ""), targetTitle: input.targetTitle ?? legacyTitles.targetTitle ?? "",
       createdAt: row.created_at, updatedAt: row.updated_at, submittedAt: row.submitted_at,
       startedAt: row.started_at, completedAt: row.completed_at, blockedReason: row.blocked_reason,
       lastError: row.blocked_reason || described.find((item) => item.error)?.error || null,
@@ -161,11 +181,12 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   function freezeResult(userId, id, version) {
     return transaction(() => {
       const row = requireTask(userId, id);
+      if (["draft", ...processingStates].includes(row.state)) throw fail(409, "请先暂停任务，再进入人工校对。");
       if (row.result_version != null) return present(row);
       expectVersion(row, version);
       if (!getItems.all(id).some((item) => item.image_id)) throw fail(400, "请至少上传一张图片后再进入人工处理。");
       invalidateAttempt(id);
-      changeTask(id, { state: "cancelled", blocked_reason: null, completed_at: row.completed_at || iso(), result_version: row.version + 1 });
+      changeTask(id, { blocked_reason: null, completed_at: row.completed_at || iso(), result_version: row.version + 1 });
       return taskFor(userId, id);
     });
   }
@@ -173,7 +194,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   // A previous process cannot still write to this connection. Restore only its
   // uncommitted step; recognition/annotation checkpoints remain untouched.
   transaction(() => {
-    for (const row of database.prepare("SELECT * FROM image_tasks WHERE state='running'").all()) {
+    for (const row of database.prepare("SELECT * FROM image_tasks WHERE state='running' AND deleted_at IS NULL").all()) {
       invalidateAttempt(row.id);
       changeTask(row.id, { state: "queued", queue_order: ++queueOrder });
     }
@@ -195,8 +216,8 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   }
   function validAttempt(taskId, itemId, token) {
     if (closed) return false;
-    const task = database.prepare("SELECT state FROM image_tasks WHERE id=?").get(taskId);
-    return task?.state === "running" && getItem.get(taskId, itemId)?.attempt_token === token;
+    const task = database.prepare("SELECT state,deleted_at FROM image_tasks WHERE id=?").get(taskId);
+    return task?.state === "running" && !task.deleted_at && getItem.get(taskId, itemId)?.attempt_token === token;
   }
   async function perform(task, item, phase, signal) {
     if (phase === "prepare") {
@@ -260,7 +281,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
     if (active) return active.promise;
     let selected;
     transaction(() => {
-      const tasks = database.prepare("SELECT * FROM image_tasks WHERE state IN ('queued','blocked') AND next_run_at<=? AND applied_document_id IS NULL ORDER BY queue_order,id LIMIT 100").all(now());
+      const tasks = database.prepare("SELECT * FROM image_tasks WHERE state IN ('queued','blocked') AND next_run_at<=? AND applied_document_id IS NULL AND deleted_at IS NULL ORDER BY queue_order,id LIMIT 100").all(now());
       for (const task of tasks) {
         const items = getItems.all(task.id), candidates = items.map((item) => ({ item, next: nextPhase(item) })).filter(({ next }) => next);
         const candidate = candidates.find(({ next }) => next.step.nextRunAt <= now());
@@ -293,17 +314,28 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   function assertImageMutable({ userId, imageId }) {
     if (submittingImages.has(imageId)) throw fail(409, "这张图片正在提交任务，方向暂时已固定，请稍后重试。");
     const linked = database.prepare(`SELECT t.id FROM image_task_items i JOIN image_tasks t ON t.id=i.task_id
-      WHERE i.image_id=? AND t.user_id=? AND t.state IN ('queued','running','blocked','needs_attention') AND t.applied_document_id IS NULL LIMIT 1`).get(imageId, userId);
+      WHERE i.image_id=? AND t.user_id=? AND (t.state IN ('queued','running','blocked') OR
+        (t.state IN ('paused','needs_attention','cancelled') AND t.result_version IS NULL))
+        AND t.applied_document_id IS NULL AND t.deleted_at IS NULL LIMIT 1`).get(imageId, userId);
     if (linked) throw fail(409, "这张图片已用于提交的任务，方向已固定；请保存结果后再修改文章图片。");
   }
   ai.setImageMutationGuard?.(assertImageMutable);
+  function assertManualAnnotationAllowed({ userId, imageId }) {
+    const linked = database.prepare(`SELECT t.state,t.deleted_at FROM image_task_items i JOIN image_tasks t ON t.id=i.task_id
+      WHERE i.image_id=? AND t.user_id=? AND t.applied_document_id IS NULL`).all(imageId, userId);
+    if (linked.some((task) => task.deleted_at)) throw fail(404, "图片任务已删除，无法继续校对。", "TASK_UNAVAILABLE");
+    if (linked.some((task) => processingStates.includes(task.state))) throw fail(409, "任务正在处理，请先暂停任务再手动生成注音。");
+  }
+  ai.setImageAnnotationGuard?.(assertManualAnnotationAllowed);
 
   app.post("/api/image-tasks", (req, res) => {
     const key = textInput(req.body?.idempotencyKey || "", 200, "请求标识", { empty: false });
     const submitted = destination(req.user.id, req.body || {}, false);
-    const creation = json(submitted);
+    const { bookTitle, targetTitle, ...creationInput } = submitted;
+    const creation = json(creationInput);
     const existing = database.prepare("SELECT * FROM image_tasks WHERE user_id=? AND idempotency_key=?").get(req.user.id, key);
     if (existing) {
+      if (existing.deleted_at) throw fail(410, "这份导入任务已删除，请重新开始导入。");
       if (existing.creation_json !== creation) throw fail(409, "同一个请求标识不能用于不同的导入内容。");
       return res.json(present(existing));
     }
@@ -314,14 +346,18 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
     res.status(201).json(taskFor(req.user.id, id));
   });
   app.get("/api/image-tasks", (req, res) => {
+    const scope = req.query.scope || "active";
+    if (!["active", "archived"].includes(scope)) throw fail(400, "任务列表范围无效。");
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20)), offset = Math.max(0, Number(req.query.offset) || 0);
     if (!Number.isInteger(limit) || !Number.isInteger(offset)) throw fail(400, "任务分页参数无效。");
-    const total = database.prepare("SELECT count(*) AS count FROM image_tasks WHERE user_id=?").get(req.user.id).count;
-    const rows = database.prepare(`SELECT * FROM image_tasks WHERE user_id=? ORDER BY
+    const filter = `user_id=? AND deleted_at IS NULL AND applied_document_id IS ${scope === "active" ? "NULL" : "NOT NULL"}`;
+    const total = database.prepare(`SELECT count(*) AS count FROM image_tasks WHERE ${filter}`).get(req.user.id).count;
+    const rows = database.prepare(`SELECT * FROM image_tasks WHERE ${filter} ORDER BY
       CASE WHEN applied_document_id IS NOT NULL THEN 6 WHEN state IN ('running','queued') THEN 0 WHEN state='blocked' THEN 1 WHEN state='needs_attention' THEN 2 WHEN state='ready' THEN 3 WHEN state='draft' THEN 4 ELSE 5 END,
       updated_at DESC,id DESC LIMIT ? OFFSET ?`).all(req.user.id, limit, offset);
-    const counts = Object.fromEntries(database.prepare("SELECT state,count(*) AS count FROM image_tasks WHERE user_id=? AND applied_document_id IS NULL GROUP BY state").all(req.user.id).map((row) => [row.state, row.count]));
-    res.json({ tasks: rows.map((row) => present(row)), total, limit, offset, counts });
+    const counts = Object.fromEntries(database.prepare(`SELECT state,count(*) AS count FROM image_tasks WHERE ${filter} GROUP BY state`).all(req.user.id).map((row) => [row.state, row.count]));
+    const activeCount = database.prepare("SELECT count(*) AS count FROM image_tasks WHERE user_id=? AND deleted_at IS NULL AND applied_document_id IS NULL").get(req.user.id).count;
+    res.json({ tasks: rows.map((row) => present(row)), total, limit, offset, counts, activeCount, scope });
   });
   app.get("/api/image-tasks/:id", (req, res) => res.json(taskFor(req.user.id, req.params.id)));
   app.get("/api/image-tasks/:id/result", (req, res) => res.json(resultFor(req.user.id, req.params.id)));
@@ -444,22 +480,53 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
       }
     }
   });
-  app.post("/api/image-tasks/:id/retry", (req, res) => {
-    const result = transaction(() => {
-      const row = requireTask(req.user.id, req.params.id);
-      if (row.applied_document_id || row.result_version != null) throw fail(409, "结果已固定用于校对或保存，不能再由后台改写。");
-      if (!["needs_attention", "blocked"].includes(row.state)) throw fail(409, "任务当前不需要重试。");
-      expectVersion(row, req.body?.version);
-      for (const item of getItems.all(row.id)) {
-        const steps = parse(item.steps_json);
-        for (const step of Object.values(steps)) if (step.state !== "succeeded") Object.assign(step, { state: "pending", attempts: 0, error: null, nextRunAt: 0 });
-        setSteps(item, steps, { attempt_token: null });
+  app.post("/api/image-tasks/:id/pause", (req, res) => res.json(transaction(() => {
+    const row = requireTask(req.user.id, req.params.id);
+    if (row.applied_document_id || ![...processingStates, "needs_attention", "paused"].includes(row.state))
+      throw fail(409, "任务当前不能暂停。");
+    if (row.state === "paused") return present(row);
+    expectVersion(row, req.body?.version);
+    invalidateAttempt(row.id);
+    changeTask(row.id, { state: "paused", completed_at: row.completed_at || iso() });
+    return taskFor(req.user.id, row.id);
+  })));
+  async function resume(req, res, allowedStates) {
+    const initial = requireTask(req.user.id, req.params.id), snapshots = getItems.all(initial.id);
+    const imageIds = snapshots.filter((item) => item.image_id).map((item) => item.image_id);
+    if (imageIds.some((id) => ai.isImageMutating?.(id))) throw fail(409, "图片方向正在保存，请完成后再恢复任务。");
+    for (const id of imageIds) submittingImages.set(id, (submittingImages.get(id) || 0) + 1);
+    try {
+      const images = new Map(await Promise.all(imageIds.map(async (id) => [id, await ai.getImage(req.user.id, id)])));
+      if (closed) throw fail(503, "服务正在停止，请重新连接确认任务状态。");
+      const result = transaction(() => {
+        const row = requireTask(req.user.id, req.params.id);
+        if (row.applied_document_id || !allowedStates.includes(row.state)) throw fail(409, "任务当前不需要恢复或重试。");
+        expectVersion(row, req.body?.version);
+        if (snapshots.some((item) => item.image_id && (ai.isImageMutating?.(item.image_id) ||
+            ![item.prepared_revision || item.base_revision,
+              ...(!item.prepared_revision && item.quarter_turns ? [item.base_revision + 1] : [])].includes(images.get(item.image_id)?.revision))))
+          throw fail(409, "任务原图方向已变化，无法继续使用原识别结果；请手动校对，或重新导入当前图片。");
+        invalidateAttempt(row.id);
+        for (const item of getItems.all(row.id)) {
+          const steps = parse(item.steps_json);
+          for (const step of Object.values(steps)) if (step.state !== "succeeded") Object.assign(step, { state: "pending", attempts: 0, error: null, nextRunAt: 0 });
+          setSteps(item, steps, { attempt_token: null, review_annotations_json: "[]" });
+        }
+        changeTask(row.id, { state: row.submitted_at ? "queued" : "draft", result_version: null,
+          completed_at: null, blocked_reason: null, next_run_at: 0, queue_order: ++queueOrder });
+        return taskFor(req.user.id, row.id);
+      });
+      res.status(202).json(result); schedule(0);
+    } finally {
+      for (const id of imageIds) {
+        const remaining = submittingImages.get(id) - 1;
+        if (remaining) submittingImages.set(id, remaining);
+        else submittingImages.delete(id);
       }
-      changeTask(row.id, { state: "queued", completed_at: null, blocked_reason: null, next_run_at: 0, queue_order: ++queueOrder });
-      return taskFor(req.user.id, row.id);
-    });
-    res.status(202).json(result); schedule(0);
-  });
+    }
+  }
+  app.post("/api/image-tasks/:id/resume", (req, res) => resume(req, res, ["paused", "cancelled", "blocked", "needs_attention"]));
+  app.post("/api/image-tasks/:id/retry", (req, res) => resume(req, res, ["needs_attention", "blocked"]));
   app.post("/api/image-tasks/:id/cancel", (req, res) => {
     if (req.body?.freezeResult) return res.json(freezeResult(req.user.id, req.params.id, req.body.version));
     res.json(transaction(() => {
@@ -473,8 +540,13 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   });
   app.post("/api/image-tasks/:id/items/:itemId/annotate", async (req, res) => {
     const task = requireTask(req.user.id, req.params.id), item = getItem.get(task.id, req.params.itemId);
-    if (task.result_version == null || req.body?.resultVersion !== task.result_version || task.applied_document_id)
-      throw fail(409, "请使用当前固定的校对结果生成注音。");
+    const validate = () => {
+      const current = requireTask(req.user.id, task.id);
+      if (current.result_version == null || req.body?.resultVersion !== current.result_version || current.applied_document_id)
+        throw staleResult();
+      assertManualAnnotationAllowed({ userId: req.user.id, imageId: item?.image_id });
+    };
+    validate();
     if (!item?.image_id) throw fail(404, "找不到这张来源图片。");
     const content = req.body?.content;
     if (typeof content !== "string" || !content.trim() || content.length > 600000) throw fail(400, "请先输入有效的正文。");
@@ -485,13 +557,11 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
     const image = await ai.getImage(req.user.id, item.image_id);
     const result = await ai.annotateImage(req.user.id, item.image_id, {
       content, manualReadings: req.body.manualReadings || [], draft,
-      expectedRevision: image.revision, priority: "interactive", persist: false, signal: req.aiSignal,
+      expectedRevision: image.revision, priority: "interactive", persist: false, signal: req.aiSignal, validate,
     });
     if (closed) throw fail(503, "服务正在停止，请重新连接。");
     transaction(() => {
-      const current = requireTask(req.user.id, task.id);
-      if (current.result_version !== task.result_version || current.applied_document_id)
-        throw fail(409, "任务结果已保存，本次迟到注音没有应用。");
+      validate();
       const latest = getItem.get(task.id, item.id), content = serializeBlocks(result.blocks);
       const reviews = (parse(latest.review_annotations_json) || [])
         .filter((review) => serializeBlocks(review.blocks) !== content);
@@ -503,6 +573,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   });
   app.post("/api/image-tasks/:id/apply", (req, res) => res.json(transaction(() => {
     const row = requireTask(req.user.id, req.params.id);
+    if (row.result_version == null || req.body?.resultVersion !== row.result_version) throw staleResult();
     const fingerprint = adoptionHash(req.body?.document, req.body?.resultVersion);
     const readApplied = (id) => {
       if (!getAppliedDocument) throw fail(409, "这份结果已经保存，请打开已保存的文章。");
@@ -520,8 +591,6 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
       const value = req.body?.document;
       if (!value || value.saveAsNew !== true || value.id)
         throw fail(409, "这份任务已在其他页面保存，当前编辑不能作为重复请求丢弃。请打开已保存文章，或将当前内容另存为新文章。");
-      if (req.body?.resultVersion !== row.result_version)
-        throw fail(409, "校对结果版本已变化，请重新打开任务结果。");
       const copies = parse(row.applied_copies_json) || {};
       if (copies[fingerprint]) return readApplied(copies[fingerprint]);
       const document = saveDocument();
@@ -529,12 +598,22 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
       return document;
     }
     expectVersion(row, req.body?.version);
-    if (row.result_version == null || req.body?.resultVersion !== row.result_version || !["ready", "cancelled"].includes(row.state))
-      throw fail(409, "校对结果版本已变化，请重新打开任务结果。");
+    if (!["ready", "paused", "needs_attention", "cancelled"].includes(row.state)) throw staleResult();
     const document = saveDocument();
     changeTask(row.id, { applied_document_id: document.id, applied_at: iso(), applied_input_hash: fingerprint });
     return document;
   })));
+  app.delete("/api/image-tasks/:id", (req, res) => {
+    transaction(() => {
+      const row = database.prepare("SELECT * FROM image_tasks WHERE id=? AND user_id=?").get(req.params.id, req.user.id);
+      if (!row) throw fail(404, "找不到你账号下的图片任务。", "TASK_UNAVAILABLE");
+      if (row.deleted_at) return;
+      expectVersion(row, req.body?.version);
+      invalidateAttempt(row.id);
+      changeTask(row.id, { deleted_at: iso() });
+    });
+    res.status(204).end();
+  });
 
   function close() {
     if (closed) return;
@@ -542,7 +621,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
     transaction(() => {
       if (active) {
         const task = database.prepare("SELECT * FROM image_tasks WHERE id=?").get(active.taskId);
-        if (task?.state === "running") { invalidateAttempt(task.id); changeTask(task.id, { state: "queued", queue_order: ++queueOrder }); }
+        if (task?.state === "running" && !task.deleted_at) { invalidateAttempt(task.id); changeTask(task.id, { state: "queued", queue_order: ++queueOrder }); }
       }
     });
     closed = true;

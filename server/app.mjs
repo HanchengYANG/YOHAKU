@@ -414,13 +414,19 @@ export function createApp({
     return fromRow(read.get(id));
   }
 
-  function validateTaskDestination(userId, { bookId, targetId }) {
-    if (bookId) books.requireBook(userId, bookId);
-    if (!targetId) return {};
-    const target = requireDocument(userId, targetId);
+  function validateTaskDestination(userId, { bookId, targetId }, { allowMissing = false } = {}) {
+    let bookTitle = "";
+    if (bookId) {
+      try { bookTitle = books.requireBook(userId, bookId).title; }
+      catch (error) { if (!allowMissing || error.status !== 404) throw error; }
+    }
+    if (!targetId) return { bookTitle, targetTitle: "" };
+    let target;
+    try { target = requireDocument(userId, targetId); }
+    catch (error) { if (!allowMissing || error.status !== 404) throw error; return { bookTitle, targetTitle: "" }; }
     if ((target.book_id || null) !== (bookId || null))
       throw new HttpError(400, "请选择该书籍中的文章。");
-    return { targetRevision: target.revision,
+    return { targetRevision: target.revision, bookTitle, targetTitle: target.title,
       existingImageCount: fromRow(target).sourceImages.length };
   }
 
@@ -617,7 +623,7 @@ export function createApp({
     if (status >= 500 && !error.expose)
       console.error("数据库或服务错误：", error.message);
     res.status(status).json({
-      ...(error.code === "WEBSITE_AUTH_REQUIRED" ? { code: error.code } : {}),
+      ...(["WEBSITE_AUTH_REQUIRED", "TASK_VERSION_CONFLICT", "TASK_RESULT_STALE", "TASK_UNAVAILABLE"].includes(error.code) ? { code: error.code } : {}),
       error:
         status >= 500 && !error.expose
           ? "服务暂时遇到问题，请稍后再试。"

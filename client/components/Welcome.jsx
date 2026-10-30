@@ -6,6 +6,9 @@ export default function Welcome({
   books = [],
   documents = [],
   loading = false,
+  activeTaskCount = 0,
+  taskCounts = {},
+  onOpenTasks,
 }) {
   const recent = [
     ...books.map((item) => ({ ...item, entryType: "book" })),
@@ -47,6 +50,12 @@ export default function Welcome({
           </div>
         </section>
       </div>
+
+      {activeTaskCount > 0 && <button className="home-task-card" type="button" onClick={onOpenTasks} aria-label={`查看任务与导入草稿，共 ${activeTaskCount} 个`}>
+        <Icon name="menu" size={22} />
+        <span><strong>任务与导入草稿 <span className="count">{activeTaskCount}</span></strong><small>{(taskCounts.queued || 0) + (taskCounts.running || 0)} 个处理中 · {activeTaskCount - (taskCounts.queued || 0) - (taskCounts.running || 0)} 个待继续或校对</small></span>
+        <Icon name="arrow" size={18} />
+      </button>}
 
       <section className="home-recent" aria-label="最近阅读">
         <div className="home-section-heading">

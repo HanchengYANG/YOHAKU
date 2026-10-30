@@ -262,13 +262,15 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
   const editingHtml = useMemo(() => sourceImageId ? sourceBodyHtml(bodyHtml, sourceImageId) : bodyHtml, [bodyHtml, sourceImageId]);
   const editingText = bodyText(editingHtml);
   const editingBlocks = useMemo(() => htmlToBlocks(editingHtml), [editingHtml]);
-  const canGenerateReadings = !!sourceImageId && (initial.taskId
+  const taskResultStale = saveError?.code === "TASK_RESULT_STALE";
+  const taskUnavailable = saveError?.code === "TASK_UNAVAILABLE";
+  const canGenerateReadings = !taskResultStale && !taskUnavailable && !!sourceImageId && (initial.taskId
     ? activeSource?.taskId === initial.taskId : !initial.id);
   const emptySourceIds = useMemo(() => {
     const filled = new Set(bodyRanges(bodyHtml).sources.filter((source) => source.text.trim()).map((source) => source.id));
     return new Set(imageSources.filter((image) => !filled.has(image.id)).map((image) => image.id));
   }, [imageSources, bodyHtml]);
-  const canSaveAsNew = !!initial.taskId && [404, 409].includes(saveError?.status);
+  const canSaveAsNew = !!initial.taskId && !taskResultStale && !taskUnavailable && [404, 409].includes(saveError?.status);
   const editorViews = useRef(new Map());
   useEffect(() => {
     const input = textarea.current, view = editorViews.current.get(activeSourceId);
@@ -792,6 +794,8 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
           </div>
         </div>
         {canSaveAsNew && <p className="editor-message" role="status">保存未完成，当前校对内容已保留。可继续修改后另存为新文章，原文章和原问答记录保留。</p>}
+        {taskResultStale && <p className="editor-message" role="status">当前编辑内容仍保留在本页。请先手动复制留存，再重新打开任务的最新结果；这份旧稿无法保存。</p>}
+        {taskUnavailable && <p className="editor-message" role="status">任务已删除或无法访问，当前编辑内容仍保留在本页。请手动复制留存，或通过导入文字新建文章。</p>}
         {sourceImageId ? <details className="editor-meta-details"><summary>{value.title || "文章信息"} · {books.find((item) => item.id === value.bookId)?.title || "独立材料"}<span>修改文章信息</span></summary>{metadataFields}</details> : metadataFields}
         {sourceImageId && (
           <details className="ocr-review-overview"><summary>识别记录 · {warnings.length ? `${warnings.length} 条待核对提示` : "无待核对提示"}{nonBody.length ? ` · ${nonBody.length} 条非正文` : ""}</summary>

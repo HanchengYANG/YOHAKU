@@ -1,6 +1,7 @@
 // Real HTTP, uploads, SQLite and browser sessions; AI replies are explicit doubles.
 import { test, expect } from "@playwright/test";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile, rename } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import sharp from "sharp";
 import { ensureOwnerSession } from "./session.mjs";
 import { parseText } from "../../shared/document.mjs";
@@ -9,7 +10,26 @@ import { bodyText, bodyRanges, blocksToHtml } from "../../shared/article-html.mj
 const controlFile = new URL("../../artifacts/ai-e2e-data/image-runtime-controls.json", import.meta.url);
 let cookies = [], imageA, imageB;
 const activeTasks = new Set();
-const controls = (value = {}) => writeFile(controlFile, JSON.stringify({ ocrFailures: 0, annotationFailures: 0, delayMs: 0, ...value }));
+const controls = async (value = {}) => {
+  const temporary = new URL("./image-runtime-controls.tasks.tmp", controlFile);
+  await writeFile(temporary, JSON.stringify({ ocrFailures: 0, annotationFailures: 0, delayMs: 0, ...value }));
+  await rename(temporary, controlFile);
+};
+const runtimeCalls = async () => {
+  try { return JSON.parse(await readFile(new URL("./runtime-calls.json", controlFile), "utf8")); }
+  catch (error) { if (error.code === "ENOENT") return []; throw error; }
+};
+
+async function deleteTask(request, id) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const response = await request.get(`/api/image-tasks/${id}`);
+    if (!response.ok()) return;
+    const task = await response.json();
+    const removed = await request.delete(`/api/image-tasks/${id}`, { data: { version: task.version } });
+    if (removed.status() !== 409) { expect(removed.ok()).toBe(true); return; }
+  }
+  throw new Error(`无法清理测试任务 ${id}`);
+}
 
 test.beforeAll(async () => {
   imageA = await sharp({ create: { width: 540, height: 720, channels: 3, background: "#f3eee3" } }).png().toBuffer();
@@ -31,18 +51,7 @@ test.beforeEach(async ({ page }) => {
 });
 test.afterEach(async ({ page }) => {
   // Only clean up this test's work, preserving all other accounts and tasks.
-  for (const id of activeTasks) {
-    try {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const response = await page.request.get(`/api/image-tasks/${id}`);
-        if (!response.ok()) break;
-        const task = await response.json();
-        if (task.appliedDocumentId || ["ready", "cancelled"].includes(task.state)) break;
-        const cancelled = await page.request.post(`/api/image-tasks/${id}/cancel`, { data: { version: task.version } });
-        if (cancelled.status() !== 409) break;
-      }
-    } catch { /* A test may have deliberately closed its page or logged out. */ }
-  }
+  for (const id of activeTasks) await deleteTask(page.request, id);
   activeTasks.clear();
   await controls();
   const current = await page.request.get("/api/ai/status").catch(() => null);
@@ -61,7 +70,9 @@ async function openImport(page) {
 async function upload(page, files) {
   await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(files);
   await expect(page.getByRole("button", { name: "识别并注音", exact: true })).toBeEnabled();
-  return page.evaluate(() => location.hash.slice(7));
+  const id = await page.evaluate(() => location.hash.slice(7));
+  activeTasks.add(id);
+  return id;
 }
 async function state(page, id) {
   const response = await page.request.get(`/api/image-tasks/${id}`);
@@ -120,6 +131,7 @@ test("A上传后退出，B从同一草稿继续上传并提交，刷新后校对
     await other.getByRole("button", { name: "开始校对", exact: true }).click();
     await expect(other.getByRole("textbox", { name: "日语正文", exact: true })).toBeVisible();
     const saved = await saveAndRead(other); documentId = saved.id;
+    expect(saved.title).toBe(`跨设备任务 ${info.project.name}`);
     expect(saved.sourceImages.map((image) => image.id)).toEqual(draft.items.map((item) => item.imageId));
     expect((await state(other, id)).appliedDocumentId).toBe(saved.id);
     await other.goto(`/#tasks/${id}`);
@@ -131,6 +143,8 @@ test("A上传后退出，B从同一草稿继续上传并提交，刷新后校对
       const stored = await secondContext.request.get(`/api/documents/${documentId}`);
       if (stored.ok()) await secondContext.request.delete(`/api/documents/${documentId}`, { data: { revision: (await stored.json()).revision } });
     }
+    cookies = await secondContext.cookies();
+    await page.context().addCookies(cookies);
     await secondContext.close();
   }
 });
@@ -179,13 +193,17 @@ test("注音持续失败可手工补充读音，识别正文与原图继续保�
   } finally { await removeDocument(page, saved.id); }
 });
 
-test("任务可停止后续处理，已上传原图可直接转为手动录入", async ({ page }, info) => {
+test("运行时不能人工处理，明确暂停后才可手动录入且迟到结果不会覆盖", async ({ page }, info) => {
   await controls({ delayMs: 1200 });
   await openImport(page);
   const id = await upload(page, [photo(`停止-1-${info.project.name}.png`), photo(`停止-2-${info.project.name}.png`, imageB)]);
   await submit(page, id);
-  await page.getByRole("button", { name: "停止后续处理", exact: true }).click();
-  await expect.poll(async () => (await state(page, id)).state).toBe("cancelled");
+  await expect(page.getByRole("button", { name: /手动录入正文|先校对正文／手动注音|开始校对/ })).toHaveCount(0);
+  const processing = await state(page, id);
+  expect((await page.request.post(`/api/image-tasks/${id}/cancel`, { data: { version: processing.version, freezeResult: true } })).status()).toBe(409);
+  expect((await page.request.post(`/api/images/${processing.items[0].imageId}/annotate`, { data: { content: "日本語" } })).status()).toBe(409);
+  await page.getByRole("button", { name: "暂停任务", exact: true }).click();
+  await expect.poll(async () => (await state(page, id)).state).toBe("paused");
   const stopped = await state(page, id);
   expect(stopped.counts.uploaded).toBe(2);
   await page.reload();
@@ -193,7 +211,7 @@ test("任务可停止后续处理，已上传原图可直接转为手动录入",
   await expect(page.getByRole("textbox", { name: "日语正文", exact: true })).toBeVisible();
   expect(await page.getByAltText("用于校对正文和注音的日语原图", { exact: true }).count()).toBe(1);
   const current = await state(page, id);
-  expect(current.state).toBe("cancelled"); expect(current.resultVersion).toBeTruthy();
+  expect(current.state).toBe("paused"); expect(current.resultVersion).toBeTruthy();
   await expect.poll(async () => (await (await page.request.get("/api/ai/status")).json()).runtime.busy).toBe(false);
   const afterLateResult = await state(page, id);
   expect(afterLateResult.version).toBe(current.version);
@@ -201,6 +219,17 @@ test("任务可停止后续处理，已上传原图可直接转为手动录入",
   expect(afterLateResult.counts.completed).toBe(current.counts.completed);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: `artifacts/image-task-manual-${info.project.name}.png`, fullPage: true });
+  // Opening a task result is an unsaved editor session at the same #tasks/id
+  // URL. Explicitly leave it; goto(same URL) does not close the editor panel.
+  const leaveEditor = (dialog) => dialog.accept();
+  page.on("dialog", leaveEditor);
+  try { await page.getByRole("button", { name: "取消", exact: true }).click(); }
+  finally { page.off("dialog", leaveEditor); }
+  await expect(page.getByRole("region", { name: "任务状态", exact: true })).toBeVisible();
+  page.once("dialog", (dialog) => { expect(dialog.message()).toContain("删除任务"); return dialog.accept(); });
+  await page.getByRole("button", { name: "删除任务", exact: true }).click();
+  await expect(page.getByRole("region", { name: "图片任务", exact: true })).toBeVisible();
+  expect((await page.request.get(`/api/image-tasks/${id}`)).status()).toBe(404);
 });
 
 test("另一设备提交时保留本机未接纳文件，可另建草稿而不重传原图", async ({ page, browser }, info) => {
@@ -228,6 +257,7 @@ test("另一设备提交时保留本机未接纳文件，可另建草稿而不�
     await other.getByRole("button", { name: "将未上传图片另建草稿", exact: true }).click();
     await expect(other.getByRole("button", { name: "识别并注音", exact: true })).toBeEnabled();
     const nextId = await other.evaluate(() => location.hash.slice(7));
+    activeTasks.add(nextId);
     expect(nextId).not.toBe(id);
     const next = await state(other, nextId);
     expect(next.items).toHaveLength(1); expect(next.items[0].name).toBe(`本机保留-${info.project.name}.png`);
@@ -244,7 +274,7 @@ test("创建草稿响应迟到不会在登录失效后导航或继续上传", as
   const committed = new Promise((resolve) => { reached = resolve; });
   await page.route("**/api/image-tasks", async (route) => {
     if (route.request().method() !== "POST") return route.continue();
-    const response = await route.fetch(); created = await response.json(); reached();
+    const response = await route.fetch(); created = await response.json(); activeTasks.add(created.id); reached();
     await held; await route.fulfill({ response });
   });
   let reservationRequests = 0;
@@ -262,6 +292,7 @@ test("创建草稿响应迟到不会在登录失效后导航或继续上传", as
   expect(await page.evaluate(() => location.hash)).toBe(originalHash);
   expect(await page.evaluate(() => location.hash)).not.toContain(created.id);
   expect(reservationRequests).toBe(0);
+  await ensureOwnerSession(page.request); cookies = await page.context().cookies();
 });
 
 
@@ -391,4 +422,184 @@ test("同任务两设备不同校对稿保存冲突后，B可保留最新版另�
       .toEqual(savedA.blocks.flatMap((block) => block.segments).filter((segment) => segment.reading).map(({ text, reading, origin }) => ({ text, reading, origin })));
     expect((await state(page, id)).appliedDocumentId).toBe(savedA.id);
   } finally { await removeDocument(page, copyId); await removeDocument(page, savedA?.id); await otherContext.close(); }
+});
+
+test("无当前任务隐藏入口，草稿具备可辨名称，保存后归档且可从导入页找回", async ({ page, browser }, info) => {
+  // A separate real website account starts with no tasks; never remove the
+  // shared fixture owner's history merely to obtain an empty-state assertion.
+  const invitation = await page.request.post("/api/invitations", { data: {} });
+  expect(invitation.ok()).toBe(true);
+  const memberContext = await browser.newContext({ baseURL: "http://127.0.0.1:4319",
+    viewport: info.project.name === "phone" ? { width: 390, height: 844 } : { width: 1440, height: 1000 },
+    isMobile: info.project.name === "phone", hasTouch: info.project.name === "phone", locale: "zh-CN", timezoneId: "Europe/Paris" });
+  const owned = new Set();
+  let savedId;
+  try {
+    const registered = await memberContext.request.post("/api/accounts/register", { data: {
+      username: `task_${info.project.name}_${Date.now().toString(36)}`,
+      password: "fixture-task-account-password", inviteToken: (await invitation.json()).token,
+    } });
+    expect(registered.status()).toBe(201);
+    const member = await memberContext.newPage();
+    await member.goto("/");
+    await expect(member.getByRole("region", { name: "阅读首页", exact: true })).toBeVisible();
+    await expect(member.locator(".home-task-card")).toHaveCount(0);
+    await expect(member.locator(".sidebar-task-link")).toHaveCount(0);
+
+    const createEmpty = async () => {
+      const response = await member.request.post("/api/image-tasks", { data: { idempotencyKey: randomUUID() } });
+      expect(response.status()).toBe(201);
+      const task = await response.json(); owned.add(task.id); return task;
+    };
+    const first = await createEmpty(), second = await createEmpty();
+    await expect(member.locator(".home-task-card")).toBeVisible();
+    await expect(member.locator(".sidebar-task-link")).toHaveCount(1);
+    await member.locator(".home-task-card").click();
+    const firstCard = member.locator(`[data-task-id="${first.id}"]`);
+    const secondCard = member.locator(`[data-task-id="${second.id}"]`);
+    await expect(firstCard).toBeVisible(); await expect(secondCard).toBeVisible();
+    const firstName = await firstCard.locator(".task-title-button").innerText();
+    const secondName = await secondCard.locator(".task-title-button").innerText();
+    for (const name of [firstName, secondName]) {
+      expect(name).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
+      expect(name).toMatch(/#[A-Za-z0-9]{6,}/);
+      expect(name).not.toMatch(/图片导入|图片文章|未命名任务/);
+    }
+    expect(firstName).not.toBe(secondName);
+
+    await secondCard.getByRole("button", { name: "继续上传", exact: true }).click();
+    member.once("dialog", (dialog) => dialog.accept());
+    await member.getByRole("button", { name: "放弃导入草稿", exact: true }).click();
+    await expect(member.getByRole("region", { name: "图片任务", exact: true })).toBeVisible();
+    expect((await member.request.get(`/api/image-tasks/${second.id}`)).status()).toBe(404);
+    await firstCard.getByRole("button", { name: "继续上传", exact: true }).click();
+    expect(await upload(member, [photo("森林散步第一页.png"), photo("森林散步第二页.png", imageB)])).toBe(first.id);
+    await member.goto("/#tasks");
+    await expect(firstCard.locator(".task-title-button")).toContainText("森林散步第一页.png");
+    await expect(firstCard.locator(".task-title-button")).toContainText(/2\s*张/);
+    await firstCard.getByRole("button", { name: "继续上传", exact: true }).click();
+    await submit(member, first.id);
+    await expect.poll(async () => (await state(member, first.id)).state).toBe("ready");
+    await member.goto("/#tasks");
+    await expect(firstCard.locator(".task-state")).toHaveText("待校对");
+    await member.goto("/");
+    await expect(member.locator(".home-task-card")).toBeVisible();
+    await expect(member.locator(".sidebar-task-link")).toHaveCount(1);
+
+    await member.goto(`/#tasks/${first.id}`);
+    await member.getByRole("button", { name: "开始校对", exact: true }).click();
+    const saved = await saveAndRead(member); savedId = saved.id;
+    expect(saved.title).not.toMatch(/#|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
+    await expect(member.locator(".sidebar-task-link")).toHaveCount(0);
+    await member.goto("/");
+    await expect(member.getByRole("region", { name: "阅读首页", exact: true })).toBeVisible();
+    await expect(member.locator(".home-task-card")).toHaveCount(0);
+    await expect(member.locator(".sidebar-task-link")).toHaveCount(0);
+    const active = await (await member.request.get("/api/image-tasks")).json();
+    expect(active.activeCount).toBe(0); expect(active.total).toBe(0); expect(active.tasks).toEqual([]);
+
+    await openImport(member);
+    await member.getByRole("button", { name: "任务与归档", exact: true }).click();
+    await member.getByRole("tab", { name: "已归档", exact: true }).click();
+    await expect(firstCard).toBeVisible();
+    await firstCard.getByRole("button", { name: "打开文章", exact: true }).click();
+    await expect(member.getByRole("article", { name: "日语原文", exact: true })).toBeVisible();
+    await member.goto(`/#tasks/${first.id}`);
+    await expect(member.getByRole("button", { name: "打开文章", exact: true })).toBeVisible();
+    await deleteTask(member.request, first.id);
+    expect((await member.request.get(`/api/documents/${savedId}`)).ok()).toBe(true);
+    expect(await member.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  } finally {
+    for (const id of owned) await deleteTask(memberContext.request, id);
+    if (savedId) {
+      const response = await memberContext.request.get(`/api/documents/${savedId}`);
+      if (response.ok()) await memberContext.request.delete(`/api/documents/${savedId}`, { data: { revision: (await response.json()).revision } });
+    }
+    await memberContext.close();
+  }
+});
+
+test("另一设备继续暂停任务只补未完成步骤，旧手动稿保存失败且内容保留", async ({ page, browser }, info) => {
+  const cursor = (await runtimeCalls()).at(-1)?.sequence || 0;
+  await controls({ delayMs: 2000 });
+  await openImport(page);
+  const id = await upload(page, [photo(`继续-1-${info.project.name}.png`), photo(`继续-2-${info.project.name}.png`, imageB)]);
+  await submit(page, id);
+  await expect.poll(async () => (await state(page, id)).counts.recognized, { timeout: 20000 }).toBeGreaterThan(0);
+  await page.getByRole("button", { name: "暂停任务", exact: true }).click();
+  await expect.poll(async () => (await state(page, id)).state).toBe("paused");
+  const paused = await state(page, id);
+  expect(paused.items[0].steps.recognize.state).toBe("succeeded");
+  await page.getByRole("button", { name: "先校对正文／手动注音", exact: true }).click();
+  const input = page.getByRole("textbox", { name: "日语正文", exact: true });
+  const manualText = `暂停后人工校对，需要手动保留的正文 ${info.project.name}。`;
+  await input.fill(manualText);
+  const fixed = await state(page, id);
+  expect(fixed.resultVersion).toBeTruthy();
+
+  const otherContext = await browser.newContext({ baseURL: "http://127.0.0.1:4319", storageState: await page.context().storageState(),
+    viewport: info.project.name === "phone" ? { width: 390, height: 844 } : { width: 1440, height: 1000 },
+    isMobile: info.project.name === "phone", hasTouch: info.project.name === "phone", locale: "zh-CN", timezoneId: "Europe/Paris" });
+  try {
+    const other = await otherContext.newPage();
+    await other.goto(`/#tasks/${id}`);
+    await controls({ delayMs: 50 });
+    await other.getByRole("button", { name: "继续处理", exact: true }).click();
+    const rejected = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === `/api/image-tasks/${id}/apply`);
+    await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
+    const response = await rejected;
+    expect(response.status()).toBe(409);
+    expect((await response.json()).code).toBe("TASK_RESULT_STALE");
+    await expect(input).toHaveValue(manualText);
+    await expect(page.getByText(/请先手动复制留存/).first()).toBeVisible();
+    await expect(page.getByRole("button", { name: "另存为新文章", exact: true })).toHaveCount(0);
+    await expect.poll(async () => (await state(other, id)).state, { timeout: 20000 }).toBe("ready");
+    const completed = await state(other, id);
+    expect(completed.items[0].steps.recognize).toEqual(paused.items[0].steps.recognize);
+    expect((await runtimeCalls()).filter((call) => call.sequence > cursor && call.phase === "recognize")).toHaveLength(2);
+    await expect(input).toHaveValue(manualText);
+    expect(completed.resultVersion).not.toBe(fixed.resultVersion);
+    expect(completed.appliedDocumentId).toBeNull();
+    const removed = await other.request.delete(`/api/image-tasks/${id}`, { data: { version: completed.version } });
+    expect(removed.ok()).toBe(true);
+    const deletedSave = page.waitForResponse((result) => result.request().method() === "POST" && new URL(result.url()).pathname === `/api/image-tasks/${id}/apply`);
+    await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
+    const unavailable = await deletedSave;
+    expect(unavailable.status()).toBe(404);
+    expect((await unavailable.json()).code).toBe("TASK_UNAVAILABLE");
+    await expect(input).toHaveValue(manualText);
+    await expect(page.getByText("任务已删除或无法访问，当前编辑内容仍保留在本页。请手动复制留存，或通过导入文字新建文章。", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "另存为新文章", exact: true })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  } finally { await otherContext.close(); }
+});
+
+test("另一设备删除上传草稿后，本机保留全部已选文件并明确另建草稿恢复", async ({ page, browser }, info) => {
+  await openImport(page);
+  const title = `删除后恢复草稿 ${info.project.name}`;
+  await page.getByLabel("新文章标题", { exact: true }).fill(title);
+  const id = await upload(page, photo(`本机已上传-${info.project.name}.png`));
+  const original = await state(page, id);
+  const otherContext = await browser.newContext({ baseURL: "http://127.0.0.1:4319", storageState: await page.context().storageState() });
+  try {
+    expect((await otherContext.request.delete(`/api/image-tasks/${id}`, { data: { version: original.version } })).ok()).toBe(true);
+    await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(photo(`本机刚选择-${info.project.name}.png`, imageB));
+    await expect(page.getByRole("button", { name: "将本机图片另建草稿", exact: true })).toBeVisible();
+    await expect(page.getByLabel("选择日语图片", { exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "识别并注音", exact: true })).toBeDisabled();
+    expect((await otherContext.request.get(`/api/image-tasks/${id}`)).status()).toBe(404);
+    await page.getByRole("button", { name: "将本机图片另建草稿", exact: true }).click();
+    await expect(page.getByRole("button", { name: "识别并注音", exact: true })).toBeEnabled();
+    const nextId = await page.evaluate(() => location.hash.slice(7));
+    activeTasks.add(nextId);
+    expect(nextId).not.toBe(id);
+    const recovered = await state(page, nextId);
+    expect(recovered.state).toBe("draft");
+    expect(recovered.title).toBe(title);
+    expect(recovered.items.map((item) => item.name)).toEqual([`本机已上传-${info.project.name}.png`, `本机刚选择-${info.project.name}.png`]);
+    expect(recovered.counts.uploaded).toBe(2);
+    expect(recovered.items[0].imageId).not.toBe(original.items[0].imageId);
+    await expect(page.getByLabel("新文章标题", { exact: true })).toHaveValue(title);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  } finally { await otherContext.close(); }
 });

@@ -117,12 +117,18 @@ test.afterEach(async ({ page }) => {
       const response = await page.request.get(`/api/image-tasks/${id}`);
       if (!response.ok()) break;
       const task = await response.json();
-      if (["ready", "cancelled"].includes(task.state) || task.appliedDocumentId) break;
-      const stopped = await page.request.post(`/api/image-tasks/${id}/cancel`, { data: { version: task.version } });
-      if (stopped.ok() || stopped.status() !== 409) break;
+      // Submitted drafts and ready results stay active until adopted. Remove
+      // only this test's task so later tests do not inherit a full active page.
+      const removed = await page.request.delete(`/api/image-tasks/${id}`, { data: { version: task.version } });
+      if (removed.ok() || removed.status() !== 409) break;
     }
   }
   activeTasks.clear();
+  const status = await page.request.get("/api/ai/status");
+  if (status.ok()) await expect.poll(async () => {
+    const response = await page.request.get("/api/ai/status");
+    return !response.ok() || !(await response.json()).runtime.busy;
+  }).toBe(true);
 });
 
 async function openEditorDetails(page, selector) {

@@ -99,6 +99,14 @@ async function fixture(t, { runnerOptions = {} } = {}) {
     const result = await request(`/image-tasks/${task.id}/submit`, "POST", { version: task.version });
     assert.equal(result.status, 202, JSON.stringify(result.data)); return result.data;
   }
+  async function freeze(task) {
+    if (task.state === "draft") task = await submit(task);
+    if (["queued", "running", "blocked"].includes(task.state)) {
+      const paused = await request(`/image-tasks/${task.id}/pause`, "POST", { version: task.version });
+      assert.equal(paused.status, 200, JSON.stringify(paused.data)); task = paused.data;
+    }
+    return request(`/image-tasks/${task.id}/cancel`, "POST", { version: task.version, freezeResult: true });
+  }
   async function runUntil(id, state, maximum = 30) {
     for (let i = 0; i < maximum; i++) {
       const current = await get(id);
@@ -109,7 +117,7 @@ async function fixture(t, { runnerOptions = {} } = {}) {
     assert.fail(`task did not reach ${state}: ${JSON.stringify(await get(id))}`);
   }
   return { get app() { return app; }, get url() { return url; }, get cookie() { return cookie; },
-    directory, state: injected.state, clock, request, create, add, upload, prepared, get, submit, runUntil,
+    directory, state: injected.state, clock, request, create, add, upload, prepared, get, submit, freeze, runUntil,
     restart: async () => { await stop(); await start(); },
     inspect: (work) => { const db = new DatabaseSync(join(directory, "yohaku.sqlite")); try { return work(db); } finally { db.close(); } } };
 }
@@ -192,7 +200,7 @@ test("识别全失败后可逐图手输并原子保存，重复并发采用只�
   let task = await f.submit(await f.prepared(2));
   task = await f.runUntil(task.id, "needs_attention");
   assert.equal(task.counts.recognized, 0);
-  const freeze = await f.request(`/image-tasks/${task.id}/cancel`, "POST", { version: task.version, freezeResult: true });
+  const freeze = await f.freeze(task);
   assert.equal(freeze.status, 200);
   task = freeze.data;
   const result = (await f.request(`/image-tasks/${task.id}/result`)).data;
@@ -368,7 +376,7 @@ test("全局单图草稿被覆盖不影响任务快照及采用后的识别记�
 test("手动录入正文可单独请求注音，不需要OCR草稿且不会改写固定结果", async (t) => {
   const f = await fixture(t);
   const prepared = await f.prepared();
-  const task = (await f.request(`/image-tasks/${prepared.id}/cancel`, "POST", { version: prepared.version, freezeResult: true })).data;
+  const task = (await f.freeze(prepared)).data;
   const result = await f.request(`/image-tasks/${task.id}/items/${task.items[0].id}/annotate`, "POST", {
     resultVersion: task.resultVersion, content: "日本", manualReadings: [],
   });
@@ -403,7 +411,7 @@ test("任务上传保留中文与日文文件名，不采用multipart解码后�
   task = await f.upload(task);
   assert.equal(task.items[0].name, "手动录入・日本語.png");
   assert.equal(task.items[0].sourceImage.originalName, "手动录入・日本語.png");
-  task = (await f.request(`/image-tasks/${task.id}/cancel`, "POST", { version: task.version, freezeResult: true })).data;
+  task = (await f.freeze(task)).data;
   const result = (await f.request(`/image-tasks/${task.id}/result`)).data;
   assert.equal(result.sourceImages[0].sourceImage.originalName, "手动录入・日本語.png");
 });
@@ -465,7 +473,7 @@ test("转人工处理原子作废当前AI尝试，迟到识别不覆盖人工草
   const currentRun = f.app.imageTasks.runNext();
   await started;
   task = await f.get(task.id);
-  const frozen = await f.request(`/image-tasks/${task.id}/cancel`, "POST", { version: task.version, freezeResult: true });
+  const frozen = await f.freeze(task);
   assert.equal(frozen.status, 200);
   const before = (await f.request(`/image-tasks/${task.id}/result`)).data;
   release(); await currentRun;
@@ -473,7 +481,7 @@ test("转人工处理原子作废当前AI尝试，迟到识别不覆盖人工草
   assert.equal(after.taskResultVersion, before.taskResultVersion);
   assert.equal(bodyText(after.bodyHtml), "");
   assert.equal(after.sourceImages[0].recognition, null);
-  assert.equal((await f.get(task.id)).state, "cancelled");
+  assert.equal((await f.get(task.id)).state, "paused");
   assert.equal(f.state.calls.filter((call) => call.phase === "annotate").length, 0);
 });
 
@@ -496,7 +504,7 @@ test("图片方向写入与任务提交竞争时不能同时接纳两种输入�
 test("人工触发注音缓存最近三份服务器结果，去重且不改固定正文与任务版本", async (t) => {
   const f = await fixture(t);
   const prepared = await f.prepared();
-  const task = (await f.request(`/image-tasks/${prepared.id}/cancel`, "POST", { version: prepared.version, freezeResult: true })).data;
+  const task = (await f.freeze(prepared)).data;
   const annotate = (content) => f.request(`/image-tasks/${task.id}/items/${task.items[0].id}/annotate`, "POST", {
     resultVersion: task.resultVersion, content, manualReadings: [],
   });
@@ -537,7 +545,7 @@ test("旧任务表迁移补充人工注音缓存，既有草稿与图片继续�
 test("人工注音进行时已采用结果，迟到回复不能再写缓存或改变文章", async (t) => {
   const f = await fixture(t);
   const prepared = await f.prepared();
-  const task = (await f.request(`/image-tasks/${prepared.id}/cancel`, "POST", { version: prepared.version, freezeResult: true })).data;
+  const task = (await f.freeze(prepared)).data;
   const result = (await f.request(`/image-tasks/${task.id}/result`)).data;
   let release, entered;
   const gate = new Promise((resolve) => { release = resolve; });
@@ -566,7 +574,7 @@ test("人工注音进行时已采用结果，迟到回复不能再写缓存或�
 test("手输正文成功注音采用时保存服务器记录，拒绝客户端伪造且不伪造OCR", async (t) => {
   const f = await fixture(t);
   const prepared = await f.prepared();
-  const task = (await f.request(`/image-tasks/${prepared.id}/cancel`, "POST", { version: prepared.version, freezeResult: true })).data;
+  const task = (await f.freeze(prepared)).data;
   const annotated = await f.request(`/image-tasks/${task.id}/items/${task.items[0].id}/annotate`, "POST", {
     resultVersion: task.resultVersion, content: "日本", manualReadings: [],
   });
@@ -598,7 +606,7 @@ test("识别成功但自动注音失败后，人工重试成功的记录按实�
   f.state.onRun = async (phase) => { if (phase === "annotate" && fail) throw Object.assign(new Error("fixture failed annotation"), { status: 502, expose: true }); };
   let task = await f.submit(await f.prepared());
   task = await f.runUntil(task.id, "needs_attention");
-  task = (await f.request(`/image-tasks/${task.id}/cancel`, "POST", { version: task.version, freezeResult: true })).data;
+  task = (await f.freeze(task)).data;
   const before = (await f.request(`/image-tasks/${task.id}/result`)).data;
   fail = false;
   const reviewed = await f.request(`/image-tasks/${task.id}/items/${task.items[0].id}/annotate`, "POST", {
@@ -622,7 +630,7 @@ test("识别成功但自动注音失败后，人工重试成功的记录按实�
 test("人工注音后又修改正文不采用不匹配的旧AI记录", async (t) => {
   const f = await fixture(t);
   const prepared = await f.prepared();
-  const task = (await f.request(`/image-tasks/${prepared.id}/cancel`, "POST", { version: prepared.version, freezeResult: true })).data;
+  const task = (await f.freeze(prepared)).data;
   const reviewed = await f.request(`/image-tasks/${task.id}/items/${task.items[0].id}/annotate`, "POST", {
     resultVersion: task.resultVersion, content: "日本", manualReadings: [],
   });
@@ -642,7 +650,7 @@ test("全失败只手输第一张时第二张保留待录入，重开普通编�
   f.state.onRun = async () => { throw Object.assign(new Error("fixture OCR failed"), { status: 502, expose: true }); };
   let task = await f.submit(await f.prepared(2));
   task = await f.runUntil(task.id, "needs_attention");
-  task = (await f.request(`/image-tasks/${task.id}/cancel`, "POST", { version: task.version, freezeResult: true })).data;
+  task = (await f.freeze(task)).data;
   const result = (await f.request(`/image-tasks/${task.id}/result`)).data;
   const firstBody = blocksToHtml(parseText("第一张手输正文"), { sourceImageId: result.sourceImages[0].id });
   const saved = await f.request(`/image-tasks/${task.id}/apply`, "POST", {
@@ -723,7 +731,7 @@ test("两设备不同校对不能当作同一重试，显式另存副本保留�
     title: "原文章", kind: "article", orientation: "horizontal", content: "已有原文。",
   })).data;
   const prepared = await f.prepared(1, { targetId: original.id });
-  const task = (await f.request(`/image-tasks/${prepared.id}/cancel`, "POST", { version: prepared.version, freezeResult: true })).data;
+  const task = (await f.freeze(prepared)).data;
   const result = (await f.request(`/image-tasks/${task.id}/result`)).data;
   const sourceId = result.sourceImages[0].id;
   const documents = ["设备A校对正文", "设备B不同校对正文"].map((text) => ({ ...original, ...result,
@@ -771,7 +779,7 @@ test("两设备不同校对不能当作同一重试，显式另存副本保留�
 test("历史已采用任务迁移后未知请求拒绝当作成功，仍可显式另存副本", async (t) => {
   const f = await fixture(t);
   const prepared = await f.prepared();
-  const task = (await f.request(`/image-tasks/${prepared.id}/cancel`, "POST", { version: prepared.version, freezeResult: true })).data;
+  const task = (await f.freeze(prepared)).data;
   const result = (await f.request(`/image-tasks/${task.id}/result`)).data;
   const document = { ...result, bodyHtml: blocksToHtml(parseText("原手动正文"), { sourceImageId: result.sourceImages[0].id }) };
   const payload = { version: task.version, resultVersion: task.resultVersion, document };
@@ -792,4 +800,322 @@ test("历史已采用任务迁移后未知请求拒绝当作成功，仍可显�
   assert.equal(copyAgain.status, 200);
   assert.equal(copyAgain.data.id, copy.data.id);
   assert.equal((await f.get(task.id)).appliedDocumentId, primary.data.id);
+});
+
+test("任务书名与目标标题来自服务端，草稿更新及提交刷新快照，提交后保持不变", async (t) => {
+  const f = await fixture(t);
+  const book = (await f.request("/books", "POST", { title: "最初书名" })).data;
+  const target = (await f.request("/documents", "POST", {
+    title: "目标文章", kind: "book", bookId: book.id, orientation: "horizontal", content: "原文",
+  })).data;
+  let task = await f.prepared(1, { bookId: book.id, targetId: target.id, title: "用户标题", bookTitle: "伪造书名", targetTitle: "伪造目标" });
+  assert.equal(task.bookTitle, "最初书名");
+  assert.equal(task.targetTitle, "目标文章");
+  assert.equal(task.title, "用户标题");
+  let currentBook = (await f.request(`/books/${book.id}`)).data;
+  assert.equal((await f.request(`/books/${book.id}`, "PUT", { title: "更新书名", revision: currentBook.revision })).status, 200);
+  task = (await f.request(`/image-tasks/${task.id}`, "PATCH", { version: task.version, title: "用户新标题", bookTitle: "伪造" })).data;
+  assert.equal(task.bookTitle, "更新书名");
+  const changedTarget = (await f.request(`/documents/${target.id}`, "PUT", { ...target, title: "更新目标文章" })).data;
+  task = await f.submit(task);
+  assert.equal(task.targetTitle, "更新目标文章");
+  assert.equal(task.targetRevision, changedTarget.revision);
+  currentBook = (await f.request(`/books/${book.id}`)).data;
+  assert.equal((await f.request(`/books/${book.id}`, "DELETE", { revision: currentBook.revision })).status, 204);
+  const reopened = await f.get(task.id);
+  assert.equal(reopened.bookTitle, "更新书名");
+  assert.equal(reopened.targetTitle, "更新目标文章");
+  assert.equal(reopened.title, "用户新标题");
+  assert.equal((await f.create({ createNewBook: true, newBookTitle: "新书" })).bookTitle, "新书");
+});
+
+test("任务列表只在采用后归档，范围内分页与计数一致，删除归档任务保留文章及原图", async (t) => {
+  const f = await fixture(t);
+  const draft = await f.create();
+  let savedTask = await f.runUntil((await f.submit(await f.prepared())).id, "ready");
+  const ready = await f.runUntil((await f.submit(await f.prepared())).id, "ready");
+  let active = (await f.request("/image-tasks")).data;
+  assert.equal(active.total, 3);
+  assert.equal(active.activeCount, 3);
+  assert.equal(active.counts.ready, 2);
+  const result = (await f.request(`/image-tasks/${savedTask.id}/result`)).data;
+  const payload = { version: savedTask.version, resultVersion: savedTask.resultVersion, document: result };
+  const saved = await f.request(`/image-tasks/${savedTask.id}/apply`, "POST", payload);
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  assert.equal((await f.request(`/image-tasks/${savedTask.id}/apply`, "POST", payload)).data.id, saved.data.id);
+  active = (await f.request("/image-tasks?scope=active&limit=1")).data;
+  assert.equal(active.total, 2);
+  assert.equal(active.activeCount, 2);
+  assert.equal(active.tasks.length, 1);
+  assert.equal(Object.values(active.counts).reduce((sum, value) => sum + value, 0), active.total);
+  const archive = (await f.request("/image-tasks?scope=archived")).data;
+  assert.equal(archive.total, 1);
+  assert.equal(archive.activeCount, 2);
+  assert.deepEqual(archive.tasks.map((task) => task.id), [savedTask.id]);
+  assert.equal(archive.counts.ready, 1);
+  assert.deepEqual(new Set((await f.request("/image-tasks")).data.tasks.map((task) => task.id)), new Set([draft.id, ready.id]));
+  assert.equal((await f.request("/image-tasks?scope=invalid")).status, 400);
+  savedTask = await f.get(savedTask.id);
+  assert.equal((await f.request(`/image-tasks/${savedTask.id}`, "DELETE", { version: savedTask.version })).status, 204);
+  assert.equal((await f.request("/image-tasks?scope=archived")).data.total, 0);
+  assert.equal((await f.request(`/documents/${saved.data.id}`)).status, 200);
+  assert.equal((await f.request(`/images/${savedTask.items[0].imageId}`)).status, 200);
+});
+
+test("显式暂停跨重启保留成功checkpoint，恢复固定结果后旧编辑保存与注音得到明确冲突", async (t) => {
+  const f = await fixture(t);
+  let task = await f.submit(await f.prepared(2));
+  await f.app.imageTasks.runNext(); await f.app.imageTasks.runNext(); await f.app.imageTasks.runNext();
+  task = await f.get(task.id);
+  assert.equal(task.counts.completed, 1);
+  const paused = await f.request(`/image-tasks/${task.id}/pause`, "POST", { version: task.version });
+  assert.equal(paused.status, 200);
+  assert.equal(paused.data.state, "paused");
+  assert.equal(paused.data.resultVersion, null);
+  assert.equal((await f.request(`/images/${task.items[0].imageId}/rotate`, "POST", { quarterTurns: 1, revision: 1 })).status, 409);
+  await f.restart();
+  assert.equal((await f.get(task.id)).state, "paused");
+  const before = f.state.calls.length;
+  await f.app.imageTasks.runNext();
+  assert.equal(f.state.calls.length, before);
+  task = (await f.freeze(await f.get(task.id))).data;
+  const result = (await f.request(`/image-tasks/${task.id}/result`)).data;
+  assert.equal((await f.request(`/image-tasks/${task.id}/resume`, "POST", { version: task.version - 1 })).status, 409);
+  const resumed = await f.request(`/image-tasks/${task.id}/resume`, "POST", { version: task.version });
+  assert.equal(resumed.status, 202);
+  assert.equal(resumed.data.state, "queued");
+  assert.equal(resumed.data.resultVersion, null);
+  const oldPayload = { version: task.version, resultVersion: task.resultVersion, document: result };
+  const stale = await f.request(`/image-tasks/${task.id}/apply`, "POST", oldPayload);
+  assert.equal(stale.status, 409);
+  assert.equal(stale.data.code, "TASK_RESULT_STALE");
+  const oldAnnotation = await f.request(`/image-tasks/${task.id}/items/${task.items[0].id}/annotate`, "POST", {
+    resultVersion: task.resultVersion, content: "日本",
+  });
+  assert.equal(oldAnnotation.status, 409);
+  assert.equal(oldAnnotation.data.code, "TASK_RESULT_STALE");
+  task = await f.runUntil(task.id, "ready");
+  assert.equal(task.counts.completed, 2);
+  assert.equal(f.state.calls.filter((call) => call.phase === "recognize").length, 2);
+  assert.equal(f.state.calls.filter((call) => call.phase === "annotate").length, 2);
+  const currentResult = (await f.request(`/image-tasks/${task.id}/result`)).data;
+  const currentPayload = { version: task.version, resultVersion: task.resultVersion, document: currentResult };
+  const saved = await f.request(`/image-tasks/${task.id}/apply`, "POST", currentPayload);
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  const replay = await f.request(`/image-tasks/${task.id}/apply`, "POST", currentPayload);
+  assert.equal(replay.status, 200);
+  assert.equal(replay.data.id, saved.data.id);
+  const staleAfterAdoption = await f.request(`/image-tasks/${task.id}/apply`, "POST", oldPayload);
+  assert.equal(staleAfterAdoption.status, 409);
+  assert.equal(staleAfterAdoption.data.code, "TASK_RESULT_STALE");
+  const staleCopy = await f.request(`/image-tasks/${task.id}/apply`, "POST", {
+    ...oldPayload, document: { ...oldPayload.document, saveAsNew: true },
+  });
+  assert.equal(staleCopy.status, 409);
+  assert.equal(staleCopy.data.code, "TASK_RESULT_STALE");
+});
+
+test("旧停止任务及失败后已固定的任务仍能恢复，只重试未成功步骤", async (t) => {
+  const f = await fixture(t);
+  let draft = await f.prepared();
+  draft = (await f.request(`/image-tasks/${draft.id}/cancel`, "POST", { version: draft.version })).data;
+  assert.equal(draft.state, "cancelled");
+  draft = (await f.request(`/image-tasks/${draft.id}/resume`, "POST", { version: draft.version })).data;
+  assert.equal(draft.state, "draft");
+  let task = await f.submit(draft);
+  task = (await f.request(`/image-tasks/${task.id}/cancel`, "POST", { version: task.version })).data;
+  task = (await f.freeze(task)).data;
+  assert.equal(task.state, "cancelled");
+  assert.equal((await f.request(`/image-tasks/${task.id}/resume`, "POST", { version: task.version })).status, 202);
+  f.state.onRun = async (phase) => { if (phase === "annotate") throw Object.assign(new Error("fixture retry"), { status: 400 }); };
+  task = await f.runUntil(task.id, "needs_attention");
+  task = (await f.freeze(task)).data;
+  assert.ok(task.resultVersion);
+  assert.equal(task.state, "needs_attention");
+  f.state.onRun = null;
+  assert.equal((await f.request(`/image-tasks/${task.id}/retry`, "POST", { version: task.version })).status, 202);
+  await f.runUntil(task.id, "ready");
+  assert.equal(f.state.calls.filter((call) => call.phase === "recognize").length, 1);
+});
+
+test("草稿及处理中不能隐式转人工，旧单图注音接口同样拒绝活动任务图片", async (t) => {
+  const f = await fixture(t);
+  let task = await f.prepared();
+  const freeze = () => f.request(`/image-tasks/${task.id}/cancel`, "POST", { version: task.version, freezeResult: true });
+  assert.equal((await freeze()).status, 409);
+  task = await f.submit(task);
+  assert.equal((await freeze()).status, 409);
+  assert.equal((await f.request(`/images/${task.items[0].imageId}/annotate`, "POST", { content: "日本" })).status, 409);
+  f.state.connected = false;
+  await f.app.imageTasks.runNext(); await f.app.imageTasks.runNext();
+  task = await f.get(task.id);
+  assert.equal(task.state, "blocked");
+  assert.equal((await freeze()).status, 409);
+  assert.equal((await f.request(`/images/${task.items[0].imageId}/annotate`, "POST", { content: "日本" })).status, 409);
+  assert.equal(f.state.calls.length, 0);
+  f.state.connected = true;
+  assert.equal((await f.request(`/image-tasks/${task.id}/resume`, "POST", { version: task.version })).status, 202);
+  assert.equal((await f.runUntil(task.id, "ready")).counts.completed, 1);
+});
+
+test("人工注音执行中恢复或删除任务，迟到回复不会写入任何校对缓存", async (t) => {
+  for (const operation of ["resume", "delete"]) {
+    for (const legacy of [false, true]) {
+      await t.test(`${operation} ${legacy ? "旧单图接口" : "任务接口"}`, async (t) => {
+        const f = await fixture(t);
+        const task = (await f.freeze(await f.prepared())).data, item = task.items[0];
+        const draft = { title: "测试草稿", kind: "article", orientation: "horizontal", blocks: parseText("日本"), content: "日本" };
+        f.inspect((db) => db.prepare("INSERT INTO image_drafts(image_id,user_id,draft_json) SELECT ?,user_id,? FROM image_tasks WHERE id=?")
+          .run(item.imageId, JSON.stringify(draft), task.id));
+        let release, entered;
+        const gate = new Promise((resolve) => { release = resolve; }), started = new Promise((resolve) => { entered = resolve; });
+        f.state.onRun = async () => { entered(); await gate; }; f.state.stop = release;
+        const pending = f.request(legacy ? `/images/${item.imageId}/annotate` : `/image-tasks/${task.id}/items/${item.id}/annotate`, "POST", {
+          resultVersion: task.resultVersion, content: "日本",
+        });
+        await started;
+        const changed = await f.request(operation === "resume" ? `/image-tasks/${task.id}/resume` : `/image-tasks/${task.id}`,
+          operation === "resume" ? "POST" : "DELETE", { version: task.version });
+        assert.equal(changed.status, operation === "resume" ? 202 : 204);
+        release();
+        assert.equal((await pending).status, operation === "resume" ? 409 : 404);
+        assert.equal(f.inspect((db) => db.prepare("SELECT review_annotations_json FROM image_task_items WHERE task_id=?").get(task.id).review_annotations_json), "[]");
+        assert.equal(f.inspect((db) => db.prepare("SELECT draft_json FROM image_drafts WHERE image_id=?").get(item.imageId).draft_json), JSON.stringify(draft));
+      });
+    }
+  }
+});
+
+test("删除运行中任务使迟到AI失效，重启不复活且相同创建请求返回已删除", async (t) => {
+  const f = await fixture(t), key = randomUUID();
+  let task = await f.submit(await f.prepared(1, { idempotencyKey: key }));
+  await f.app.imageTasks.runNext();
+  let release, entered;
+  const gate = new Promise((resolve) => { release = resolve; }), started = new Promise((resolve) => { entered = resolve; });
+  f.state.onRun = async () => { entered(); await gate; }; f.state.stop = release;
+  const running = f.app.imageTasks.runNext(); await started;
+  task = await f.get(task.id);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version - 1 })).status, 409);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
+  release(); await running;
+  assert.equal(f.inspect((db) => db.prepare("SELECT recognition_json FROM image_task_items WHERE task_id=?").get(task.id).recognition_json), null);
+  assert.equal((await f.request(`/image-tasks/${task.id}`)).status, 404);
+  const deletedApply = await f.request(`/image-tasks/${task.id}/apply`, "POST", { version: task.version, resultVersion: 1, document: {} });
+  assert.equal(deletedApply.status, 404);
+  assert.equal(deletedApply.data.code, "TASK_UNAVAILABLE");
+  assert.equal((await f.request(`/image-tasks/${task.id}/resume`, "POST", { version: task.version })).status, 404);
+  assert.equal((await f.request("/image-tasks", "POST", { idempotencyKey: key, title: "任务文章" })).status, 410);
+  assert.equal((await f.request("/image-tasks")).data.activeCount, 0);
+  await f.restart(); await f.app.imageTasks.runNext();
+  assert.equal((await f.request("/image-tasks")).data.total, 0);
+  assert.equal(f.state.calls.length, 1);
+});
+
+test("删除上传中的草稿后迟到图片不能重新绑定任务", async (t) => {
+  const f = await fixture(t), task = await f.add(await f.create()), item = task.items[0];
+  const originalSave = f.app.ai.saveImage;
+  let release, entered;
+  const gate = new Promise((resolve) => { release = resolve; }), started = new Promise((resolve) => { entered = resolve; });
+  f.app.ai.saveImage = async (...args) => { const image = await originalSave(...args); entered(); await gate; return image; };
+  const pixels = await sharp({ create: { width: 3, height: 4, channels: 3, background: "white" } }).png().toBuffer();
+  const form = new FormData(); form.append("image", new Blob([pixels], { type: "image/png" }), item.name);
+  const pending = fetch(`${f.url}/api/image-tasks/${task.id}/items/${item.id}/image`, { method: "POST", headers: { Cookie: f.cookie }, body: form });
+  await started;
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
+  release();
+  assert.equal((await pending).status, 404);
+  assert.equal(f.inspect((db) => db.prepare("SELECT image_id FROM image_task_items WHERE task_id=?").get(task.id).image_id), null);
+  assert.equal((await f.request("/image-tasks")).data.total, 0);
+});
+
+test("旧任务迁移持久保存书名快照及删除字段，幂等创建保持兼容", async (t) => {
+  const f = await fixture(t), key = randomUUID();
+  const book = (await f.request("/books", "POST", { title: "旧书名" })).data;
+  const task = await f.create({ idempotencyKey: key, bookId: book.id });
+  const newBookTask = await f.create({ createNewBook: true, newBookTitle: "旧新建书名" });
+  f.inspect((db) => {
+    for (const id of [task.id, newBookTask.id]) {
+      const input = JSON.parse(db.prepare("SELECT input_json FROM image_tasks WHERE id=?").get(id).input_json);
+      delete input.bookTitle; delete input.targetTitle;
+      db.prepare("UPDATE image_tasks SET input_json=? WHERE id=?").run(JSON.stringify(input), id);
+    }
+    db.exec("ALTER TABLE image_tasks DROP COLUMN deleted_at");
+  });
+  await f.restart();
+  assert.equal((await f.get(task.id)).bookTitle, "旧书名");
+  assert.equal((await f.get(newBookTask.id)).bookTitle, "旧新建书名");
+  assert.equal((await f.request(`/books/${book.id}`, "PUT", { title: "后改书名", revision: book.revision })).status, 200);
+  assert.equal((await f.get(task.id)).bookTitle, "旧书名");
+  assert.equal(f.inspect((db) => JSON.parse(db.prepare("SELECT input_json FROM image_tasks WHERE id=?").get(task.id).input_json).bookTitle), "旧书名");
+  assert.equal((await f.request("/image-tasks", "POST", { idempotencyKey: key, title: "任务文章", bookId: book.id })).data.id, task.id);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
+});
+
+test("恢复旧停止任务前校验所有原图版本，包括无需再执行的成功图片", async (t) => {
+  const f = await fixture(t);
+  let task = await f.submit(await f.prepared(2));
+  await f.app.imageTasks.runNext(); await f.app.imageTasks.runNext(); await f.app.imageTasks.runNext();
+  task = await f.get(task.id);
+  task = (await f.request(`/image-tasks/${task.id}/cancel`, "POST", { version: task.version })).data;
+  const ownerId = f.inspect((db) => db.prepare("SELECT user_id FROM image_tasks WHERE id=?").get(task.id).user_id);
+  // Reproduce a pixel update made while stopped under the previous version's guard.
+  await f.app.ai.rotateImage(ownerId, task.items[0].imageId, { quarterTurns: 1, revision: 1 }, { internal: true });
+  const resumed = await f.request(`/image-tasks/${task.id}/resume`, "POST", { version: task.version });
+  assert.equal(resumed.status, 409);
+  assert.match(resumed.data.error, /方向已变化/);
+  assert.equal((await f.get(task.id)).state, "cancelled");
+  assert.equal((await f.get(task.id)).counts.completed, 1);
+  assert.equal(f.state.calls.length, 2);
+});
+
+test("恢复任务读取多张图片期间锁住全部输入，避免已读取原图被并发旋转", async (t) => {
+  const f = await fixture(t);
+  let task = await f.submit(await f.prepared(2));
+  task = (await f.request(`/image-tasks/${task.id}/cancel`, "POST", { version: task.version })).data;
+  const originalGet = f.app.ai.getImage;
+  let release, entered;
+  const gate = new Promise((resolve) => { release = resolve; }), started = new Promise((resolve) => { entered = resolve; });
+  f.app.ai.getImage = async (...args) => {
+    const image = await originalGet(...args);
+    if (args[1] === task.items[1].imageId) { entered(); await gate; }
+    return image;
+  };
+  const pending = f.request(`/image-tasks/${task.id}/resume`, "POST", { version: task.version });
+  await started;
+  assert.equal((await f.request(`/images/${task.items[0].imageId}/rotate`, "POST", { quarterTurns: 1, revision: 1 })).status, 409);
+  release();
+  assert.equal((await pending).status, 202);
+  assert.equal((await f.get(task.id)).state, "queued");
+});
+
+test("暂停后先固定人工稿才允许旋转并保存，旋转后恢复会拒绝重用旧checkpoint", async (t) => {
+  const f = await fixture(t);
+  let task = await f.submit(await f.prepared());
+  await f.app.imageTasks.runNext(); await f.app.imageTasks.runNext();
+  task = await f.get(task.id);
+  task = (await f.request(`/image-tasks/${task.id}/pause`, "POST", { version: task.version })).data;
+  const imageId = task.items[0].imageId;
+  assert.equal((await f.request(`/images/${imageId}/rotate`, "POST", { quarterTurns: 1, revision: 1 })).status, 409);
+  task = (await f.freeze(task)).data;
+  const result = (await f.request(`/image-tasks/${task.id}/result`)).data;
+  const checkpoint = f.inspect((db) => db.prepare("SELECT recognition_json FROM image_task_items WHERE task_id=?").get(task.id).recognition_json);
+  const rotated = await f.request(`/images/${imageId}/rotate`, "POST", { quarterTurns: 1, revision: 1 });
+  assert.equal(rotated.status, 200, JSON.stringify(rotated.data));
+  assert.equal(rotated.data.revision, 2);
+  const resumed = await f.request(`/image-tasks/${task.id}/resume`, "POST", { version: task.version });
+  assert.equal(resumed.status, 409);
+  assert.match(resumed.data.error, /方向已变化/);
+  assert.equal((await f.get(task.id)).resultVersion, task.resultVersion);
+  assert.equal(f.inspect((db) => db.prepare("SELECT recognition_json FROM image_task_items WHERE task_id=?").get(task.id).recognition_json), checkpoint);
+  const saved = await f.request(`/image-tasks/${task.id}/apply`, "POST", {
+    version: task.version, resultVersion: task.resultVersion,
+    document: { ...result, bodyHtml: blocksToHtml(parseText("{手動|しゅどう}"), { sourceImageId: imageId }) },
+  });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  assert.equal(bodyText(saved.data.bodyHtml), "手動");
+  assert.deepEqual(bodyRanges(saved.data.bodyHtml).sources.map((source) => source.id), [imageId]);
+  assert.equal(saved.data.sourceImages[0].id, imageId);
+  assert.equal((await f.request(`/images/${imageId}`)).data.revision, 2);
+  assert.equal(f.state.calls.length, 1);
 });

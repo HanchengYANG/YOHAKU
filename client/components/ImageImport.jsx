@@ -3,7 +3,7 @@ import { randomUuid } from "../../shared/random-uuid.mjs";
 import { imageImportFiles } from "../image-import.mjs";
 import api from "../api.mjs";
 import uploadImage from "../upload-image.mjs";
-import { newerTask, pendingLocalEntries, taskImageUrl } from "../image-tasks.mjs";
+import { newerTask, notifyImageTasksChanged, pendingLocalEntries, taskDisplayName, taskImageUrl } from "../image-tasks.mjs";
 import Icon from "./Icon.jsx";
 import SourceImageSorter from "./SourceImageSorter.jsx";
 import "../image-import.css";
@@ -31,39 +31,58 @@ function ImagePreview({ entry }) {
     style={{ width: scale === null ? "100%" : size.width * scale, height: scale === null ? "100%" : size.height * scale, maxWidth: "none", maxHeight: "none", transform: `translate(-50%, -50%) rotate(${(entry.quarterTurns || 0) * 90}deg)` }} /></span>;
 }
 
-export default function ImageImport({ taskId = null, initialTask = null, onTaskCreated, onSubmitted, onCancel, onDirty,
+export default function ImageImport({ taskId = null, initialTask = null, onTaskCreated, onSubmitted, onDeleted, onCancel, onDirty,
   articles = [], books = [], initialBookId = null, initialTargetId = null }) {
   const initial = initialTask || null;
   const [task, setTask] = useState(initial);
   const [form, setForm] = useState(() => initial ? fieldsOf(initial) : ({ title: "", bookId: initialBookId || articles.find((article) => article.id === initialTargetId)?.bookId || "", targetId: initialTargetId || "", newBookTitle: "" }));
   const [activeId, setActiveId] = useState(null), [busy, setBusy] = useState(false), [loading, setLoading] = useState(!!taskId && !initial);
   const [error, setError] = useState(""), [dragActive, setDragActive] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
   const [, repaint] = useState(0);
   const taskRef = useRef(initial), formRef = useRef(form), loadedId = useRef(initial?.id || null);
   const locals = useRef(new Map()), creationKey = useRef(randomUuid()), mounted = useRef(true);
+  const unavailableRef = useRef(false);
   const operations = useRef(Promise.resolve()), pendingCount = useRef(0), controllers = useRef(new Set());
   const fileInput = useRef(null), replacementInput = useRef(null), replacementId = useRef(null), saveTimer = useRef(null);
   formRef.current = form;
+  const markUnavailable = useCallback(() => {
+    if (!mounted.current) return;
+    unavailableRef.current = true;
+    clearTimeout(saveTimer.current);
+    setUnavailable(true);
+    setError(locals.current.size
+      ? "这份导入任务已删除或无法访问。本机选过的图片仍保留，可以另建草稿重新上传。"
+      : "这份导入任务已删除或无法访问。可以新建导入草稿，重新选择图片。");
+    notifyImageTasksChanged();
+  }, []);
   const accept = useCallback((value, syncForm = false) => {
     if (!mounted.current) return value;
     const next = newerTask(taskRef.current, value);
     taskRef.current = next; loadedId.current = next.id; setTask(next);
+    notifyImageTasksChanged();
     if (syncForm) { formRef.current = fieldsOf(next); setForm(fieldsOf(next)); }
     return next;
   }, []);
   const refresh = useCallback(async () => {
     const id = taskRef.current?.id || taskId;
     if (!id) return null;
-    const value = await api(`/image-tasks/${encodeURIComponent(id)}`);
-    return accept(value, !taskRef.current);
-  }, [accept, taskId]);
+    try {
+      const value = await api(`/image-tasks/${encodeURIComponent(id)}`);
+      return accept(value, !taskRef.current);
+    } catch (cause) {
+      if (cause.status === 404) markUnavailable();
+      throw cause;
+    }
+  }, [accept, taskId, markUnavailable]);
   const enqueue = useCallback((work) => {
     pendingCount.current++; setBusy(true);
     const run = operations.current.catch(() => {}).then(async () => {
-      if (!mounted.current) return;
-      try { await work(); }
+      try { if (!mounted.current || unavailableRef.current) return; await work(); }
       catch (cause) {
         if (!mounted.current || cause.name === "AbortError") return;
+        if (cause.code === "TASK_UNAVAILABLE" || cause.status === 410) { markUnavailable(); return; }
+        if (unavailableRef.current) return;
         setError(cause instanceof TypeError ? "暂时无法连接服务器。已上传的原图保留在草稿中，请恢复连接后重试。" : cause.message);
         try {
           const latest = await refresh();
@@ -77,7 +96,7 @@ export default function ImageImport({ taskId = null, initialTask = null, onTaskC
     });
     operations.current = run;
     return run;
-  }, [refresh, onSubmitted]);
+  }, [refresh, onSubmitted, markUnavailable]);
 
   useEffect(() => {
     mounted.current = true;
@@ -93,16 +112,16 @@ export default function ImageImport({ taskId = null, initialTask = null, onTaskC
     setLoading(true);
     api(`/image-tasks/${encodeURIComponent(taskId)}`, { signal: controller.signal }).then((value) => {
       accept(value, true); if (mounted.current && value.state !== "draft") onSubmitted?.(value);
-    }).catch((cause) => { if (cause.name !== "AbortError") setError(cause.message); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    }).catch((cause) => { if (cause.name !== "AbortError") { if (cause.status === 404) markUnavailable(); else setError(cause.message); } }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [taskId, accept, onSubmitted]);
+  }, [taskId, accept, onSubmitted, markUnavailable]);
 
-  const queue = [...(task?.items || []).map((item) => ({ ...item, ...locals.current.get(item.id) })),
+  const queue = unavailable ? [...locals.current.values()] : [...(task?.items || []).map((item) => ({ ...item, ...locals.current.get(item.id) })),
     ...[...locals.current.values()].filter((entry) => !(task?.items || []).some((item) => item.id === entry.id))];
   const active = queue.find((entry) => entry.id === activeId) || queue[0];
   const uploadedCount = queue.filter((entry) => entry.imageId).length;
-  const localUnsent = [...locals.current.values()].some((entry) => !(task?.items || []).find((item) => item.id === entry.id)?.imageId);
-  const frozen = !!task && task.state !== "draft";
+  const localUnsent = unavailable ? locals.current.size > 0 : [...locals.current.values()].some((entry) => !(task?.items || []).find((item) => item.id === entry.id)?.imageId);
+  const frozen = unavailable || !!task && task.state !== "draft";
   const metadataPending = !!task && !frozen && signature(form) !== signature(fieldsOf(task));
   useEffect(() => { onDirty?.(localUnsent || metadataPending); }, [localUnsent, metadataPending, onDirty]);
 
@@ -113,7 +132,7 @@ export default function ImageImport({ taskId = null, initialTask = null, onTaskC
     return value;
   };
   const saveMetadata = async () => {
-    if (!taskRef.current || taskRef.current.state !== "draft" || signature(formRef.current) === signature(fieldsOf(taskRef.current))) return;
+    if (unavailableRef.current || !taskRef.current || taskRef.current.state !== "draft" || signature(formRef.current) === signature(fieldsOf(taskRef.current))) return;
     const value = await api(`/image-tasks/${encodeURIComponent(taskRef.current.id)}`, { method: "PATCH", body: JSON.stringify({ version: taskRef.current.version, ...bodyOf(formRef.current) }) });
     accept(value); if (mounted.current) setError("");
   };
@@ -140,13 +159,14 @@ export default function ImageImport({ taskId = null, initialTask = null, onTaskC
         entry.error = cause.message;
         if (cause.name !== "AbortError") { try { await refresh(); } catch {} }
         // Other selected files can still upload when a single file fails.
-        if (cause.status === 409 || cause.code === "WEBSITE_AUTH_REQUIRED") throw cause;
+        if (unavailableRef.current || cause.status === 409 || cause.code === "WEBSITE_AUTH_REQUIRED" || cause.code === "TASK_UNAVAILABLE") throw cause;
         if (cause.name !== "AbortError") setError(cause.message);
       } finally { entry.uploading = false; controllers.current.delete(controller); if (mounted.current) repaint((n) => n + 1); }
     }
     await saveMetadata();
   };
   const chooseFiles = (fileList) => {
+    if (unavailableRef.current) return;
     if (taskRef.current && taskRef.current.state !== "draft") { setError("此批次已提交。请将本机未上传图片另建草稿，或返回任务查看进度。"); return; }
     let files;
     try { files = imageImportFiles(fileList, queue.length); }
@@ -200,16 +220,19 @@ export default function ImageImport({ taskId = null, initialTask = null, onTaskC
   const missingEntries = queue.filter((entry) => !entry.imageId);
   const retryEntries = pendingLocalEntries(locals.current.values(), task);
   const startAnotherDraft = () => {
-    const pending = pendingLocalEntries(locals.current.values(), taskRef.current);
-    if (!pending.length) return;
+    const pending = unavailableRef.current ? [...locals.current.values()] : pendingLocalEntries(locals.current.values(), taskRef.current);
+    if (!pending.length && !unavailableRef.current) return;
     clearTimeout(saveTimer.current);
     for (const [id, entry] of locals.current) if (!pending.some((item) => item.id === id)) URL.revokeObjectURL(entry.preview);
     locals.current = new Map(pending.map((entry) => [entry.id, entry]));
-    taskRef.current = null; loadedId.current = null; creationKey.current = randomUuid();
-    setTask(null); setError(""); setActiveId(pending[0].id); repaint((n) => n + 1);
-    enqueue(() => uploadEntries(pending));
+    // Ignore the old route while the explicitly requested replacement is being
+    // created; onTaskCreated replaces it with the new durable task address.
+    taskRef.current = null; loadedId.current = taskId; creationKey.current = randomUuid();
+    unavailableRef.current = false; setUnavailable(false);
+    setTask(null); setError(""); setActiveId(pending[0]?.id || null); repaint((n) => n + 1);
+    enqueue(() => pending.length ? uploadEntries(pending) : ensureDraft());
   };
-  const canSubmit = task?.state === "draft" && queue.length > 0 && !missingEntries.length && !busy && !loading && !(form.bookId === newBook && !form.newBookTitle.trim());
+  const canSubmit = !unavailable && task?.state === "draft" && queue.length > 0 && !missingEntries.length && !busy && !loading && !(form.bookId === newBook && !form.newBookTitle.trim());
   const replaceFile = (file) => {
     const id = replacementId.current;
     if (!file || !id) return;
@@ -225,16 +248,31 @@ export default function ImageImport({ taskId = null, initialTask = null, onTaskC
     onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setDragActive(false); }}
     onDrop={(event) => { if ([...event.dataTransfer.types].includes("Files")) { event.preventDefault(); setDragActive(false); chooseFiles(event.dataTransfer.files); } }}>
     <div className="stage2-heading"><div><span className="eyebrow">从原图开始</span><h1>导入照片或截图</h1></div>
-      <div className="task-preparation-actions"><button className="button subtle" type="button" onClick={onCancel}>返回任务</button>
+      <div className="task-preparation-actions"><button className="button subtle" type="button" onClick={onCancel}>任务与归档</button>
         {task && !frozen && <button className="text-button" type="button" disabled={busy} onClick={() => {
-          if (window.confirm("放弃这份导入草稿？已上传的原图仍会保留，后续不再提交识别。")) enqueue(async () => {
-            const value = accept(await api(`/image-tasks/${encodeURIComponent(taskRef.current.id)}/cancel`, { method: "POST", body: JSON.stringify({ version: taskRef.current.version }) }));
-            if (mounted.current) { onDirty?.(false); onSubmitted?.(value); }
+          if (window.confirm(`删除导入草稿「${taskDisplayName(task)}」？这份草稿和未保存的识别结果将删除。`)) enqueue(async () => {
+            let current = taskRef.current;
+            for (let attempt = 0; attempt < 3; attempt++) {
+              try {
+                await api(`/image-tasks/${encodeURIComponent(current.id)}`, { method: "DELETE", body: JSON.stringify({ version: current.version }) });
+                break;
+              } catch (cause) {
+                if (cause.status === 404) break;
+                if (cause.status !== 409 || attempt === 2) throw cause;
+                try { current = await refresh(); }
+                catch (latestError) { if (latestError.status === 404) break; throw latestError; }
+              }
+            }
+            notifyImageTasksChanged();
+            if (mounted.current) { onDirty?.(false); onDeleted?.(); }
           });
         }}>放弃导入草稿</button>}</div></div>
     <p className="stage2-description">先上传图片，再提交识别任务。草稿会保存到你的账号，可换设备继续上传。</p>
+    {task && <p className="task-preparation-name">{taskDisplayName(task)}</p>}
     {loading && <p role="status">正在读取导入草稿…</p>}
-    {error && <div className="stage2-error" role="alert">{error}<button className="button subtle" type="button" disabled={busy} onClick={() => enqueue(async () => { await refresh(); await saveMetadata(); if (mounted.current) setError(""); })}>重新同步</button></div>}
+    {error && <div className="stage2-error" role="alert">{error}{unavailable
+      ? <button className="button primary" type="button" disabled={busy} onClick={startAnotherDraft}>{locals.current.size ? "将本机图片另建草稿" : "新建导入草稿"}</button>
+      : <button className="button subtle" type="button" disabled={busy} onClick={() => enqueue(async () => { await refresh(); await saveMetadata(); if (mounted.current) setError(""); })}>重新同步</button>}</div>}
     <div className="image-import-batch-layout">
       <div className="image-import-destination">
         <h2>校对后保存到</h2>
@@ -249,10 +287,10 @@ export default function ImageImport({ taskId = null, initialTask = null, onTaskC
         <div className="image-import-submit">
           <button className="button primary" type="button" disabled={!canSubmit} onClick={submit}><Icon name="arrow" size={17} />识别并注音</button>
           {retryEntries.length > 0 && !busy && !frozen && <button className="button subtle" type="button" onClick={() => enqueue(() => uploadEntries(retryEntries))}>重试上传</button>}
-          {frozen && retryEntries.length > 0 && <button className="button primary" type="button" disabled={busy} onClick={startAnotherDraft}>将未上传图片另建草稿</button>}
-          {frozen && <p className="task-note">此批次已在其他设备提交。本机未上传的新图片会保留，另建草稿后单独处理。</p>}
+          {frozen && !unavailable && retryEntries.length > 0 && <button className="button primary" type="button" disabled={busy} onClick={startAnotherDraft}>将未上传图片另建草稿</button>}
+          {frozen && !unavailable && <p className="task-note">此批次已在其他设备提交。本机未上传的新图片会保留，另建草稿后单独处理。</p>}
           {metadataPending && !busy && <button className="button subtle" type="button" onClick={() => enqueue(saveMetadata)}>保存准备信息</button>}
-          <p className="image-recognition-state" role="status">{busy ? "正在上传或保存准备信息…" : metadataPending ? "准备信息尚未保存，请同步后再离开。" : task ? `已上传 ${uploadedCount} / ${queue.length} 张。草稿已保存，可在其他设备继续。` : "选图后自动上传，全部上传完成后即可提交任务。"}</p>
+          <p className="image-recognition-state" role="status">{unavailable ? "原任务已不可用，需另建草稿重新上传本机图片。" : busy ? "正在上传或保存准备信息…" : metadataPending ? "准备信息尚未保存，请同步后再离开。" : task ? `已上传 ${uploadedCount} / ${queue.length} 张。草稿已保存，可在其他设备继续。` : "选图后自动上传，全部上传完成后即可提交任务。"}</p>
           {missingEntries.length > 0 && !busy && <p className="task-note">未传完的文件可重新选择或移除，全部处理后才能提交。</p>}
         </div>
       </div>

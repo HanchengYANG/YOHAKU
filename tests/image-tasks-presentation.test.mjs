@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pendingLocalEntries, newerTask, taskCounts, taskDuration, taskImageUrl, taskItemState, taskStateLabel } from "../client/image-tasks.mjs";
+import { pendingLocalEntries, newerTask, taskCounts, taskDisplayName, taskDuration, taskImageUrl, taskItemState, taskStateLabel } from "../client/image-tasks.mjs";
 
 test("任务视图忽略迟到的旧版本，同账号新任务仍可切换", () => {
   const current = { id: "same", version: 5, state: "ready" };
@@ -32,4 +32,24 @@ test("其他设备提交后只接续本机尚未获确认的新文件，不重�
   const task = { state: "queued", items: [{ id: "already", imageId: "server-image" }] };
   assert.deepEqual(pendingLocalEntries([uploaded, pending], task), [pending]);
   assert.deepEqual(pendingLocalEntries([uploaded, pending], null), [uploaded, pending]);
+});
+
+test("任务名包含本地创建时间、书籍目标和用户标题，标题重复只显示一次", () => {
+  const task = { id: "abc12345-1234-4321-8765-abcdef012345", createdAt: new Date(2026, 9, 30, 21, 35, 7).toISOString(), bookTitle: "日本語", targetTitle: "第一章", title: "第一章" };
+  assert.equal(taskDisplayName(task), "2026-10-30 21:35:07 · 日本語 · 第一章 · #abc12345");
+  assert.equal(task.title, "第一章");
+});
+
+test("无标题任务回退到首张文件名和张数，空草稿只显示时间与短编号", () => {
+  const task = { id: "87654321-aaaa-bbbb-cccc-ddddeeeeffff", createdAt: new Date(2026, 9, 30, 21, 35, 7).toISOString(), items: [{ name: "page-1.png" }, { name: "page-2.png" }] };
+  assert.equal(taskDisplayName(task), "2026-10-30 21:35:07 · page-1.png · 2 张 · #87654321");
+  assert.equal(taskDisplayName({ ...task, items: [] }), "2026-10-30 21:35:07 · #87654321");
+  assert.match(taskDisplayName({ ...task, newBookTitle: "新书" }), /新书/);
+  assert.doesNotMatch(taskDisplayName({ ...task, newBookTitle: "新书" }), /page-1/);
+});
+
+test("暂停任务显示可恢复状态且计时停止增长", () => {
+  const task = { state: "paused", startedAt: "2026-10-30T10:00:00Z", updatedAt: "2026-10-30T10:01:10Z" };
+  assert.equal(taskStateLabel(task), "已暂停");
+  assert.equal(taskDuration(task, Date.parse("2026-10-30T12:00:00Z")), "1 分 10 秒");
 });

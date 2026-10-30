@@ -56,4 +56,10 @@
 .sidebar-task-link .count { flex-shrink:0; font-size:10px; padding:1px 6px; }
 .task-preparation-actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 .task-preparation-actions .text-button { color:var(--muted); font-size:11px; }
+.task-preparation-name { margin:0 0 18px; color:var(--muted); font-size:12px; line-height:1.8; overflow-wrap:anywhere; }
+.task-tabs { display:flex; gap:8px; margin:20px 0; border-bottom:1px solid var(--line); padding-bottom:10px; }
+.task-tabs [aria-selected="true"] { background:var(--paper); color:var(--ink); border-color:var(--line); }
+.task-state.is-paused { color:#795c35; background:#f6f0e5; border-color:#e8dcc5; }
+.task-delete { color:#8b5743; margin-left:auto; }
+.task-detail-page .stage2-heading h1 { overflow-wrap:anywhere; font-size:25px; line-height:1.5; }
 @media(max-width:760px) { .task-preparation-actions { justify-content:flex-end; gap:8px; } }

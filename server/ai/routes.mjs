@@ -49,7 +49,7 @@ export function attachAIRoutes({
   const connections = new Map(),
     pendingLogins = new Map(),
     operations = new Set(), queues = new Map(), imageMutations = new Map();
-  let closed = false, imageMutationGuard = () => {};
+  let closed = false, imageMutationGuard = () => {}, imageAnnotationGuard = () => {};
   function assertOpen(signal) {
     if (closed) throw Object.assign(fail(503, "AI 服务正在停止，请稍后重试。"), { code: "AI_STOPPED" });
     signal?.throwIfAborted();
@@ -610,14 +610,19 @@ export function attachAIRoutes({
   }
   async function annotateImage(userId, id, {
     content, manualReadings = [], priority = "interactive", persist = true,
-    draft: suppliedDraft, expectedRevision, signal,
+    draft: suppliedDraft, expectedRevision, signal, validate = () => {},
   } = {}) {
     assertOpen(signal);
+    const checkAllowed = () => {
+      if (priority !== "background") { validate(); imageAnnotationGuard({ userId, imageId: id }); }
+    };
+    checkAllowed();
     const image = await getImage(userId, id);
     assertOpen(signal);
     if (expectedRevision !== undefined && expectedRevision !== image.revision)
       throw fail(409, "图片方向已变化，请重新打开任务后再注音。");
     return withProvider(userId, preferred(), async (provider) => {
+      checkAllowed();
       const { accountId, expectedSubject } = await identity(provider);
       const row = database.prepare("SELECT draft_json FROM image_drafts WHERE image_id=? AND user_id=?")
         .get(id, userId);
@@ -664,6 +669,7 @@ export function attachAIRoutes({
           revision: image.revision,
         });
         assertOpen(signal);
+        checkAllowed();
         result = await provider.runtime.run({
           prompt: buildOcrAnnotationPrompt(blocks), schema: ANNOTATION_SCHEMA,
           image: `data:${image.mimeType};base64,${pixels.toString("base64")}`,
@@ -691,6 +697,7 @@ export function attachAIRoutes({
         processing: { ...draft.processing, annotationMs: elapsedMs },
       };
       assertOpen(signal);
+      checkAllowed();
       if (persist) {
         const changed = database.prepare("UPDATE image_drafts SET draft_json=? WHERE image_id=? AND user_id=? AND draft_json=?")
           .run(JSON.stringify(annotated), id, userId, row?.draft_json);
@@ -899,6 +906,7 @@ export function attachAIRoutes({
   return {
     getImage, saveImage, rotateImage, recognizeImage, annotateImage,
     setImageMutationGuard: (guard) => { imageMutationGuard = guard; },
+    setImageAnnotationGuard: (guard) => { imageAnnotationGuard = guard; },
     isImageMutating: (id) => imageMutations.has(id),
     statusForUser,
     whenIdle: () => Promise.all([...queues.values()].map((queue) => queue.whenIdle())),
