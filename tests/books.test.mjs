@@ -9,6 +9,8 @@ import sharp from "sharp";
 import { createApp } from "../server/app.mjs";
 import { ensureSession, sessionHeaders } from "./helpers/session.mjs";
 import { serializeBlocks } from "../shared/document.mjs";
+import { editBodyText, bodyText, bodyRanges, markBodyRange, applySentenceBoundaries } from "../shared/article-html.mjs";
+import { createHash } from "node:crypto";
 
 const input = (title, content = "{日本語|にほんご}を読む。") => ({ title, content, kind: "book", orientation: "horizontal" });
 
@@ -48,7 +50,7 @@ async function fixture(t, beforeStart) {
       signal: AbortSignal.timeout(10000),
     });
     return { status: response.status,
-      data: response.status === 204 ? null : await response.json(),
+      data: response.status === 204 ? null : response.headers.get("content-type")?.includes("application/json") ? await response.json() : await response.text(),
       cookie: response.headers.get("set-cookie")?.split(";", 1)[0] };
   }
   function inspect(work) {
@@ -197,7 +199,7 @@ test("书籍支持空书、追加、全文搜索、完整重排与单页删除�
   assert.equal((await f.request(`/api/books/${bookId}`, "PUT", { title: "过期", revision: book.revision })).status, 409);
   book = reordered.data;
   const page = (await f.request(`/api/documents/${reverse[0]}`)).data;
-  const edited = await f.request(`/api/documents/${page.id}`, "PUT", { ...page, title: "新页面标题", content: "新检索正文" });
+  const edited = await f.request(`/api/documents/${page.id}`, "PUT", { ...page, title: "新页面标题", content: "新检索正文", bodyHtml: editBodyText(page.bodyHtml, "新检索正文") });
   assert.equal(edited.status, 200);
   assert.equal(edited.data.bookId, bookId);
   assert.equal(edited.data.position, 1);
@@ -295,4 +297,68 @@ test("书籍标题、版本与页面顺序输入有明确校验，删完页面�
   assert.equal(empty.pageCount, 0);
   assert.deepEqual(empty.pages, []);
   assert.equal(empty.revision, 3);
+});
+
+
+test("同篇文章可追加多图，来源、识别、句子和问答标记保存重启导出不丢，书籍计数按文章", async (t) => {
+  const f = await fixture(t);
+  const first = await f.imagePage("本文", "日本語");
+  const second = await f.imagePage("続き", "読書");
+  const promoted = await f.request("/api/books", "POST", { title: "文章集", documentId: first.page.id });
+  let article = (await f.request(`/api/documents/${first.page.id}`)).data;
+  const html = applySentenceBoundaries(article.bodyHtml + second.page.bodyHtml, ["日本語\n", "読書"]);
+  f.inspect((database) => database.prepare("INSERT INTO qa_groups VALUES(?,?,?,?,?,?)")
+    .run("qa-current", f.user.id, article.id, "conversation-current", JSON.stringify({ quote: "語\n読" }), article.updatedAt));
+  const bodyHtml = markBodyRange(html, 2, 5, "qa-current");
+  const saved = await f.request(`/api/documents/${article.id}`, "PUT", {
+    title: article.title, kind: article.kind, orientation: "horizontal", revision: article.revision,
+    bodyHtml, sourceImages: [{ id: first.image.id }, { id: second.image.id }],
+  });
+  assert.equal(saved.status, 200);
+  article = saved.data;
+  assert.equal(article.id, first.page.id);
+  assert.equal(article.content, "{日本語|にほんご}\n{読書|にほんご}");
+  assert.deepEqual(article.sourceImages, [{ id: first.image.id, recognition: first.recognition }, { id: second.image.id, recognition: second.recognition }]);
+  assert.equal(article.bodyHash, createHash("sha256").update("日本語\n読書").digest("hex"));
+  assert.deepEqual(bodyRanges(article.bodyHtml).qa.map(({ text }) => text), ["語", "読"]);
+  const book = (await f.request(`/api/books/${promoted.data.id}`)).data;
+  assert.equal(book.articleCount, 1);
+  assert.deepEqual(book.articles, book.pages);
+  assert.equal(book.charCount, 5);
+  assert.equal((await f.request(`/api/documents?all=1&q=${encodeURIComponent("読書")}`)).data.documents.length, 2);
+  const exported = await f.request(`/api/documents/${article.id}/export?format=markdown`);
+  assert.match(exported.data, /data-qa-group-ids="qa-current"/);
+  assert.match(exported.data, new RegExp(`data-source-image-id="${second.image.id}"`));
+  await f.restart();
+  assert.deepEqual((await f.request(`/api/documents/${article.id}`)).data, article);
+  const json = await f.request(`/api/documents/${article.id}/export?format=json`);
+  assert.deepEqual(json.data.document, article);
+  const erased = await f.request(`/api/documents/${article.id}`, "DELETE", { revision: article.revision });
+  assert.equal(erased.status, 204);
+  assert.equal(f.inspect((db) => db.prepare("SELECT count(*) AS n FROM qa_groups WHERE document_id=?").get(article.id).n), 0);
+});
+
+test("HTML保存拒绝文章外图片与问答组；伪造sourceImages识别记录不覆盖服务器快照", async (t) => {
+  const f = await fixture(t);
+  const first = await f.imagePage("第一篇", "日本語");
+  const second = await f.imagePage("第二篇", "読書");
+  const article = first.page;
+  const save = (changes) => f.request(`/api/documents/${article.id}`, "PUT", { ...article, ...changes });
+  assert.equal((await save({ bodyHtml: second.page.bodyHtml, content: second.page.content })).status, 400);
+  f.inspect((database) => database.prepare("INSERT INTO qa_groups VALUES(?,?,?,?,?,?)")
+    .run("qa-other-article", f.user.id, second.page.id, "conversation-other", "{}", article.updatedAt));
+  assert.equal((await save({ bodyHtml: markBodyRange(article.bodyHtml, 0, 1, "qa-other-article") })).status, 400);
+  assert.equal((await save({ bodyHtml: markBodyRange(article.bodyHtml, 0, 1, "qa-missing") })).status, 400);
+  assert.deepEqual((await f.request(`/api/documents/${article.id}`)).data, article);
+  const sourceSnapshot = await save({ sourceImages: [{ id: first.image.id, recognition: { title: "伪造记录" } }] });
+  assert.equal(sourceSnapshot.status, 200);
+  assert.deepEqual(sourceSnapshot.data.sourceImages[0].recognition, first.recognition);
+  const invite = await f.request("/api/invitations", "POST");
+  const friend = await f.request("/api/accounts/register", "POST", { username: "article_friend", password: "fixture-friend-password", inviteToken: invite.data.token });
+  const other = await f.request("/api/documents", "POST", input("朋友文章", "朋友正文"), friend.cookie);
+  assert.equal(other.status, 201);
+  const foreign = await f.request(`/api/documents/${other.data.id}`, "PUT", { ...other.data, sourceImages: [{ id: first.image.id }], bodyHtml: article.bodyHtml, content: article.content }, friend.cookie);
+  assert.equal(foreign.status, 404);
+  const all = await f.request("/api/documents?all=1", "GET", undefined, friend.cookie);
+  assert.deepEqual(all.data.documents.map(({ id }) => id), [other.data.id]);
 });

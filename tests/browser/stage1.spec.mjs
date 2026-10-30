@@ -426,13 +426,13 @@ test("首页书案概览、当前阅读与最近阅读使用已保存书籍和�
     await recent.getByRole("button", { name: `打开书籍：${book.title}`, exact: true }).click();
     await expect(page.getByRole("heading", { name: book.title, exact: true })).toBeVisible();
     expect(await page.evaluate(() => location.hash)).toBe(`#book/${bookId}`);
-    await expect(page.getByLabel("书籍页面列表", { exact: true }).getByRole("listitem")).toHaveCount(1);
+    await expect(page.getByLabel("书籍文章列表", { exact: true }).getByRole("listitem")).toHaveCount(1);
     await page.goto("/");
     await recent.getByRole("button", { name: `继续阅读：${document.title}`, exact: true }).click();
     await expect(page.getByRole("heading", { name: document.title, exact: true })).toBeVisible();
     expect(await page.evaluate(() => location.hash)).toBe(`#${documentId}`);
     await expect(page.getByRole("article", { name: "日语原文", exact: true }).locator("rt")).toHaveText(["ほん", "よ"]);
-    await expect(page.getByRole("navigation", { name: "书页导航", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("navigation", { name: "文章导航", exact: true })).toHaveCount(0);
     await page.goto("/");
     if (await page.getByRole("button", { name: "打开书架", exact: true }).isVisible()) {
       await page.getByRole("button", { name: "打开书架", exact: true }).click();

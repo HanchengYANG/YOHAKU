@@ -9,6 +9,7 @@ import "./import-progress.css";
 import "./design-theme.css";
 import "./welcome.css";
 import "./pwa.css";
+import "./article.css";
 
 createRoot(document.getElementById("root")).render(
   <>

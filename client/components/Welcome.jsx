@@ -31,7 +31,7 @@ export default function Welcome({
           <div className="home-stat-cell">
             <span className="home-stat-mark">頁</span>
             <strong>{loading ? "—" : pages}</strong>
-            <span>页书中书页</span>
+            <span>篇书中文章</span>
           </div>
           <div className="home-stat-cell">
             <span className="home-stat-mark">文</span>
@@ -73,12 +73,12 @@ export default function Welcome({
                 <span className="home-reading-content">
                   <small>
                     {item.entryType === "book"
-                      ? `书籍 · ${item.pageCount} 页`
+                      ? `书籍 · ${item.pageCount} 篇`
                       : "独立材料"}
                   </small>
                   <strong>{item.title}</strong>
                   <span lang="ja">
-                    {item.preview?.replace(/\n/g, " ") || "打开书籍，添加下一页"}
+                    {item.preview?.replace(/\n/g, " ") || "打开书籍，添加下一篇"}
                   </span>
                   <span className="home-reading-bottom">
                     {item.charCount.toLocaleString("zh-CN")} 字

@@ -12,7 +12,7 @@ export default function BookNavigation({
   if (index < 0) return null;
 
   return (
-    <nav className="book-navigation" aria-label="书页导航">
+    <nav className="book-navigation" aria-label="文章导航">
       <div className="book-navigation-heading">
         <button
           type="button"
@@ -25,7 +25,7 @@ export default function BookNavigation({
           返回《{book.title}》
         </button>
         <span className="book-current-position">
-          第 {index + 1} / {book.pages.length} 页
+          第 {index + 1} / {book.pages.length} 篇
         </span>
       </div>
       <div className="book-navigation-controls">
@@ -35,19 +35,19 @@ export default function BookNavigation({
           disabled={disabled || index === 0}
           onClick={() => onOpenPage(book.pages[index - 1].id)}
         >
-          上一页
+          上一篇
         </button>
         <label className="book-jump">
           <span className="sr-only">跳转到</span>
           <select
-            aria-label="书籍页面"
+            aria-label="书籍文章"
             value={currentPageId}
             disabled={disabled}
             onChange={(event) => onOpenPage(event.target.value)}
           >
             {book.pages.map((page, pageIndex) => (
               <option value={page.id} key={page.id}>
-                第 {pageIndex + 1} 页 · {page.title}
+                第 {pageIndex + 1} 篇 · {page.title}
               </option>
             ))}
           </select>
@@ -58,7 +58,7 @@ export default function BookNavigation({
           disabled={disabled || index === book.pages.length - 1}
           onClick={() => onOpenPage(book.pages[index + 1].id)}
         >
-          下一页
+          下一篇
         </button>
         <button
           type="button"
@@ -66,7 +66,7 @@ export default function BookNavigation({
           disabled={disabled}
           onClick={onAddImage}
         >
-          添加图片页
+          添加图片文章
         </button>
       </div>
     </nav>

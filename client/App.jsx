@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import api from "./api.mjs";
+import { blocksToHtml, bodyText, bodyRanges, htmlToBlocks, appendBodyHtml } from "../shared/article-html.mjs";
+import { parseText, serializeBlocks } from "../shared/document.mjs";
 import { kinds } from "./constants.mjs";
 import Icon from "./components/Icon.jsx";
 import Welcome from "./components/Welcome.jsx";
@@ -71,8 +73,8 @@ function BookCreate({ initialTitle, promoting, busy, onSave, onCancel, onDirty }
     }}>
       <h1>{promoting ? "将材料转为书籍" : "新建书籍"}</h1>
       <p>{promoting
-        ? "当前材料将成为第1页，正文、原图、注音和讨论都保留。以后可逐页追加。"
-        : "为这本书起个名字，再逐页导入图片或文字。每页独立保存原图、正文和读音。"}</p>
+        ? "当前材料将成为第1篇文章，正文、原图、注音和讨论都保留。以后可追加文章。"
+        : "为这本书起个名字，再逐篇导入图片或文字。每篇文章独立保存原图、正文和读音。"}</p>
       <label className="book-target">
         书籍名称
         <input aria-label="书籍名称" value={title} maxLength={160} required autoFocus disabled={busy}
@@ -90,6 +92,7 @@ function BookCreate({ initialTitle, promoting, busy, onSave, onCancel, onDirty }
 
 function Workspace({ user, onLoggedOut }) {
   const [documents, setDocuments] = useState([]);
+  const [articleTargets, setArticleTargets] = useState([]);
   const [libraryDocuments, setLibraryDocuments] = useState([]);
   const [books, setBooks] = useState([]);
   const [shelfBooks, setShelfBooks] = useState([]);
@@ -97,6 +100,11 @@ function Workspace({ user, onLoggedOut }) {
   const [document, setDocument] = useState(null);
   const [book, setBook] = useState(null);
   const [importBookId, setImportBookId] = useState(null);
+  const [chatRequest, setChatRequest] = useState(null);
+  const [selectedGroupIds, setSelectedGroupIds] = useState(null);
+  const [appendTargetId, setAppendTargetId] = useState(null);
+  const [segmentationBusy, setSegmentationBusy] = useState(false);
+  const [segmentationError, setSegmentationError] = useState("");
   const [promotion, setPromotion] = useState(null);
   const [bookBusy, setBookBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -121,6 +129,9 @@ function Workspace({ user, onLoggedOut }) {
       : null,
   );
   const savedDetail = useRef(null);
+  const editRequest = useRef(0);
+  const currentView = useRef(null);
+  currentView.current = {activeId, panel, editorSession};
 
   useEffect(() => {
     const controller = new AbortController();
@@ -131,8 +142,10 @@ function Workspace({ user, onLoggedOut }) {
           api(`/books?q=${encodeURIComponent(query)}`, { signal: controller.signal }),
           query ? api("/books", { signal: controller.signal }) : null,
           query ? api("/documents", { signal: controller.signal }) : null,
+          api("/documents?all=1", {signal:controller.signal}),
         ])
-          .then(([data, shelf, all, allDocuments]) => {
+          .then(([data, shelf, all, allDocuments, targets]) => {
+            setArticleTargets(targets.documents);
             setDocuments(data.documents);
             setLibraryDocuments(allDocuments?.documents || data.documents);
             setShelfBooks(shelf.books);
@@ -279,13 +292,21 @@ function Workspace({ user, onLoggedOut }) {
     setEditorSession((n) => n + 1);
     setDirty(!!value);
   };
-  const beginEdit = () => {
+  const beginEdit = async () => {
     if (!mayLeave()) return;
-    setPanel(null);
-    setDraft({ ...document });
-    setEditorSession((n) => n + 1);
-    setDirty(false);
+    const id = document.id;
+    const request = ++editRequest.current;
+    const view = currentView.current;
+    const isCurrent = () => request === editRequest.current && currentView.current.activeId === view.activeId && currentView.current.panel === view.panel && currentView.current.editorSession === view.editorSession;
     setError("");
+    try {
+      // A submitted question can already have attached marks while its answer
+      // is still being generated. Start the draft from that saved revision.
+      const latest = await api(`/documents/${encodeURIComponent(id)}`);
+      if (!isCurrent()) return;
+      setPanel(null); setDocument(latest); setDraft({...latest});
+      setEditorSession((n) => n + 1); setDirty(false);
+    } catch (cause) { if (isCurrent()) setError(cause.message); }
   };
   const cancelEdit = () => {
     if (mayLeave()) {
@@ -304,17 +325,58 @@ function Workspace({ user, onLoggedOut }) {
     setSidebarOpen(false);
     setImportBookId(null);
     setPromotion(null);
+    setAppendTargetId(null);
   };
   const closePanel = () => {
     if (!mayLeave()) return;
     setPanel(null);
     setDirty(false);
   };
-  const imageReady = (value) => {
-    setPanel(null);
-    setDraft({ ...value, ...(importBookId ? { bookId: importBookId, kind: "book" } : {}) });
-    setEditorSession((n) => n + 1);
-    setDirty(true);
+  const imageReady = async (value) => {
+    try {
+      let next = { ...value, ...(importBookId ? { bookId: importBookId, kind: "book" } : {}) };
+      const targetId = value.appendToDocumentId || appendTargetId;
+      if (targetId) {
+        let target = await api(`/documents/${encodeURIComponent(targetId)}`);
+        if (value.appendMode === "continue" && !bodyRanges(target.bodyHtml).sentences.length) {
+          await api(`/documents/${encodeURIComponent(target.id)}/sentences`, {method:"POST",body:JSON.stringify({revision:target.revision,bodyHash:target.bodyHash,force:false})});
+          target = await api(`/documents/${encodeURIComponent(target.id)}`);
+        }
+        const source = value.sourceImageId || value.sourceImage?.id;
+        let addition = blocksToHtml(value.blocks || parseText(value.content), {sourceImageId:source});
+        const continuing = value.appendMode === "continue";
+        if (continuing) {
+          const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(bodyText(addition)));
+          const bodyHash = [...new Uint8Array(digest)].map((part) => part.toString(16).padStart(2,"0")).join("");
+          const segmented = await api(`/documents/${encodeURIComponent(target.id)}/sentences`, {
+            method:"POST", body:JSON.stringify({revision:target.revision,bodyHash,bodyHtml:addition,sourceImages:[{id:source}],force:false}),
+          });
+          addition = segmented.bodyHtml;
+        }
+        const bodyHtml = appendBodyHtml(target.bodyHtml || blocksToHtml(target.blocks, {sourceImageId:target.sourceImageId}), addition, {continueLastSentence:continuing});
+        next = { ...target, bodyHtml, content:serializeBlocks(htmlToBlocks(bodyHtml)),
+          sourceImages: [...(target.sourceImages || (target.sourceImageId ? [{id:target.sourceImageId}] : [])), {id:source}],
+          initializeSentences: !continuing, appendedImageId:source };
+      }
+      setPanel(null); setDraft(next); setEditorSession((n) => n + 1); setDirty(true);
+    } catch (cause) { setError(cause.message); throw cause; }
+  };
+  const refreshCurrentDocument = async () => {
+    if (!document?.id) return;
+    const updated = await api(`/documents/${encodeURIComponent(document.id)}`);
+    setDocument((current) => current?.id === updated.id ? updated : current);
+  };
+  const segmentDocument = async (target, force = true) => {
+    setSegmentationBusy(true); setSegmentationError("");
+    try {
+      const result = await api(`/documents/${encodeURIComponent(target.id)}/sentences`, {
+        method: "POST", body: JSON.stringify({ revision: target.revision, bodyHash: target.bodyHash, force }),
+      });
+      const updated = result.blocks ? result : await api(`/documents/${encodeURIComponent(target.id)}`);
+      setDocument((current) => current?.id === target.id ? updated : current);
+      return updated;
+    } catch (cause) { setSegmentationError(`分句未完成，原文已保留：${cause.message}`); }
+    finally { setSegmentationBusy(false); }
   };
   const save = async (value) => {
     if (saving) return;
@@ -340,6 +402,7 @@ function Workspace({ user, onLoggedOut }) {
       setDirty(false);
       setRefresh((n) => n + 1);
       setNotice(result.bookId ? "已保存到书籍" : "已保存到书架");
+      if (!value.id || value.initializeSentences) await segmentDocument(result, false);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -362,7 +425,7 @@ function Workspace({ user, onLoggedOut }) {
       setDocument(null);
       history.replaceState(null, "", nextId ? `#${nextId}` : window.location.pathname);
       setRefresh((n) => n + 1);
-      setNotice(document.bookId ? "书页已删除" : "材料已删除");
+      setNotice(document.bookId ? "文章已删除" : "材料已删除");
     } catch (e) {
       setError(e.message);
     }
@@ -375,7 +438,7 @@ function Workspace({ user, onLoggedOut }) {
       openPanel("image");
       setImportBookId(book.id);
     } else beginNew({
-      title: `第${book.pages.length + 1}页`, kind: "book", orientation: "horizontal",
+      title: `文章 ${book.pages.length + 1}`, kind: "book", orientation: "horizontal",
       content: "", bookId: book.id,
     });
   };
@@ -403,7 +466,7 @@ function Workspace({ user, onLoggedOut }) {
       setActiveId(`book/${created.id}`);
       history.replaceState(null, "", `#book/${created.id}`);
       setRefresh((n) => n + 1);
-      setNotice(promotion ? "已转为书籍，原材料保留为第1页" : "书籍已创建，可以开始添加页面");
+      setNotice(promotion ? "已转为书籍，原材料保留为第1篇文章" : "书籍已创建，可以开始添加文章");
     } catch (cause) {
       setError(cause.message);
     } finally { setBookBusy(false); }
@@ -426,7 +489,7 @@ function Workspace({ user, onLoggedOut }) {
     } finally { setBookBusy(false); }
   };
   const deleteBook = async () => {
-    if (bookBusy || !window.confirm(`删除《${book.title}》及其中全部${book.pages.length}页？删除后无法撤销。`)) return;
+    if (bookBusy || !window.confirm(`删除《${book.title}》及其中全部${book.pages.length}篇文章？删除后无法撤销。`)) return;
     setBookBusy(true);
     try {
       await api(`/books/${encodeURIComponent(book.id)}`, {
@@ -540,10 +603,10 @@ function Workspace({ user, onLoggedOut }) {
             >
               <span className="document-link-top">
                 <span className="kind-dot book" />书籍
-                <span>{item.pageCount} 页 · {item.charCount} 字</span>
+                <span>{item.pageCount} 篇 · {item.charCount} 字</span>
               </span>
               <strong>{item.title}</strong>
-              <small lang="ja">{item.preview?.replace(/\n/g, " ") || "添加页面，开始阅读"}</small>
+              <small lang="ja">{item.preview?.replace(/\n/g, " ") || "添加文章，开始阅读"}</small>
             </button>
           ))}
           {documents.map((item) => (
@@ -627,6 +690,8 @@ function Workspace({ user, onLoggedOut }) {
             onCancel={closePanel}
             onReady={imageReady}
             onDirty={setDirty}
+            articles={articleTargets}
+            initialTargetId={appendTargetId}
           />
         ) : draft ? (
           <Editor
@@ -662,6 +727,11 @@ function Workspace({ user, onLoggedOut }) {
                 onEdit={beginEdit}
                 onDelete={remove}
                 onDiscuss={() => (panel === "chat" ? closePanel() : openPanel("chat"))}
+                onAsk={(request) => { setChatRequest({...request,key:crypto.randomUUID()}); setSelectedGroupIds(null); setPanel("chat"); }}
+                onGroup={(ids) => { setSelectedGroupIds(ids); setChatRequest(null); setPanel("chat"); }}
+                onAppendImage={() => { openPanel("image"); setAppendTargetId(document.id); }}
+                onSegment={() => segmentDocument(document, true)}
+                segmentationBusy={segmentationBusy} segmentationError={segmentationError}
                 chatOpen={panel === "chat"}
                 onPromoteBook={
                   !document.bookId
@@ -681,6 +751,9 @@ function Workspace({ user, onLoggedOut }) {
             {panel === "chat" && (
               <DocumentChat
                 document={document}
+                request={chatRequest} selectedGroupIds={selectedGroupIds}
+                onDocumentChanged={refreshCurrentDocument}
+                onRequestHandled={() => setChatRequest(null)}
                 onClose={() => {
                   setPanel(null);
                   setDirty(false);

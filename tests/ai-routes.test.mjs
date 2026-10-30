@@ -14,6 +14,8 @@ import sharp from "sharp";
 import { createApp } from "../server/app.mjs";
 import { CORRECTION_SCHEMA, ANNOTATION_SCHEMA } from "../shared/ocr-correction.mjs";
 import { OCR_BODY_SCHEMA, normalizeNewOcrDraft, validateOcr } from "../shared/ocr.mjs";
+import { SENTENCE_SCHEMA } from "../shared/sentences.mjs";
+import { applySentenceBoundaries, bodyRanges, bodyText, removeQaMarks, editBodyText } from "../shared/article-html.mjs";
 import { plainText, serializeBlocks } from "../shared/document.mjs";
 import {
   cookieFromResponse,
@@ -82,12 +84,15 @@ function services() {
     },
   ];
   const auth = {
-    status: async () => ({
-      connected: state.connected,
-      activeAccountId: state.activeId,
-      ...(accounts.find((a) => a.id === state.activeId) || {}),
-      lastError: null,
-    }),
+    status: async () => {
+      if (state.onStatus) await state.onStatus();
+      return {
+        connected: state.connected,
+        activeAccountId: state.activeId,
+        ...(accounts.find((a) => a.id === state.activeId) || {}),
+        lastError: null,
+      };
+    },
     accounts: async () => ({ accounts, activeId: state.activeId }),
     start: async (options) => {
       state.authStarts.push(options);
@@ -121,6 +126,7 @@ function services() {
     },
     run: async (input) => {
       state.calls.push(structuredClone(input));
+      if (state.onRun) await state.onRun(input);
       if (state.mode === "failure")
         throw Object.assign(new Error("接口测试：上游失败，部分输出已丢弃。"), {
           status: 502,
@@ -159,6 +165,7 @@ function services() {
         };
         output = state.annotationResult || { blocks: targets.map(({ text }) => ({ words: readings(text) })) };
       }
+      if (input.schema === SENTENCE_SCHEMA) output = state.sentenceResult || { sentences: [JSON.parse(input.prompt.split("\n输入正文：\n").at(-1))] };
       const text = input.schema
         ? state.mode === "invalid-ocr"
           ? "{broken"
@@ -170,6 +177,8 @@ function services() {
         model: "fixture-model",
         reasoningEffort: input.reasoningEffort ?? "medium",
         completed: state.mode !== "partial",
+        sources: input.webSearch ? [{ title: "官方资料（替身）", url: "https://example.test/source" }] : [],
+        webSearch: { enabled: !!input.webSearch, performed: !!input.webSearch },
       };
     },
   };
@@ -233,7 +242,34 @@ async function setup(t) {
   };
 }
 
+const chatResponses = new Map();
+// Older account fixtures express their selected word as quote. Build the same
+// explicit structured selection the new UI sends, without model inference.
+async function prepareChatBody(url, cookie, path, method, body) {
+  if (method !== "POST" || !body) return body;
+  const documentPath = /^\/api\/documents\/([^/]+)\/conversations$/.exec(path);
+  if (documentPath && body.selection === undefined) {
+    const headers = cookie ? { Cookie: cookie } : {};
+    const found = await fetch(`${url}/api/documents/${documentPath[1]}`, { headers });
+    if (!found.ok) return body;
+    let doc = await found.json();
+    if (!bodyRanges(doc.bodyHtml).sentences.length) {
+      const html = applySentenceBoundaries(doc.bodyHtml, bodyText(doc.bodyHtml).split(/(?<=\n)/u).filter(Boolean));
+      const saved = await fetch(`${url}/api/documents/${doc.id}`, { method: "PUT", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ ...doc, bodyHtml: html }) });
+      if (!saved.ok) throw new Error(`Cannot prepare fixture sentences: ${saved.status}`);
+      doc = await saved.json();
+    }
+    const text = bodyText(doc.bodyHtml), quote = body.quote || bodyRanges(doc.bodyHtml).sentences[0]?.text.trim() || text.slice(0, 20), start = text.indexOf(quote), end = start + quote.length;
+    return { ...body, operation: body.operation || "custom", selection: { start, end, text: quote, bodyHash: doc.bodyHash, sentenceIds: bodyRanges(doc.bodyHtml).sentences.filter((item) => item.end > start && item.start < end).map((item) => item.id) } };
+  }
+  const followup = /^\/api\/conversations\/([^/]+)\/messages$/.exec(path);
+  if (followup && body.groupId === undefined) return { ...body, groupId: chatResponses.get(followup[1])?.groups?.at(-1)?.id };
+  return body;
+}
+function rememberChat(url, cookie, data) { if (data?.id && data?.groups) chatResponses.set(data.id, data); }
 async function request(url, path, method = "GET", body) {
+  const cookie = sessionHeaders(url).Cookie;
+  body = await prepareChatBody(url, cookie, path, method, body);
   const response = await fetch(`${url}${path}`, {
     method,
     headers: {
@@ -250,6 +286,7 @@ async function request(url, path, method = "GET", body) {
   } catch {
     data = text;
   }
+  rememberChat(url, cookie, data);
   return { status: response.status, headers: response.headers, data };
 }
 
@@ -941,7 +978,7 @@ test("AI替身接口集成：历史source／generated识别记录及手工读音
   const database = new DatabaseSync(join(app.dataDir, "yohaku.sqlite"));
   try {
     database
-      .prepare("UPDATE documents SET blocks_json=?,recognition_json=? WHERE id=?")
+      .prepare("UPDATE documents SET blocks_json=?,recognition_json=?,body_html=NULL,body_hash=NULL,source_images_json=NULL WHERE id=?")
       .run(
         JSON.stringify(legacyBlocks),
         JSON.stringify(legacyRecognition),
@@ -1004,7 +1041,7 @@ test("AI替身接口集成：上游失败或非法识别结果不生成可保存
   assert.deepEqual(Buffer.from(await original.arrayBuffer()), buffer);
 });
 
-test("AI替身接口集成：多轮聊天持久保存并续用线程，账户切换隔离聊天", async (t) => {
+test("AI替身接口集成：多轮聊天持久保存并续用线程，授权切换继续同一篇文章对话", async (t) => {
   const app = await setup(t);
   const document = await createDocument(app.url);
   const first = await request(
@@ -1018,8 +1055,8 @@ test("AI替身接口集成：多轮聊天持久保存并续用线程，账户切
   assert.equal(first.data.messages[0].role, "user");
   assert.equal(first.data.messages[1].role, "assistant");
   assert.equal(first.data.quote, "背中");
-  assert.match(app.state.calls[0].prompt, /せなか/);
-  assert.match(app.state.calls[0].prompt, /空を見た/);
+  assert.match(app.state.calls[0].prompt, /背中を撫でる/);
+  assert.doesNotMatch(app.state.calls[0].prompt, /空を見た|せなか/);
   assert.equal(app.state.calls[0].threadId, null);
   assert.equal(app.state.calls[0].expectedAccountId, "account-a");
   assert.equal(app.state.calls[0].expectedSubject, "test-a");
@@ -1051,35 +1088,18 @@ test("AI替身接口集成：多轮聊天持久保存并续用线程，账户切
     id: "account-b",
   });
   assert.equal(switched.status, 200);
-  assert.deepEqual(
-    (await request(app.url, `/api/documents/${document.id}/conversations`))
-      .data,
-    { conversations: [] },
-  );
-  assert.equal(
-    (
-      await request(
-        app.url,
-        `/api/conversations/${first.data.id}/messages`,
-        "POST",
-        { question: "读另一个账户的对话" },
-      )
-    ).status,
-    404,
-  );
-  const other = await request(
-    app.url,
-    `/api/documents/${document.id}/conversations`,
-    "POST",
-    { question: "另一个账户的新讨论" },
-  );
-  assert.equal(other.status, 201);
+  assert.equal((await request(app.url, `/api/documents/${document.id}/conversations`)).data.conversations[0].id, first.data.id);
+  const switchedFollowup = await request(app.url, `/api/conversations/${first.data.id}/messages`, "POST", { question: "换授权继续原讨论" });
+  assert.equal(switchedFollowup.status, 200);
+  assert.equal(switchedFollowup.data.id, first.data.id);
+  assert.equal(app.state.calls.at(-1).threadId, null);
+  assert.match(app.state.calls.at(-1).prompt, /previousMessages/);
+  const other = await request(app.url, `/api/documents/${document.id}/conversations`, "POST", { question: "另一个选区的问题" });
+  assert.equal(other.status, 200);
+  assert.equal(other.data.id, first.data.id);
+  assert.equal(other.data.groups.length, 2);
   await request(app.url, "/api/ai/account", "POST", { id: "account-a" });
-  assert.deepEqual(
-    (await request(app.url, `/api/documents/${document.id}/conversations`)).data
-      .conversations,
-    [third.data],
-  );
+  assert.deepEqual((await request(app.url, `/api/documents/${document.id}/conversations`)).data.conversations, [other.data]);
 });
 
 test("AI替身接口集成：追问失败和partial不写入假答案，既有完整聊天仍保留", async (t) => {
@@ -1113,7 +1133,7 @@ test("AI替身接口集成：追问失败和partial不写入假答案，既有�
     app.url,
     `/api/documents/${document.id}`,
     "PUT",
-    { ...document, content: "片段已删除" },
+    { ...(await request(app.url, `/api/documents/${document.id}`)).data, bodyHtml: '<p data-paragraph-id="changed">片段已删除</p>', content: "片段已删除" },
   );
   assert.equal(unchanged.status, 200);
   app.state.mode = "success";
@@ -1123,7 +1143,9 @@ test("AI替身接口集成：追问失败和partial不写入假答案，既有�
     "POST",
     { question: "继续旧引用" },
   );
-  assert.equal(staleQuote.status, 409);
+  assert.equal(staleQuote.status, 200);
+  assert.equal(staleQuote.data.groups[0].orphaned, true);
+  assert.match(app.state.calls.at(-1).prompt, /背中を撫でる/);
 });
 
 test("AI替身接口集成：授权状态与切换接口不返回凭据，忙时不更换账户，回调错误不回显code", async (t) => {
@@ -1169,6 +1191,7 @@ test("AI替身接口集成：授权状态与切换接口不返回凭据，忙时
 });
 
 async function actorRequest(url, cookie, path, method = "GET", body) {
+  body = await prepareChatBody(url, cookie, path, method, body);
   const response = await fetch(`${url}${path}`, {
     method,
     headers: {
@@ -1178,10 +1201,9 @@ async function actorRequest(url, cookie, path, method = "GET", body) {
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     signal: AbortSignal.timeout(5000),
   });
-  return {
-    status: response.status,
-    data: response.status === 204 ? null : await response.json(),
-  };
+  const data = response.status === 204 ? null : await response.json();
+  rememberChat(url, cookie, data);
+  return { status: response.status, data };
 }
 
 test("共享AI：成员可使用拥有者授权，但不能配置AI或访问别人的材料与讨论（AI替身）", async (t) => {
@@ -1489,15 +1511,16 @@ test("共享AI：成员可使用拥有者授权，但不能配置AI或访问别�
     "POST",
     { question: "用共享AI讨论自己的资料", userId: owner.id },
   );
-  assert.equal(ownDiscussion.status, 201);
+  assert.equal(ownDiscussion.status, 200);
+  assert.equal(ownDiscussion.data.id, ungranted.data.id);
   ownerCalls++;
   assert.equal(ownerConnection.state.calls.length, ownerCalls);
-  assert.equal(ownerConnection.state.calls.at(-1).threadId, null);
+  assert.equal(ownerConnection.state.calls.at(-1).threadId, ungranted.data.messages.length ? `fixture-thread-${ownerCalls - 1}` : null);
   assert.equal(connections.size, 1);
   const continued = await actorRequest(running.url, friendCookie,
     `/api/conversations/${ownDiscussion.data.id}/messages`, "POST", { question: "继续自己的讨论" });
   assert.equal(continued.status, 200);
-  assert.equal(ownerConnection.state.calls.at(-1).threadId, `fixture-thread-${ownerCalls}`);
+  assert.equal(ownerConnection.state.calls.at(-1).threadId, `fixture-thread-${ownerCalls - 1}`);
   assert.notEqual(ownerConnection.state.calls.at(-1).threadId, "fixture-thread-2");
   assert.equal((await actorRequest(running.url, ownerCookie,
     `/api/conversations/${ownDiscussion.data.id}/messages`, "POST", { question: "越权续聊" })).status, 404);
@@ -1739,4 +1762,131 @@ test("共享AI全站互斥：成员读图时拥有者不能切换授权，回调
       .subject,
     ownerSubject,
   );
+});
+
+
+test("第三阶段：分句初始化复用缓存、普通编辑不调用模型，手动分句失败与迟到结果保留原文", async (t) => {
+  const app = await setup(t);
+  let document = await createDocument(app.url);
+  const split = async (doc, force = false, extra = {}) => request(app.url, `/api/documents/${doc.id}/sentences`, "POST", { revision: doc.revision, bodyHash: doc.bodyHash, force, ...extra });
+  app.state.sentenceResult = { sentences: ["背中を撫でる。\n", "空を見た。"] };
+  const initial = await split(document);
+  assert.equal(initial.status, 200);
+  assert.equal(app.state.calls.length, 1);
+  assert.equal(app.state.calls[0].webSearch, false);
+  document = (await request(app.url, `/api/documents/${document.id}`)).data;
+  const originalHtml = document.bodyHtml;
+  assert.ok(bodyRanges(originalHtml).sentences.length >= 2);
+  assert.equal((await split(document)).status, 200);
+  assert.equal(app.state.calls.length, 1, "已有结构不请求模型");
+  const duplicate = (await request(app.url, "/api/documents", "POST", { title: "同正文缓存", kind: "lyrics", orientation: "horizontal", content: document.content })).data;
+  assert.equal((await split(duplicate)).status, 200);
+  assert.equal(app.state.calls.length, 1, "首次初始化可复用相同正文缓存");
+  app.state.sentenceResult = { sentences: ["模型改了字"] };
+  assert.equal((await split(document, true)).status, 502);
+  assert.equal((await request(app.url, `/api/documents/${document.id}`)).data.bodyHtml, originalHtml);
+  app.state.sentenceResult = { sentences: [bodyText(originalHtml)] };
+  let resume, started;
+  const waiting = new Promise((resolve) => { started = resolve; });
+  app.state.onRun = async () => { started(); await new Promise((resolve) => { resume = resolve; }); };
+  const pending = split(document, true);
+  await waiting;
+  const edited = await request(app.url, `/api/documents/${document.id}`, "PUT", { ...document, bodyHtml: editBodyText(originalHtml, "背中を撫でる\n青空を見た") });
+  assert.equal(edited.status, 200);
+  resume();
+  assert.equal((await pending).status, 409);
+  assert.equal((await request(app.url, `/api/documents/${document.id}`)).data.bodyHtml, edited.data.bodyHtml);
+  assert.equal(app.state.calls.length, 3, "普通改字只有保存，不发起分句");
+});
+
+test("第三阶段：严格划词引用、同一文章多组持久对话、来源与游离快照、删除清除标记", async (t) => {
+  const app = await setup(t);
+  const document = await createDocument(app.url);
+  assert.equal((await request(app.url, `/api/documents/${document.id}/conversations`, "POST", { question: "缺少划词", selection: null })).status, 400);
+  const input = await prepareChatBody(app.url, sessionHeaders(app.url).Cookie, `/api/documents/${document.id}/conversations`, "POST", { quote: "背中", operation: "translation" });
+  const stale = await request(app.url, `/api/documents/${document.id}/conversations`, "POST", { ...input, selection: { ...input.selection, bodyHash: "0".repeat(64) } });
+  assert.equal(stale.status, 409);
+  const first = await request(app.url, `/api/documents/${document.id}/conversations`, "POST", input);
+  assert.equal(first.status, 201);
+  assert.equal(first.data.groups.length, 1);
+  const groupId = first.data.groups[0].id;
+  assert.equal(first.data.messages[0].operation, "translation");
+  assert.equal(first.data.messages[1].sources[0].url, "https://example.test/source");
+  assert.equal(app.state.calls.at(-1).webSearch, true);
+  assert.doesNotMatch(app.state.calls.at(-1).prompt, /空を見た|sourceText|readings/);
+  const same = await request(app.url, `/api/conversations/${first.data.id}/messages`, "POST", { groupId, operation: "grammar" });
+  assert.equal(same.status, 200);
+  assert.equal(same.data.groups.length, 1);
+  assert.equal(same.data.messages.at(-2).operation, "grammar");
+  const second = await request(app.url, `/api/documents/${document.id}/conversations`, "POST", { quote: "空", question: "第二组选区" });
+  assert.equal(second.status, 200);
+  assert.equal(second.data.id, first.data.id);
+  assert.equal(second.data.groups.length, 2);
+  let current = (await request(app.url, `/api/documents/${document.id}`)).data;
+  assert.equal(bodyRanges(current.bodyHtml).qa.length, 2);
+  const unlinked = await request(app.url, `/api/documents/${document.id}`, "PUT", { ...current, bodyHtml: removeQaMarks(current.bodyHtml, [groupId]) });
+  assert.equal(unlinked.status, 200);
+  const continued = await request(app.url, `/api/conversations/${first.data.id}/messages`, "POST", { groupId, question: "继续游离片段" });
+  assert.equal(continued.status, 200);
+  assert.equal(continued.data.groups[0].orphaned, true);
+  assert.equal(continued.data.groups[0].selection.text, "背中");
+  assert.match(app.state.calls.at(-1).prompt, /背中を撫でる/);
+  assert.equal((await request(app.url, `/api/conversations/${first.data.id}`, "DELETE")).status, 204);
+  current = (await request(app.url, `/api/documents/${document.id}`)).data;
+  assert.deepEqual(bodyRanges(current.bodyHtml).qa, []);
+  assert.deepEqual((await request(app.url, `/api/documents/${document.id}/conversations`)).data.conversations, []);
+  const fresh = await request(app.url, `/api/documents/${document.id}/conversations`, "POST", { quote: "背中", question: "删除后重新提问" });
+  assert.equal(fresh.status, 201);
+  assert.notEqual(fresh.data.id, first.data.id);
+});
+
+test("第三阶段：生成中编辑保留引用快照，同步删除对话后迟到答案不会恢复", async (t) => {
+  const app = await setup(t);
+  const document = await createDocument(app.url);
+  let resume, started;
+  let waiting = new Promise((resolve) => { started = resolve; });
+  app.state.onRun = async () => { started(); await new Promise((resolve) => { resume = resolve; }); };
+  const pending = request(app.url, `/api/documents/${document.id}/conversations`, "POST", { quote: "背中", question: "生成期间改字" });
+  await waiting;
+  let current = (await request(app.url, `/api/documents/${document.id}`)).data;
+  const edited = await request(app.url, `/api/documents/${document.id}`, "PUT", { ...current, bodyHtml: editBodyText(current.bodyHtml, "肩を撫でる\n空を見た") });
+  assert.equal(edited.status, 200);
+  resume();
+  const done = await pending;
+  assert.equal(done.status, 201);
+  assert.equal(done.data.groups[0].selection.text, "背中");
+  assert.equal(done.data.groups[0].quoteChanged, true);
+  assert.equal((await request(app.url, `/api/documents/${document.id}`)).data.bodyHtml, edited.data.bodyHtml);
+  waiting = new Promise((resolve) => { started = resolve; });
+  const late = request(app.url, `/api/conversations/${done.data.id}/messages`, "POST", { groupId: done.data.groups[0].id, question: "会话删除期间生成" });
+  await waiting;
+  assert.equal((await request(app.url, `/api/conversations/${done.data.id}`, "DELETE")).status, 204);
+  resume();
+  assert.equal((await late).status, 409);
+  assert.deepEqual((await request(app.url, `/api/documents/${document.id}/conversations`)).data.conversations, []);
+});
+
+
+test("第三阶段：授权刷新期间改字拒绝旧划词，跨段落未改引用不误报校正", async (t) => {
+  const app = await setup(t);
+  const document = await createDocument(app.url), path = `/api/documents/${document.id}/conversations`;
+  const input = await prepareChatBody(app.url, sessionHeaders(app.url).Cookie, path, "POST", { quote: "背中", question: "授权刷新时提问" });
+  let resume, started;
+  const waiting = new Promise((resolve) => { started = resolve; });
+  app.state.onStatus = async () => { app.state.onStatus = null; started(); await new Promise((resolve) => { resume = resolve; }); };
+  const pending = request(app.url, path, "POST", input);
+  await waiting;
+  let current = (await request(app.url, `/api/documents/${document.id}`)).data;
+  const edited = await request(app.url, `/api/documents/${document.id}`, "PUT", { ...current, bodyHtml: editBodyText(current.bodyHtml, "肩を撫でる。\n空を見た。") });
+  assert.equal(edited.status, 200);
+  resume();
+  assert.equal((await pending).status, 409);
+  assert.equal(app.state.calls.length, 0);
+  current = (await request(app.url, `/api/documents/${document.id}`)).data;
+  assert.equal(current.bodyHtml, edited.data.bodyHtml);
+  assert.deepEqual(bodyRanges(current.bodyHtml).qa, []);
+  const cross = await request(app.url, path, "POST", { quote: bodyText(current.bodyHtml), question: "跨段解释" });
+  assert.equal(cross.status, 201);
+  assert.equal(cross.data.groups[0].quoteChanged, false);
+  assert.equal(cross.data.groups[0].selection.sentences.length, 2);
 });

@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   parseText,
@@ -9,6 +10,9 @@ import {
   findTextOccurrences,
   annotateOccurrences,
 } from "../../shared/document.mjs";
+import { blocksToHtml, htmlToBlocks, bodyText, bodyRanges, editBodyText, syncBodyReadings, removeQaMarks } from "../../shared/article-html.mjs";
+import DocumentChat from "./DocumentChat.jsx";
+import ArticleBody from "./ArticleBody.jsx";
 import { kinds } from "../constants.mjs";
 import api from "../api.mjs";
 import Icon from "./Icon.jsx";
@@ -31,9 +35,23 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
         initial.recognition?.sourceImage?.id
       ),
   );
-  const [blocks, setBlocks] = useState(() =>
-    parseText(initial.content, initial.blocks || []),
-  );
+  const [bodyHtml, setBodyHtml] = useState(() => initial.bodyHtml || blocksToHtml(parseText(initial.content, initial.blocks || []), {sourceImageId:initial.sourceImageId || initial.recognition?.sourceImage?.id}));
+  const [blocks, setBlocks] = useState(() => initial.bodyHtml ? htmlToBlocks(initial.bodyHtml) : parseText(initial.content, initial.blocks || []));
+  const [viewGroupIds, setViewGroupIds] = useState(null);
+  const beforeInput = useRef(null);
+  const htmlRef = useRef(bodyHtml);
+  htmlRef.current = bodyHtml;
+  const undoHistory = useRef([]);
+  const redoHistory = useRef([]);
+  const [insertionSource, setInsertionSource] = useState("inherit");
+  const [boundarySide, setBoundarySide] = useState("previous");
+  const [boundaryAt, setBoundaryAt] = useState(null);
+  const [segmenting, setSegmenting] = useState(false);
+  const initialQaIds = useRef([...new Set(bodyRanges(bodyHtml).qa.map((range) => range.id))]);
+  const currentQaIds = new Set(bodyRanges(bodyHtml).qa.map((range) => range.id));
+  const orphanedIds = initialQaIds.current.filter((id) => !currentQaIds.has(id));
+  const imageSources = initial.sourceImages?.length ? initial.sourceImages : (initial.sourceImageId || initial.recognition?.sourceImage?.id) ? [{id:initial.sourceImageId || initial.recognition?.sourceImage?.id, recognition:initial.recognition}] : [];
+  const [activeSourceId, setActiveSourceId] = useState(initial.appendedImageId || imageSources[0]?.id || null);
   const [selection, setSelection] = useState(null);
   const [reading, setReading] = useState("");
   const [message, setMessage] = useState("");
@@ -46,9 +64,8 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
   const [batchSelected, setBatchSelected] = useState([]);
   const [batchReading, setBatchReading] = useState("");
   const [activeRange, setActiveRange] = useState(null);
-  const sourceImageId =
-    initial.sourceImageId || initial.recognition?.sourceImage?.id;
-  const recognition = initial.recognition || initial;
+  const sourceImageId = activeSourceId;
+  const recognition = imageSources.find((image) => image.id === activeSourceId)?.recognition || initial.recognition || initial;
   const warnings = Array.isArray(recognition.warnings)
     ? recognition.warnings
     : [];
@@ -82,7 +99,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
   const rotationRequest = useRef(null);
   const submitLock = useRef(false);
   const annotationRequest = useRef(null);
-  const busy = saving || imageSaving || submitting || annotating || creatingBook;
+  const busy = saving || imageSaving || submitting || annotating || creatingBook || segmenting;
   const imageSideways = imageRotation % 2 === 1;
   const imageUrl = sourceImageId
     ? `/api/images/${encodeURIComponent(sourceImageId)}/raw${imageMetadata ? `?revision=${imageMetadata.revision}` : ""}`
@@ -227,6 +244,13 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
   const textarea = useRef(null);
   const readingInput = useRef(null);
   const body = plainText(blocks);
+  useEffect(() => {
+    const element = textarea.current;
+    if (!element) return;
+    const capture = (event) => { beforeInput.current = {start:element.selectionStart,end:element.selectionEnd,inputType:event.inputType}; };
+    element.addEventListener("beforeinput", capture);
+    return () => element.removeEventListener("beforeinput", capture);
+  }, [tab, body]);
   const counts = stats(blocks);
   const hasMissingReadings = blocks.some((block) => block.segments.some(
     (segment) => !segment.reading && /\p{Script=Han}/u.test(segment.text),
@@ -252,7 +276,12 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
     setValue((old) => ({ ...old, ...patch }));
     setContentDirty(true);
   };
-  const updateBlocks = (next, preserveActive = false) => {
+  const updateBlocks = (next, preserveActive = false, nextHtml = null) => {
+    undoHistory.current.push({ blocks: structuredClone(blocks), html: bodyHtml });
+    if (undoHistory.current.length > 100) undoHistory.current.shift();
+    redoHistory.current = [];
+    const structured = nextHtml || (bodyText(bodyHtml) === plainText(next) ? bodyHtml : editBodyText(bodyHtml, plainText(next), {boundarySide}));
+    setBodyHtml(syncBodyReadings(structured, next));
     setBlocks(next);
     setSelection(null);
     setBatchSelected([]);
@@ -346,7 +375,14 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
   };
   const editBody = (text) => {
     const result = editPlainText(blocks, text);
-    updateBlocks(result.blocks);
+    let precise = beforeInput.current;
+    beforeInput.current = null;
+    if (precise && precise.start === precise.end && precise.inputType?.startsWith("delete")) {
+      const length = body.length - text.length;
+      precise = precise.inputType.includes("Backward") ? {...precise,start:Math.max(0,precise.start-length)} : {...precise,end:precise.end+length};
+    }
+    const edited = editBodyText(bodyHtml, text, {boundarySide,...(insertionSource === "inherit" ? {} : {sourceImageId:insertionSource || null}),...(precise ? {editStart:precise.start,editEnd:precise.end}: {})});
+    updateBlocks(result.blocks, false, edited);
     if (result.removed)
       setMessage(
         `正文变化影响了 ${result.removed} 处注音，已移除对应读音，请重新校正。`,
@@ -361,6 +397,18 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
         text: el.value.slice(el.selectionStart, el.selectionEnd),
       });
     } else setSelection(null);
+    if (el) {
+      const at = el.selectionStart;
+      const ranges = bodyRanges(bodyHtml);
+      const preceding = ranges.sentences.find((item) => item.end === at);
+      const following = ranges.sentences.find((item) => item.start === at);
+      setBoundaryAt(preceding && following && preceding.id !== following.id ? {at, preceding, following} : null);
+      const source = ranges.sources.find((item) => item.start <= at && item.end > at);
+      if (source && source.id !== activeSourceId) {
+        if (imageRotation) setMessage("先保存当前图片方向，再定位另一张来源图；正文选区已保留。");
+        else { setActiveSourceId(source.id); setImageMetadata(null); setImageSize(null); setPreviewMode("image"); }
+      } else if (source) setPreviewMode("image");
+    }
   };
   const applyReading = () => {
     try {
@@ -399,6 +447,35 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
     setPreviewMode("reading");
   };
   const incompleteRuby = rubies.some((r) => !r.reading.trim());
+  const undo = (redo = false) => {
+    const from = redo ? redoHistory : undoHistory;
+    const to = redo ? undoHistory : redoHistory;
+    const restored = from.current.pop();
+    if (!restored) return;
+    to.current.push({blocks:structuredClone(blocks),html:bodyHtml});
+    setBlocks(restored.blocks); setBodyHtml(restored.html); setSelection(null); setContentDirty(true);
+  };
+  const resegment = async () => {
+    const snapshot = bodyHtml;
+    setSegmenting(true); setMessage("");
+    try {
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(bodyText(snapshot)));
+      const bodyHash = [...new Uint8Array(digest)].map((part) => part.toString(16).padStart(2,"0")).join("");
+      const result = await api(`/documents/${encodeURIComponent(initial.id)}/sentences`, {
+        method:"POST", body:JSON.stringify({revision:value.revision,bodyHash,bodyHtml:snapshot,force:true}),
+      });
+      if (htmlRef.current !== snapshot) { setMessage("正文已变化，未应用旧分句结果。请重新分句。"); return; }
+      updateBlocks(htmlToBlocks(result.bodyHtml), false, result.bodyHtml);
+      setMessage("分句已更新，正文、注音、来源和问答标记已保留。保存后生效。");
+    } catch (error) { setMessage(`分句未完成，当前正文保留，可重试：${error.message}`); }
+    finally { setSegmenting(false); }
+  };
+  const chooseSource = (id) => {
+    if (id !== activeSourceId && imageRotation && !window.confirm("当前图片方向尚未保存，切换图片会取消这次旋转。")) return;
+    setActiveSourceId(id); setImageMetadata(null); setImageRotation(0); setImageSize(null); setPreviewMode("image");
+    const range = bodyRanges(bodyHtml).sources.find((item) => item.id === id);
+    if (range) { textarea.current?.focus(); textarea.current?.setSelectionRange(range.start, range.end); setSelection({start:range.start,end:range.end,text:body.slice(range.start,range.end)}); }
+  };
 
   return (
     <form
@@ -415,6 +492,8 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
             ...value,
             orientation: "horizontal",
             blocks,
+            bodyHtml,
+            sourceImages:imageSources.map((image) => ({id:image.id})),
             content: serializeBlocks(blocks),
             manualReadings: blocks.flatMap((b) =>
               b.segments
@@ -447,7 +526,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
             <span className="eyebrow">
               {initial.id ? "校对材料" : value.bookId ? "加入书籍" : "放进书架"}
             </span>
-            <h1>{initial.id ? "留住准确的每一行" : value.bookId ? "添加一页阅读材料" : "导入一篇新材料"}</h1>
+            <h1>{initial.id ? "留住准确的每一行" : value.bookId ? "添加一篇阅读文章" : "导入一篇新材料"}</h1>
           </div>
           <div className="editor-actions">
             <button
@@ -509,7 +588,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
                   }}>创建并选中</button>
               </div>
             )}
-            <small>一本书可逐页追加。每次保存会添加为最后一页，之后可在书籍目录调整顺序。</small>
+            <small>一本书包含多篇文章。每次保存会添加为最后一篇，之后可在书籍目录调整顺序。</small>
           </div>
         )}
         <div className="metadata-form">
@@ -743,9 +822,29 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
                   onBlur={getSelection}
                   onKeyUp={getSelection}
                   onMouseUp={getSelection}
+                  onKeyDown={(event) => {
+                    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); undo(event.shiftKey); }
+                    else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") { event.preventDefault(); undo(true); }
+                  }}
                   maxLength={200000}
                   spellCheck={false}
                 />
+                <div className="sentence-actions">
+                  <button type="button" className="text-button" disabled={!undoHistory.current.length} onClick={() => undo()}>撤销</button>
+                  <button type="button" className="text-button" disabled={!redoHistory.current.length} onClick={() => undo(true)}>重做</button>
+                  {initial.id ? <button type="button" className="text-button" disabled={busy || incompleteRuby} onClick={resegment}>{segmenting ? "正在重新分句…" : "重新分句"}</button> : <small>首次保存后初始化分句；普通校对保留现有句子。</small>}
+                </div>
+                {boundaryAt && <fieldset className="sentence-boundary"><legend>句子交界：新增文字插入</legend>
+                  <label><input type="radio" name="boundarySide" checked={boundarySide === "previous"} onChange={() => setBoundarySide("previous")} />前句「{boundaryAt.preceding.text.slice(-12)}」</label>
+                  <label><input type="radio" name="boundarySide" checked={boundarySide === "next"} onChange={() => setBoundarySide("next")} />后句「{boundaryAt.following.text.slice(0,12)}」</label>
+                  <label>新增文字来源<select aria-label="新增文字来源" value={insertionSource} onChange={(event) => setInsertionSource(event.target.value)}>
+                    <option value="inherit">沿用所选句子当前位置的来源</option><option value="">无图片来源</option>
+                    {imageSources.map((image,index) => <option key={image.id} value={image.id}>来源图 {index+1}</option>)}
+                  </select></label>
+                  <small>前句来源：{(() => {const source=bodyRanges(bodyHtml).sources.find((item) => item.start < boundaryAt.at && item.end >= boundaryAt.at); return source ? `来源图 ${imageSources.findIndex((image) => image.id === source.id)+1}` : "无图片来源";})()}；后句来源：{(() => {const source=bodyRanges(bodyHtml).sources.find((item) => item.start <= boundaryAt.at && item.end > boundaryAt.at); return source ? `来源图 ${imageSources.findIndex((image) => image.id === source.id)+1}` : "无图片来源";})()}</small>
+                </fieldset>}
+                {orphanedIds.length > 0 && <p role="status" className="qa-orphan-warning">{orphanedIds.length} 个问答组的正文关联已删除：{orphanedIds.join("、")}。保存后将标为游离；撤销或取消可恢复。</p>}
+                {body.trim() && <details className="editor-structure-preview"><summary>正文中的句子、来源与问答标记</summary><ArticleBody html={bodyHtml} fontSize={21} activeSourceId={activeSourceId} onSource={chooseSource} onGroup={setViewGroupIds} /></details>}
                 <div className="annotation-tools">
                   <div className="selection-label">
                     {selection ? (
@@ -995,6 +1094,9 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
             className="preview-panel"
             aria-label={previewMode === "image" ? "原图对照" : "阅读预览"}
           >
+            {imageSources.length > 1 && <div className="source-image-picker" aria-label="来源图片列表">
+              {imageSources.map((image,index) => <button type="button" key={image.id} className={`button ${activeSourceId === image.id ? "primary" : "subtle"}`} aria-pressed={activeSourceId === image.id} onClick={() => chooseSource(image.id)}>来源图 {index+1}</button>)}
+            </div>}
             <div className="preview-heading">
               {sourceImageId ? (
                 <div
@@ -1157,7 +1259,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
                     {batchSelected.length} 处。
                   </p>
                 )}
-                {body.trim() ? (
+                {body.trim() && tab === "text" ? <ArticleBody html={bodyHtml} fontSize={23} activeSourceId={activeSourceId} onSource={chooseSource} onGroup={setViewGroupIds} /> : body.trim() ? (
                   <RubyText
                     blocks={blocks}
                     fontSize={23}
@@ -1182,6 +1284,15 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
           <span>保存后可在书架中重新打开</span>
         </div>
       </fieldset>
+      {viewGroupIds && initial.id && createPortal(<div className="editor-chat-overlay">
+        <DocumentChat document={{...initial,revision:value.revision}} selectedGroupIds={viewGroupIds}
+          onClose={() => setViewGroupIds(null)}
+          onDocumentChanged={async () => {
+            const [latest,history] = await Promise.all([api(`/documents/${encodeURIComponent(initial.id)}`),api(`/documents/${encodeURIComponent(initial.id)}/conversations`)]);
+            setValue((old) => ({...old,revision:latest.revision}));
+            if (!history.conversations?.length) { const clean = removeQaMarks(htmlRef.current); setBodyHtml(clean); htmlRef.current=clean; initialQaIds.current=[]; }
+          }} />
+      </div>, window.document.body)}
     </form>
   );
 }

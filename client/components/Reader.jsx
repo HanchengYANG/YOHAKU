@@ -1,7 +1,9 @@
+import { useEffect, useState } from "react";
+import { blocksToHtml, bodyRanges } from "../../shared/article-html.mjs";
+import ArticleBody from "./ArticleBody.jsx";
 import { stats } from "../../shared/document.mjs";
 import { kinds } from "../constants.mjs";
 import Icon from "./Icon.jsx";
-import RubyText from "./RubyText.jsx";
 
 export default function Reader({
   document,
@@ -14,8 +16,22 @@ export default function Reader({
   onDiscuss,
   chatOpen = false,
   onPromoteBook = null,
+  onAsk, onGroup, onAppendImage, onSegment, segmentationBusy, segmentationError,
 }) {
   const counts = stats(document.blocks);
+  const [selection, setSelection] = useState(null);
+  const [customQuestion, setCustomQuestion] = useState("");
+  const [custom, setCustom] = useState(false);
+  const html = document.bodyHtml || blocksToHtml(document.blocks);
+  useEffect(() => { setSelection(null); setCustom(false); }, [document.id, document.bodyHtml]);
+  const ask = (operation) => {
+    if (!selection) return;
+    const { rect, ...reference } = selection;
+    reference.bodyHash = document.bodyHash;
+    reference.sentenceIds = bodyRanges(html).sentences.filter((item) => item.start < selection.end && item.end > selection.start).map((item) => item.id);
+    onAsk?.({ selection: reference, operation, question: operation === "custom" ? customQuestion.trim() : undefined });
+    setSelection(null); setCustom(false); setCustomQuestion("");
+  };
   return (
     <section className="reader-page">
       <div className="document-meta">
@@ -65,22 +81,39 @@ export default function Reader({
               aria-pressed={chatOpen}
               onClick={onDiscuss}
             >
-              <Icon name="arrow" size={15} />问 AI
+              <Icon name="arrow" size={15} />对话记录
             </button>
           )}
         </div>
       </div>
+      {onSegment && <div className="sentence-actions">
+        <button type="button" className="text-button" disabled={segmentationBusy} onClick={onSegment}>
+          {segmentationBusy ? "正在分句…" : bodyRanges(html).sentences.length ? "重新分句" : "初始化分句"}
+        </button>
+        {onAppendImage && <button type="button" className="text-button" onClick={onAppendImage}>追加来源图片</button>}
+        {segmentationError && <span role="alert">{segmentationError}</span>}
+      </div>}
       <article
         className={`reading-sheet ${document.kind}`}
         aria-label="日语原文"
       >
-        <RubyText
-          blocks={document.blocks}
-          showRuby={showRuby}
-          fontSize={fontSize}
-          orientation={document.orientation}
-        />
+        <ArticleBody html={html} showRuby={showRuby} fontSize={fontSize}
+          onSelection={setSelection} onGroup={onGroup} />
       </article>
+      {selection && <div className="selection-questions" role="dialog" aria-label="划词提问"
+        style={{ left: Math.max(12, Math.min(selection.rect.left, window.innerWidth - 310)), top: Math.max(12, Math.min(selection.rect.bottom + 8, window.innerHeight - (custom ? 190 : 100))) }}>
+        <strong lang="ja">{selection.text.length > 36 ? `${selection.text.slice(0, 36)}…` : selection.text}</strong>
+        <div className="selection-actions">
+          <button className="button subtle" type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => ask("translation")}>翻译</button>
+          <button className="button subtle" type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => ask("grammar")}>解释语法</button>
+          <button className="button subtle" type="button" onClick={() => setCustom(true)}>自定义问题</button>
+          <button className="icon-button" type="button" aria-label="关闭划词提问" onClick={() => setSelection(null)}>×</button>
+        </div>
+        {custom && <form onSubmit={(e) => { e.preventDefault(); if(customQuestion.trim()) ask("custom"); }}>
+          <input aria-label="选区自定义问题" autoFocus value={customQuestion} maxLength={4000} onChange={(e) => setCustomQuestion(e.target.value)} />
+          <button className="button primary" disabled={!customQuestion.trim()}>发送</button>
+        </form>}
+      </div>}
       <footer className="reader-footer">
         <span>
           更新于{" "}

@@ -58,10 +58,11 @@ export function attachBookRoutes({ app, database, summary, requireDocument }) {
       id: book.id, title: book.title, revision: book.revision,
       createdAt: book.created_at, updatedAt: book.updated_at,
       pageCount: summaries.length,
+      articleCount: summaries.length,
       charCount: summaries.reduce((count, page) => count + page.charCount, 0),
       rubyCount: summaries.reduce((count, page) => count + page.rubyCount, 0),
       preview: summaries.find((page) => page.preview)?.preview || "",
-      ...(includePages ? { pages: summaries } : {}),
+      ...(includePages ? { pages: summaries, articles: summaries } : {}),
     };
   }
 
@@ -116,7 +117,7 @@ export function attachBookRoutes({ app, database, summary, requireDocument }) {
     const book = requireBook(req.user.id, req.params.id);
     const title = titleInput(req.body?.title), revision = revisionInput(req.body?.revision);
     if (revision !== book.revision) throw fail(409, "这本书已在其他页面修改，请重新打开最新版本后重试。");
-    const pageIds = req.body?.pageIds;
+    const pageIds = req.body?.articleIds !== undefined ? req.body.articleIds : req.body?.pageIds;
     transaction(() => {
       if (pageIds !== undefined) {
         const current = pages(book);
@@ -139,6 +140,8 @@ export function attachBookRoutes({ app, database, summary, requireDocument }) {
     const revision = revisionInput(req.body?.revision);
     if (revision !== book.revision) throw fail(409, "这本书已在其他页面修改，请重新打开最新版本后再决定是否删除。");
     transaction(() => {
+      if (database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='qa_groups'").get())
+        database.prepare("DELETE FROM qa_groups WHERE user_id=? AND document_id IN (SELECT id FROM documents WHERE book_id=? AND owner_id=?)").run(req.user.id, book.id, req.user.id);
       database.prepare("DELETE FROM conversations WHERE user_id=? AND document_id IN (SELECT id FROM documents WHERE book_id=? AND owner_id=?)")
         .run(req.user.id, book.id, req.user.id);
       database.prepare("DELETE FROM documents WHERE book_id=? AND owner_id=?").run(book.id, req.user.id);

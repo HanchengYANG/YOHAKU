@@ -2,11 +2,13 @@
 // test doubles; the production server never imports this module.
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 import { createApp } from "../../server/app.mjs";
 import { ANNOTATION_SCHEMA } from "../../shared/ocr-correction.mjs";
 import { OCR_BODY_SCHEMA } from "../../shared/ocr.mjs";
+import { SENTENCE_SCHEMA } from "../../shared/sentences.mjs";
 
 const dataDir = fileURLToPath(
   new URL("../../artifacts/ai-e2e-data/", import.meta.url),
@@ -17,6 +19,7 @@ const accountId = "ui-test-account";
 let connected = false;
 let busy = false;
 const turns = new Map();
+const runtimeCalls = [];
 
 const auth = {
   async status() {
@@ -99,17 +102,24 @@ const runtime = {
   stop() {
     busy = false;
   },
-  async run({ schema, image, prompt, threadId, reasoningEffort }) {
+  async run({ schema, image, prompt, threadId, reasoningEffort, webSearch }) {
     if (!connected) throw new Error("测试账户尚未连接。");
     busy = true;
     try {
       const id = threadId || `ui-test-thread-${randomUUID()}`;
+      runtimeCalls.push({ type: schema === SENTENCE_SCHEMA ? "sentences" : schema ? "image" : "chat", prompt, threadId, webSearch });
+      if (runtimeCalls.length > 100) runtimeCalls.shift();
+      writeFileSync(new URL("../../artifacts/ai-e2e-data/runtime-calls.json", import.meta.url), JSON.stringify(runtimeCalls));
+      if (schema === SENTENCE_SCHEMA) {
+        const text = JSON.parse(prompt.split("\n输入正文：\n").at(-1));
+        return { completed: true, text: JSON.stringify({ sentences: text.match(/[^。！？\n]+(?:[。！？][」』）]*)?|\n/g) || [text] }), model: "UI-TEST-DOUBLE", threadId: id };
+      }
       if (schema === ANNOTATION_SCHEMA) {
         if (typeof image !== "string" || !/^data:image\/(png|jpeg|webp);base64,/.test(image))
           throw new Error("独立注音未收到参考原图。");
         const referencePixels = Buffer.from(image.slice(image.indexOf(",") + 1), "base64");
         const referenceMetadata = await sharp(referencePixels).metadata();
-        if (!referenceMetadata.width || !referenceMetadata.height || referenceMetadata.orientation !== undefined)
+        if (!referenceMetadata.width || !referenceMetadata.height || (referenceMetadata.orientation !== undefined && referenceMetadata.orientation !== 1))
           throw new Error("注音参考原图未正确解码或按EXIF转正。");
         const targets = JSON.parse(prompt.split("输入目标：\n").at(-1));
         return {
@@ -152,7 +162,9 @@ const runtime = {
         completed: true,
         threadId: id,
         model: "UI-TEST-DOUBLE",
-        text: `【浏览器测试替身，不是真实 AI 回答】\n测试回合 ${count}。收到问题：${context.question}\n引用：${context.quote || "全文"}`,
+        text: `【浏览器测试替身，不是真实 AI 回答】\n测试回合 ${count}。收到问题：${context.question}\n引用：${context.selectedText || context.quote || "无选区"}`,
+        sources: webSearch ? [{ title: "日语学习测试来源", url: "https://www.jpf.go.jp/" }] : [],
+        webSearch: { enabled: !!webSearch, performed: !!webSearch, queries: webSearch ? ["日语学习"] : [] },
       };
     } finally {
       busy = false;

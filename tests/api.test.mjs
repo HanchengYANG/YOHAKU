@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { once } from "node:events";
 import { request as httpRequest } from "node:http";
 import { createApp } from "../server/app.mjs";
+import { blocksToHtml, editBodyText } from "../shared/article-html.mjs";
 import { DatabaseSync } from "node:sqlite";
 import { ensureSession, sessionHeaders } from "./helpers/session.mjs";
 
@@ -113,8 +114,8 @@ test("旧竖排资料统一横排输出，受控标题条目保存重开与Markd
   const blocks = created.data.blocks;
   ["heading", "list_item", "paragraph"].forEach((type, index) => { blocks[index].type = type; });
   const db = new DatabaseSync(join(dataDir, "yohaku.sqlite"));
-  db.prepare("UPDATE documents SET orientation='vertical',blocks_json=? WHERE id=?")
-    .run(JSON.stringify(blocks), created.data.id);
+  db.prepare("UPDATE documents SET orientation='vertical',blocks_json=?,body_html=? WHERE id=?")
+    .run(JSON.stringify(blocks), blocksToHtml(blocks), created.data.id);
   db.close();
   const legacy = await request(running.url, `/api/documents/${created.data.id}`);
   assert.equal(legacy.data.orientation, "horizontal");
@@ -457,4 +458,19 @@ test("材料 API 的真实存储、重开、版本保护和导出", async (t) =>
       404,
     );
   });
+});
+
+
+test("显式修改的HTML正文优先于旧content，转发不变HTML的旧客户端仍可更新content", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "yohaku-body-authority-"));
+  const running = await start(dataDir);
+  t.after(async () => { await running.stop(); await rm(dataDir, { recursive: true, force: true }); });
+  const created = (await request(running.url, "/api/documents", "POST", { ...sample, content: "元の文。" })).data;
+  const changed = await request(running.url, `/api/documents/${created.id}`, "PUT", { ...created, bodyHtml: editBodyText(created.bodyHtml, "新しい文。") });
+  assert.equal(changed.status, 200);
+  assert.equal(changed.data.content, "新しい文。");
+  const legacy = await request(running.url, `/api/documents/${created.id}`, "PUT", { ...changed.data, content: "旧クライアントの編集。" });
+  assert.equal(legacy.status, 200);
+  assert.equal(legacy.data.content, "旧クライアントの編集。");
+  assert.notEqual(legacy.data.bodyHash, changed.data.bodyHash);
 });

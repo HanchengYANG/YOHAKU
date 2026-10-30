@@ -1,6 +1,6 @@
 import express from "express";
 import { DatabaseSync } from "node:sqlite";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { mkdirSync, chmodSync, existsSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,11 @@ import {
   stats,
 } from "../shared/document.mjs";
 import { splitRubyDisplay } from "../shared/ruby-display.mjs";
+import {
+  blocksToHtml, htmlToBlocks, normalizeBodyHtml, bodyText, bodyRanges,
+  editBodyText, syncBodyReadings,
+} from "../shared/article-html.mjs";
+const hashBody = (html) => createHash("sha256").update(bodyText(html)).digest("hex");
 
 const kinds = new Set(["lyrics", "article", "textbook", "book"]);
 const orientations = new Set(["horizontal", "vertical"]);
@@ -35,6 +40,9 @@ const htmlEscape = (value) =>
     .replaceAll('"', "&quot;");
 
 function markdown(document) {
+  const ranges = bodyRanges(document.bodyHtml);
+  if (ranges.sentences.length || ranges.sources.length || ranges.qa.length)
+    return `# ${htmlEscape(document.title)}\n\n${document.bodyHtml}\n`;
   const paragraphs = document.blocks
     .map((block) => {
       const text = block.segments
@@ -64,7 +72,7 @@ function validateInput(input, updating = false) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new HttpError(400, "请提供文章内容。");
   }
-  const { title, kind, orientation, content, revision } = input;
+  const { title, kind, orientation, content, bodyHtml, revision } = input;
   if (typeof title !== "string" || !title.trim() || title.trim().length > 160) {
     throw new HttpError(400, "标题需要填写，最多 160 个字符。");
   }
@@ -72,16 +80,15 @@ function validateInput(input, updating = false) {
   if (!orientations.has(orientation))
     throw new HttpError(400, "请选择横排或竖排。");
   if (
-    typeof content !== "string" ||
-    !content.trim() ||
-    content.length > 600_000
+    bodyHtml === undefined && (typeof content !== "string" ||
+    !content.trim() || content.length > 600_000)
   ) {
     throw new HttpError(400, "正文或注音内容过长，请缩短后再保存。");
   }
   if (updating && (!Number.isSafeInteger(revision) || revision < 1)) {
     throw new HttpError(400, "缺少有效的文档版本，请重新打开后再保存。");
   }
-  return { title: title.trim(), kind, orientation: "horizontal", content, revision };
+  return { title: title.trim(), kind, orientation: "horizontal", content, bodyHtml, revision };
 }
 
 function parseContent(content, previous = [], manualReadings = []) {
@@ -119,7 +126,8 @@ function parseContent(content, previous = [], manualReadings = []) {
 }
 
 function fromRow(row) {
-  const blocks = JSON.parse(row.blocks_json);
+  const bodyHtml = row.body_html || blocksToHtml(JSON.parse(row.blocks_json), { sourceImageId: row.source_image_id });
+  const blocks = htmlToBlocks(bodyHtml);
   const recognition = row.recognition_json ? JSON.parse(row.recognition_json) : null;
   return {
     id: row.id,
@@ -131,6 +139,10 @@ function fromRow(row) {
       row.orientation,
     content: serializeBlocks(blocks),
     blocks,
+    bodyHtml,
+    bodyHash: row.body_hash || hashBody(bodyHtml),
+    sourceImages: row.source_images_json ? JSON.parse(row.source_images_json) :
+      (row.source_image_id ? [{ id: row.source_image_id, recognition }] : []),
     revision: row.revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -212,6 +224,9 @@ export function createApp({
     database.exec("ALTER TABLE documents ADD COLUMN recognition_json TEXT");
   if (!columns.includes("owner_id"))
     database.exec("ALTER TABLE documents ADD COLUMN owner_id TEXT");
+  for (const [name, definition] of [["body_html", "TEXT"], ["body_hash", "TEXT"], ["source_images_json", "TEXT"]]) {
+    if (!columns.includes(name)) database.exec(`ALTER TABLE documents ADD COLUMN ${name} ${definition}`);
+  }
   const requireDocument = (userId, id) => {
     const row = database
       .prepare("SELECT * FROM documents WHERE id=? AND owner_id=?")
@@ -294,13 +309,71 @@ export function createApp({
     ndlOcr,
   });
   const books = attachBookRoutes({ app, database, summary, requireDocument });
+  // Material IDs and legacy book membership are unchanged. Existing photos are
+  // attached to their original text; old pages remain individual articles.
+  const migrateBody = database.prepare("UPDATE documents SET body_html=?,body_hash=?,source_images_json=? WHERE id=?");
+  for (const row of database.prepare("SELECT * FROM documents WHERE body_html IS NULL").all()) {
+    const html = blocksToHtml(JSON.parse(row.blocks_json), { sourceImageId: row.source_image_id });
+    const recognition = row.recognition_json ? JSON.parse(row.recognition_json) : null;
+    migrateBody.run(html, hashBody(html), JSON.stringify(row.source_image_id ? [{ id: row.source_image_id, recognition }] : []), row.id);
+  }
+
+  async function articleImages(userId, input, previous = []) {
+    if (input.sourceImageId != null && typeof input.sourceImageId !== "string") throw new HttpError(400, "图片来源标识无效。");
+    if (input.sourceImageId) await ai.getImage(userId, input.sourceImageId);
+    const requested = input.sourceImages ?? (input.sourceImageId ? [{ id: input.sourceImageId }] : previous);
+    if (!Array.isArray(requested) || requested.length > 100 || requested.some((image) => !image || typeof image.id !== "string" || !image.id) || new Set(requested.map((image) => image.id)).size !== requested.length)
+      throw new HttpError(400, "文章来源图片列表无效，最多 100 张且不能重复。");
+    const result = [];
+    for (const { id } of requested) {
+      await ai.getImage(userId, id);
+      const old = previous.find((image) => image.id === id);
+      const storedDraft = database.prepare("SELECT draft_json FROM image_drafts WHERE image_id=? AND user_id=?").get(id, userId);
+      if (!storedDraft && !old) throw new HttpError(400, "这张图片尚未完成识别，请先识别再保存草稿。");
+      result.push({ id, recognition: old?.recognition || JSON.parse(storedDraft.draft_json) });
+    }
+    return result;
+  }
+
+  function articleBody(input, previousBlocks, manualReadings, sourceImages, previousHtml) {
+    let html;
+    if (input.bodyHtml !== undefined) {
+      html = normalizeBodyHtml(input.bodyHtml);
+      // Older clients forward the unchanged HTML while editing brace notation.
+      // A deliberately changed HTML body is authoritative over forwarded content.
+      const canonicalBlocks = htmlToBlocks(html);
+      const legacyContentEdit = previousHtml && html === normalizeBodyHtml(previousHtml) && typeof input.content === "string";
+      const blocks = parseContent(legacyContentEdit ? input.content : serializeBlocks(canonicalBlocks), canonicalBlocks, manualReadings);
+      html = syncBodyReadings(editBodyText(html, plainText(blocks)), blocks);
+    } else {
+      const blocks = parseContent(input.content, previousBlocks, manualReadings);
+      html = previousHtml ? syncBodyReadings(editBodyText(previousHtml, plainText(blocks)), blocks)
+        : blocksToHtml(blocks, { sourceImageId: sourceImages[0]?.id });
+    }
+    const text = bodyText(html);
+    if (!text.trim() || text.length > 200_000) throw new HttpError(400, "正文需要填写，最多 200000 个字符（不含注音）。");
+    const imageIds = new Set(sourceImages.map((image) => image.id));
+    if (bodyRanges(html).sources.some((range) => !imageIds.has(range.id)))
+      throw new HttpError(400, "正文引用了不属于这篇文章的图片来源。");
+    return { html, blocks: htmlToBlocks(html), text, hash: hashBody(html) };
+  }
+
+  function validateQaReferences(html, userId, documentId) {
+    const refs = [...new Set(bodyRanges(html).qa.map((range) => range.id))];
+    if (!refs.length) return;
+    if (!database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='qa_groups'").get())
+      throw new HttpError(400, "正文引用的问答组不存在。");
+    const readGroup = database.prepare("SELECT id FROM qa_groups WHERE id=? AND user_id=? AND document_id=?");
+    if (refs.some((id) => !documentId || !readGroup.get(id, userId, documentId)))
+      throw new HttpError(400, "正文引用了不属于当前账号或文章的问答组。");
+  }
 
   app.get("/api/health", async (req, res) => {
     const authorization = await ai.statusForUser(req.user?.id);
     return res.json({
       status: "ok",
       storage: "sqlite",
-      stage: 2,
+      stage: 3,
       capabilities: {
         textImport: true,
         imageImport: true,
@@ -317,21 +390,22 @@ export function createApp({
     const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
     if (query.length > 200) throw new HttpError(400, "搜索词最多 200 个字符。");
     let rows;
+    const includeBookArticles = req.query.all === "1";
     if (query) {
       const pattern = `%${query.replaceAll("!", "!!").replaceAll("%", "!%").replaceAll("_", "!_")}%`;
       rows = database
         .prepare(
           `SELECT * FROM documents
-        WHERE owner_id=? AND book_id IS NULL AND (title LIKE ? ESCAPE '!' OR plain_text LIKE ? ESCAPE '!')
+        WHERE owner_id=? AND (?=1 OR book_id IS NULL) AND (title LIKE ? ESCAPE '!' OR plain_text LIKE ? ESCAPE '!')
         ORDER BY updated_at DESC, id ASC`,
         )
-        .all(req.user.id, pattern, pattern);
+        .all(req.user.id, includeBookArticles ? 1 : 0, pattern, pattern);
     } else {
       rows = database
         .prepare(
-          "SELECT * FROM documents WHERE owner_id=? AND book_id IS NULL ORDER BY updated_at DESC, id ASC",
+          "SELECT * FROM documents WHERE owner_id=? AND (?=1 OR book_id IS NULL) ORDER BY updated_at DESC, id ASC",
         )
-        .all(req.user.id);
+        .all(req.user.id, includeBookArticles ? 1 : 0);
     }
     res.json({ documents: rows.map(summary) });
   });
@@ -342,24 +416,12 @@ export function createApp({
     if (bookId !== undefined && (typeof bookId !== "string" || !bookId))
       throw new HttpError(400, "请选择有效的书籍。");
     if (bookId !== undefined) books.requireBook(req.user.id, bookId);
-    const sourceImageId = req.body.sourceImageId || null;
-    let recognition = null;
-    if (sourceImageId) {
-      await ai.getImage(req.user.id, sourceImageId);
-      const storedDraft = database
-        .prepare(
-          "SELECT draft_json FROM image_drafts WHERE image_id=? AND user_id=?",
-        )
-        .get(sourceImageId, req.user.id);
-      if (!storedDraft)
-        throw new HttpError(400, "这张图片尚未完成识别，请先识别再保存草稿。");
-      recognition = JSON.parse(storedDraft.draft_json);
-    }
-    const blocks = parseContent(
-      input.content,
-      recognition?.annotation?.blocks || recognition?.blocks || [],
-      req.body.manualReadings,
-    );
+    const sourceImages = await articleImages(req.user.id, req.body);
+    const sourceImageId = sourceImages[0]?.id || null;
+    const recognition = sourceImages[0]?.recognition || null;
+    const body = articleBody(input, recognition?.annotation?.blocks || recognition?.blocks || [], req.body.manualReadings, sourceImages);
+    const blocks = body.blocks;
+    validateQaReferences(body.html, req.user.id, null);
     const id = randomUUID();
     const now = new Date().toISOString();
     books.transaction(() => {
@@ -371,8 +433,8 @@ export function createApp({
         .prepare(
           `INSERT INTO documents
         (id, title, kind, orientation, blocks_json, plain_text, revision, created_at, updated_at, owner_id,
-         source_image_id, recognition_json, book_id, page_position)
-        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+         source_image_id, recognition_json, book_id, page_position, body_html, body_hash, source_images_json)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -388,6 +450,9 @@ export function createApp({
           recognition ? JSON.stringify(recognition) : null,
           bookId ?? null,
           position,
+          body.html,
+          body.hash,
+          JSON.stringify(sourceImages),
         );
       if (bookId !== undefined) books.touch(req.user.id, bookId, now);
     });
@@ -398,7 +463,7 @@ export function createApp({
     res.json(fromRow(requireDocument(req.user.id, req.params.id))),
   );
 
-  app.put("/api/documents/:id", (req, res) => {
+  app.put("/api/documents/:id", async (req, res) => {
     const old = requireDocument(req.user.id, req.params.id);
     const input = validateInput(req.body, true);
     if (input.revision !== old.revision) {
@@ -415,11 +480,11 @@ export function createApp({
       throw new HttpError(409, "这页已经属于一本书，不能通过编辑移动或移出书籍。");
     const bookId = old.book_id || requestedBookId || null;
     if (bookId) books.requireBook(req.user.id, bookId);
-    const blocks = parseContent(
-      input.content,
-      JSON.parse(old.blocks_json),
-      req.body.manualReadings,
-    );
+    const previous = fromRow(old);
+    const sourceImages = await articleImages(req.user.id, req.body, previous.sourceImages);
+    const body = articleBody(input, previous.blocks, req.body.manualReadings, sourceImages, previous.bodyHtml);
+    const blocks = body.blocks;
+    validateQaReferences(body.html, req.user.id, old.id);
     books.transaction(() => {
       if (bookId) books.requireBook(req.user.id, bookId);
       const position = old.book_id ? old.page_position : bookId ? database.prepare(
@@ -429,7 +494,8 @@ export function createApp({
         .prepare(
           `UPDATE documents SET title = ?, kind = ?, orientation = ?,
         blocks_json = ?, plain_text = ?, revision = revision + 1, updated_at = ?,
-        book_id = ?, page_position = ?
+        book_id = ?, page_position = ?, body_html = ?, body_hash = ?, source_images_json = ?,
+        source_image_id = ?, recognition_json = ?
         WHERE id = ? AND revision = ?`,
         )
         .run(
@@ -441,6 +507,11 @@ export function createApp({
           new Date().toISOString(),
           bookId,
           position,
+          body.html,
+          body.hash,
+          JSON.stringify(sourceImages),
+          sourceImages[0]?.id || null,
+          sourceImages[0]?.recognition ? JSON.stringify(sourceImages[0].recognition) : null,
           old.id,
           input.revision,
         );
@@ -467,6 +538,8 @@ export function createApp({
           "这篇材料已在其他页面修改，请重新打开最新版本后再决定是否删除。",
         );
       }
+      if (database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='qa_groups'").get())
+        database.prepare("DELETE FROM qa_groups WHERE document_id=? AND user_id=?").run(document.id, req.user.id);
       database.prepare("DELETE FROM conversations WHERE document_id=? AND user_id=?").run(document.id, req.user.id);
       if (document.book_id) {
         books.reindex(req.user.id, document.book_id);

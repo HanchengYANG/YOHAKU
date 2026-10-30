@@ -8,11 +8,15 @@ import ImportProgress from "./ImportProgress.jsx";
 const allowedTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
 const maxBytes = 12 * 1024 * 1024;
 
-export default function ImageImport({ onCancel, onReady, onDirty }) {
+export default function ImageImport({ onCancel, onReady, onDirty, articles = [], initialTargetId = null }) {
+  const [targetId, setTargetId] = useState(initialTargetId || "");
+  const [appendMode, setAppendMode] = useState("new");
+  const finish = (draft) => onReady({...draft, appendToDocumentId:targetId || null, appendMode});
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState("");
   const [previewError, setPreviewError] = useState(false);
   const [image, setImage] = useState(null);
+  const [annotatedDraft, setAnnotatedDraft] = useState(null);
   const [recognizedDraft, setRecognizedDraft] = useState(null);
   const [phase, setPhase] = useState("");
   const [failedPhase, setFailedPhase] = useState("");
@@ -73,7 +77,7 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
       setError("");
       setFile(selected);
       setImage(null);
-      setRecognizedDraft(null);
+      setRecognizedDraft(null); setAnnotatedDraft(null);
       setFailedPhase("");
       setUploadPercent(null);
       setProgressStartedAt(null);
@@ -169,7 +173,7 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
       activePhase = "annotate";
       setPhase("annotate");
       const annotationStartedAt = performance.now();
-      const annotated = await api(`/images/${encodeURIComponent(uploaded.id)}/annotate`, {
+      const annotated = annotatedDraft || await api(`/images/${encodeURIComponent(uploaded.id)}/annotate`, {
         method: "POST",
         body: JSON.stringify({ content: draft.content, manualReadings: [] }),
         signal: controller.signal,
@@ -177,15 +181,18 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
       if (!mounted.current || controller.signal.aborted) return;
       if (!Array.isArray(annotated?.blocks) || plainText(annotated.blocks) !== plainText(draft.blocks))
         throw new Error("注音结果改变了正文，已拒绝应用；已完成的正文保留，请重试注音。");
+      setAnnotatedDraft(annotated);
+      if (targetId && appendMode === "continue") { activePhase = "sentences"; setPhase("sentences"); }
       if (mounted.current) {
         onDirty?.(false);
-        onReady({ ...annotated, sourceImageId: uploaded.id,
+        await finish({ ...annotated, sourceImageId: uploaded.id,
           importStartedAt: importStartedAt.current, annotationStartedAt,
           autoAnnotationCompleted: true });
       }
     } catch (e) {
       if (mounted.current && e.name !== "AbortError") {
         setFailedPhase(activePhase);
+        onDirty?.(true);
         setError(
           e instanceof TypeError
             ? "无法连接本机服务，所选图片已保留，请重试。"
@@ -198,12 +205,16 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
     }
   };
 
-  const reviewBody = () => {
+  const reviewBody = async () => {
     if (pending.current || !recognizedDraft || !image) return;
-    onDirty?.(false);
-    onReady({ ...recognizedDraft, sourceImageId: image.id,
-      importStartedAt: importStartedAt.current, autoAnnotationCompleted: false,
-      annotationError: error });
+    setPhase(targetId && appendMode === "continue" ? "sentences" : "annotate");
+    try {
+      await finish({ ...recognizedDraft, sourceImageId: image.id,
+        importStartedAt: importStartedAt.current, autoAnnotationCompleted: false,
+        annotationError: error });
+      onDirty?.(false);
+    } catch (cause) {setError(cause.message); onDirty?.(true);}
+    finally {if(mounted.current)setPhase("");}
   };
 
   const busy = !!phase;
@@ -237,11 +248,28 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
       <p className="stage2-description">
         截图可直接粘贴，也可拖入图片或从设备选择照片。识别与注音会自动连续完成，再对照原图校对并保存到书架。
       </p>
+      <label className="book-target image-article-target">识别后保存到
+        <select aria-label="图片所属文章" disabled={busy} value={targetId} onChange={(event) => setTargetId(event.target.value)}>
+          <option value="">新建文章</option>
+          {articles.map((article) => <option key={article.id} value={article.id}>追加到《{article.title}》</option>)}
+        </select>
+      </label>
+      {targetId && <label className="book-target image-article-target">追加正文方式
+        <select aria-label="追加正文方式" value={appendMode} disabled={busy} onChange={(event) => setAppendMode(event.target.value)}>
+          <option value="new">作为新句</option><option value="continue">接入末句</option>
+        </select>
+      </label>}
       {(phase || failedPhase) && (
         <div ref={progressPanel}>
           <ImportProgress phase={phase || failedPhase} startedAt={progressStartedAt}
             uploadPercent={uploadPercent} failed={!phase && !!failedPhase}
-            completedSteps={recognizedDraft ? ["upload", "recognize"] : image ? ["upload"] : []} />
+            steps={targetId && appendMode === "continue" ? [
+              {id:"upload",label:"上传图片",copy:"正在发送原图。"},
+              {id:"recognize",label:"识别正文",copy:"正在识别并校正正文。"},
+              {id:"annotate",label:"生成注音",copy:"正在参考原图补全读音。"},
+              {id:"sentences",label:"整理句子",copy:"正在初始化新增正文的句子，将第一句接入文章末句。"},
+            ] : undefined}
+            completedSteps={annotatedDraft ? ["upload","recognize","annotate"] : recognizedDraft ? ["upload", "recognize"] : image ? ["upload"] : []} />
         </div>
       )}
       {error && (
@@ -338,6 +366,8 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
                 ? "正在识别正文（1/2）…"
                 : phase === "annotate"
                   ? "正在参考原图注音（2/2）…"
+                  : phase === "sentences" ? "正在整理追加句子…"
+                  : annotatedDraft ? "重试整理追加正文"
                   : recognizedDraft
                     ? "重试注音"
                     : image
@@ -350,7 +380,7 @@ export default function ImageImport({ onCancel, onReady, onDirty }) {
             </button>
           )}
           <p className="image-recognition-state" role="status">
-            {phase === "recognize"
+            {phase === "sentences" ? "正在保留原句、原图来源和振假名，整理新旧正文的句子边界。" : phase === "recognize"
               ? "正在识别并校正正文，随后会自动开始参考原图注音。"
               : phase === "annotate"
                 ? "正文已完成，正在参考原图生成注音；两步完成后打开校对草稿。"

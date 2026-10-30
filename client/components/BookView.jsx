@@ -38,21 +38,21 @@ export default function BookView({
     <section className="book-page stage2-page" aria-busy={busy}>
       <div className="stage2-heading book-heading">
         <div>
-          <span className="eyebrow">一本书，逐页读</span>
+          <span className="eyebrow">按文章阅读</span>
           <h1>{book.title}</h1>
-          <p className="book-page-count">{pages.length} 页</p>
+          <p className="book-page-count">{pages.length} 篇</p>
         </div>
         <div className="book-actions">
           <button type="button" className="button primary" disabled={busy} onClick={onAddImage}>
-            添加图片页
+            添加图片文章
           </button>
           <button type="button" className="button secondary" disabled={busy} onClick={onAddText}>
-            添加文字页
+            添加文字文章
           </button>
         </div>
       </div>
       <p className="stage2-description">
-        每次导入一张图片，校对后存为一页。各页保留自己的正文、注音、原图和讨论，可按阅读顺序调整。
+        一本书包含多篇文章，每篇可关联多张来源图片。正文连续阅读，文章顺序可调整。
       </p>
       <form className="book-rename" onSubmit={(event) => {
         event.preventDefault();
@@ -71,24 +71,24 @@ export default function BookView({
       </form>
       {error && <p className="stage2-error" role="alert">{error}</p>}
       {pages.length ? (
-        <ol className="book-page-list" aria-label="书籍页面列表">
+        <ol className="book-page-list" aria-label="书籍文章列表">
           {pages.map((page, index) => (
             <li className="book-page-row" key={page.id}>
               <span className="book-page-number" aria-hidden="true">{index + 1}</span>
               <button type="button" className="book-page-open"
-                aria-label={`打开第 ${index + 1} 页：${page.title}`}
+                aria-label={`打开第 ${index + 1} 篇：${page.title}`}
                 disabled={busy} onClick={() => onOpenPage(page.id)}>
                 <strong>{page.title}</strong>
-                <span>{page.sourceImageId ? "图片页" : "文字页"} · {page.charCount} 字 · {page.rubyCount} 处注音</span>
+                <span>{page.sourceImageId ? "图片文章" : "文字文章"} · {page.charCount} 字 · {page.rubyCount} 处注音</span>
               </button>
               <div className="book-page-order">
                 <button type="button" className="button subtle"
-                  aria-label={`上移第 ${index + 1} 页`} disabled={busy || index === 0}
+                  aria-label={`上移第 ${index + 1} 篇`} disabled={busy || index === 0}
                   onClick={() => movePage(index, -1)}>
                   上移
                 </button>
                 <button type="button" className="button subtle"
-                  aria-label={`下移第 ${index + 1} 页`} disabled={busy || index === pages.length - 1}
+                  aria-label={`下移第 ${index + 1} 篇`} disabled={busy || index === pages.length - 1}
                   onClick={() => movePage(index, 1)}>
                   下移
                 </button>
@@ -98,8 +98,8 @@ export default function BookView({
         </ol>
       ) : (
         <div className="book-empty">
-          <h2>先放进第一页</h2>
-          <p>选择「添加图片页」导入一张照片或截图，也可以添加文字页。保存后就能在这里逐页阅读。</p>
+          <h2>先添加第一篇文章</h2>
+          <p>选择「添加图片文章」导入一张照片或截图，也可以添加文字文章。保存后就能在这里按文章阅读。</p>
         </div>
       )}
       <footer className="book-footer">

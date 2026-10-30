@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
 import { ensureOwnerSession, testOwner } from "./session.mjs";
+import { selectArticleText, selectionFor } from "./article-selection.mjs";
 
 const accountFlowTitle = "网站账号登录、退出与邀请码注册使用真实会话和资料隔离";
 let ownerCookies = [];
@@ -49,6 +50,14 @@ async function getDocument(page, id) {
   const response = await page.request.get(`/api/documents/${id}`);
   expect(response.ok()).toBe(true);
   return response.json();
+}
+
+async function discussionInput(page, id, quote, question) {
+  let document = await getDocument(page, id);
+  const segmented = await page.request.post(`/api/documents/${id}/sentences`, {data:{revision:document.revision,bodyHash:document.bodyHash}});
+  expect(segmented.ok()).toBe(true);
+  document = await getDocument(page, id);
+  return {selection:selectionFor(document,quote),question};
 }
 
 async function importDraft(page, filePath = imagePath) {
@@ -729,11 +738,7 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
   const browserErrors = [];
   page.on("pageerror", (error) => browserErrors.push(error.message));
   await enableTestAccount(page);
-  await page.goto("/");
-  await page
-    .getByRole("main")
-    .getByRole("button", { name: "导入图片", exact: true })
-    .click();
+  await openImageImport(page);
   await page
     .getByLabel("选择日语图片", { exact: true })
     .setInputFiles(imagePath);
@@ -928,11 +933,11 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
   expect(await (await page.request.get(imageUrl)).body()).toEqual(
     await readFile(imagePath),
   );
-  await page.getByRole("button", { name: "问 AI", exact: true }).click();
+  await selectArticleText(page, "背中");
+  const popup = page.getByRole("dialog", {name:"划词提问"});
+  await popup.getByRole("button", {name:"自定义问题",exact:true}).click();
+  await popup.getByRole("textbox", {name:"选区自定义问题"}).fill("背中在这里是什么意思？");
   const chat = page.getByRole("region", { name: "原文 AI 讨论", exact: true });
-  await chat
-    .getByRole("textbox", { name: "向 AI 提问", exact: true })
-    .fill("背中在这里是什么意思？");
   let releaseAnswer;
   const answerGate = new Promise((resolve) => { releaseAnswer = resolve; });
   const answerRoute = `**/api/documents/${documentId}/conversations`;
@@ -941,11 +946,11 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
     await route.continue();
   });
   try {
-    await chat.getByRole("button", { name: "发送问题", exact: true }).click();
+    await popup.getByRole("button", { name: "发送", exact: true }).click();
     const progress = chat.getByRole("region", { name: "AI回答进度", exact: true });
     await expect(progress).toHaveAttribute("data-phase", "reply");
     expect(await progress.getByRole("progressbar", { name: "生成回答进度", exact: true }).getAttribute("aria-valuenow")).toBeNull();
-    await expect(chat.getByRole("button", { name: "关闭 AI 讨论", exact: true })).toBeDisabled();
+    await expect(chat.getByRole("textbox", { name: "向 AI 提问", exact: true })).toBeDisabled();
     await page.screenshot({ path: `artifacts/design-2026-10-28/answer-progress-${info.project.name}.png`, fullPage: true, animations: "disabled" });
     releaseAnswer();
     await expect(chat.locator(".chat-message.assistant")).toHaveCount(1);
@@ -960,7 +965,7 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
   await chat
     .getByRole("textbox", { name: "向 AI 提问", exact: true })
     .fill("再给一个相关例句。");
-  await chat.getByRole("button", { name: "继续提问", exact: true }).click();
+  await chat.getByRole("button", { name: "发送问题", exact: true }).click();
   await expect(chat.locator(".chat-message.assistant")).toHaveCount(2);
   await expect(chat.locator(".chat-message.assistant").last()).toContainText(
     "测试回合 2",
@@ -971,7 +976,7 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
     animations: "disabled",
   });
   await chat.getByRole("button", { name: "关闭 AI 讨论", exact: true }).click();
-  await page.getByRole("button", { name: "问 AI", exact: true }).click();
+  await page.getByRole("button", { name: "对话记录", exact: true }).click();
   await expect(chat.locator(".chat-message")).toHaveCount(4);
   const conversations = await (
     await page.request.get(`/api/documents/${documentId}/conversations`)
@@ -984,7 +989,7 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
     ),
   ).toBe(true);
   const deleted = await page.request.delete(`/api/documents/${documentId}`, {
-    data: { revision: saved.revision },
+    data: { revision: (await getDocument(page, documentId)).revision },
   });
   expect(deleted.status()).toBe(204);
   await page.request.post("/api/ai/logout");
@@ -1553,7 +1558,7 @@ test("多页书籍逐张保存图片，翻页重开保留各页原图注音与�
     await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
     bookId = await page.evaluate(() => location.hash.slice("#book/".length));
     expect(bookId).toMatch(/^[a-f0-9-]+$/);
-    await page.getByRole("button", { name: "添加图片页", exact: true }).click();
+    await page.getByRole("button", { name: "添加图片文章", exact: true }).click();
     await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(imagePath);
     await page.getByRole("button", { name: "识别并注音", exact: true }).click();
     await expect(page.getByLabel("保存到书籍", { exact: true })).toHaveValue(bookId);
@@ -1574,16 +1579,17 @@ test("多页书籍逐张保存图片，翻页重开保留各页原图注音与�
     await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
     await expect(page.getByRole("heading", { name: "第一张图片页", exact: true })).toBeVisible();
     const firstId = await page.evaluate(() => location.hash.slice(1));
-    const first = await getDocument(page, firstId);
+    let first = await getDocument(page, firstId);
     expect(first.bookId).toBe(bookId);
     expect(first.position).toBe(1);
     expect(first.content).toContain("{空|くう}");
     expect(first.blocks[0].segments.find((segment) => segment.text === "空").origin).toBe("manual");
     const discussionResponse = await page.request.post(`/api/documents/${firstId}/conversations`, {
-      data: { quote: "空", question: "第一张图片页的独立讨论" },
+      data: await discussionInput(page, firstId, "空", "第一张图片页的独立讨论"),
     });
     expect(discussionResponse.status()).toBe(201);
     const discussion = await discussionResponse.json();
+    first = await getDocument(page, firstId);
 
     // Append from the ordinary image importer to exercise the explicit parent
     // selector as well as the preselected book context used for the first page.
@@ -1620,28 +1626,28 @@ test("多页书籍逐张保存图片，翻页重开保留各页原图注音与�
     expect(listedBooks.books.map((item) => item.id)).toContain(bookId);
 
     await page.reload();
-    const navigation = page.getByRole("navigation", { name: "书页导航", exact: true });
+    const navigation = page.getByRole("navigation", { name: "文章导航", exact: true });
     const article = page.getByRole("article", { name: "日语原文", exact: true });
-    await expect(navigation.getByLabel("书籍页面", { exact: true })).toHaveValue(secondId);
-    await expect(navigation.getByRole("button", { name: "下一页", exact: true })).toBeDisabled();
+    await expect(navigation.getByLabel("书籍文章", { exact: true })).toHaveValue(secondId);
+    await expect(navigation.getByRole("button", { name: "下一篇", exact: true })).toBeDisabled();
     await expect(article.locator("rt")).toContainText(["そら"]);
-    await page.getByRole("button", { name: "问 AI", exact: true }).click();
-    await expect(page.getByLabel("选择已有讨论", { exact: true })).toHaveValue("");
+    await page.getByRole("button", { name: "对话记录", exact: true }).click();
+    await expect(page.locator(".qa-group")).toHaveCount(0);
     await expect(page.locator(".chat-message")).toHaveCount(0);
     await page.getByRole("button", { name: "关闭 AI 讨论", exact: true }).click();
 
-    await navigation.getByRole("button", { name: "上一页", exact: true }).click();
+    await navigation.getByRole("button", { name: "上一篇", exact: true }).click();
     await expect(page.getByRole("heading", { name: "第一张图片页", exact: true })).toBeVisible();
-    await expect(navigation.getByLabel("书籍页面", { exact: true })).toHaveValue(firstId);
-    await expect(navigation.getByRole("button", { name: "上一页", exact: true })).toBeDisabled();
+    await expect(navigation.getByLabel("书籍文章", { exact: true })).toHaveValue(firstId);
+    await expect(navigation.getByRole("button", { name: "上一篇", exact: true })).toBeDisabled();
     await expect(article.locator("rt")).toContainText(["くう"]);
-    await page.getByRole("button", { name: "问 AI", exact: true }).click();
-    await expect(page.getByLabel("选择已有讨论", { exact: true })).toHaveValue(discussion.id);
+    await page.getByRole("button", { name: "对话记录", exact: true }).click();
+    await expect(page.locator(".qa-group")).toHaveCount(discussion.groups.length);
     await expect(page.locator(".chat-message.user")).toContainText("第一张图片页的独立讨论");
     await page.getByRole("button", { name: "关闭 AI 讨论", exact: true }).click();
-    await navigation.getByRole("button", { name: "下一页", exact: true }).click();
+    await navigation.getByRole("button", { name: "下一篇", exact: true }).click();
     await expect(page.getByRole("heading", { name: "第二张图片页", exact: true })).toBeVisible();
-    await navigation.getByLabel("书籍页面", { exact: true }).selectOption(firstId);
+    await navigation.getByLabel("书籍文章", { exact: true }).selectOption(firstId);
     await expect(page.getByRole("heading", { name: "第一张图片页", exact: true })).toBeVisible();
     expect(await getDocument(page, firstId)).toEqual(first);
     expect(await getDocument(page, secondId)).toEqual(second);
@@ -1651,7 +1657,7 @@ test("多页书籍逐张保存图片，翻页重开保留各页原图注音与�
       animations: "disabled",
     });
     await navigation.getByRole("button", { name: `返回书籍：${title}`, exact: true }).click();
-    await expect(page.getByLabel("书籍页面列表", { exact: true }).getByRole("listitem")).toHaveCount(2);
+    await expect(page.getByLabel("书籍文章列表", { exact: true }).getByRole("listitem")).toHaveCount(2);
     await page.screenshot({
       path: `artifacts/books-two-image-pages-${info.project.name}.png`,
       fullPage: true,
@@ -1670,13 +1676,14 @@ test("既有材料原地转为书籍，保留原图注音讨论并可追加文�
   let firstId;
   const title = `原地转换书籍-${info.project.name}`;
   try {
-    const { document: original } = await createImageDocument(page);
+    let { document: original } = await createImageDocument(page);
     firstId = original.id;
     const conversationResponse = await page.request.post(`/api/documents/${firstId}/conversations`, {
-      data: { quote: "背中", question: "转换书籍前的原有讨论" },
+      data: await discussionInput(page, firstId, "背中", "转换书籍前的原有讨论"),
     });
     expect(conversationResponse.status()).toBe(201);
     const originalDiscussion = await conversationResponse.json();
+    await page.reload();
     await page.getByRole("button", { name: "转为书籍", exact: true }).click();
     await expect(page.getByRole("textbox", { name: "书籍名称", exact: true })).toHaveValue(original.title);
     await page.getByRole("textbox", { name: "书籍名称", exact: true }).fill(title);
@@ -1693,7 +1700,7 @@ test("既有材料原地转为书籍，保留原图注音讨论并可追加文�
     const conversations = await (await page.request.get(`/api/documents/${firstId}/conversations`)).json();
     expect(conversations.conversations).toEqual([originalDiscussion]);
 
-    await page.getByRole("button", { name: "添加文字页", exact: true }).click();
+    await page.getByRole("button", { name: "添加文字文章", exact: true }).click();
     await expect(page.getByLabel("保存到书籍", { exact: true })).toHaveValue(bookId);
     await page.getByRole("textbox", { name: "材料标题", exact: true }).fill("补充文字页");
     await page.getByRole("textbox", { name: "日语正文", exact: true }).fill("これは{追加|ついか}した{本文|ほんぶん}です。");
@@ -1705,12 +1712,12 @@ test("既有材料原地转为书籍，保留原图注音讨论并可追加文�
     expect(added.position).toBe(2);
     expect(added.sourceImageId).toBeNull();
     await page.reload();
-    const navigation = page.getByRole("navigation", { name: "书页导航", exact: true });
-    await expect(navigation.getByLabel("书籍页面", { exact: true })).toHaveValue(secondId);
-    await navigation.getByRole("button", { name: "上一页", exact: true }).click();
+    const navigation = page.getByRole("navigation", { name: "文章导航", exact: true });
+    await expect(navigation.getByLabel("书籍文章", { exact: true })).toHaveValue(secondId);
+    await navigation.getByRole("button", { name: "上一篇", exact: true }).click();
     await expect(page.getByRole("heading", { name: original.title, exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "问 AI", exact: true }).click();
-    await expect(page.getByLabel("选择已有讨论", { exact: true })).toHaveValue(originalDiscussion.id);
+    await page.getByRole("button", { name: "对话记录", exact: true }).click();
+    await expect(page.locator(".qa-group")).toHaveCount(originalDiscussion.groups.length);
     await expect(page.locator(".chat-message.user")).toContainText("转换书籍前的原有讨论");
   } finally {
     if (bookId) await removeTestBook(page, bookId);
@@ -1731,13 +1738,15 @@ test("校对既有独立材料时新建并选择书籍，书名回车不提前�
   let documentId;
   const title = `校对归书-${info.project.name}`;
   try {
-    const { document: original } = await createImageDocument(page);
+    let { document: original } = await createImageDocument(page);
     documentId = original.id;
     const discussionResponse = await page.request.post(`/api/documents/${documentId}/conversations`, {
-      data: { quote: "空", question: "校对归书前的独立讨论" },
+      data: await discussionInput(page, documentId, "空", "校对归书前的独立讨论"),
     });
     expect(discussionResponse.status()).toBe(201);
     const discussion = await discussionResponse.json();
+    original = await getDocument(page, documentId);
+    await page.reload();
     await page.getByRole("button", { name: "校对文字与注音", exact: true }).click();
     const editor = page.locator(".editor-page");
     const target = editor.getByLabel("保存到书籍", { exact: true });
@@ -1787,8 +1796,8 @@ test("校对既有独立材料时新建并选择书籍，书名回车不提前�
     }
     await page.getByRole("button", { name: "打开所属书籍", exact: true }).click();
     await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
-    await page.getByRole("button", { name: `打开第 1 页：${original.title}`, exact: true }).click();
-    await expect(page.getByRole("navigation", { name: "书页导航", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: `打开第 1 篇：${original.title}`, exact: true }).click();
+    await expect(page.getByRole("navigation", { name: "文章导航", exact: true })).toBeVisible();
     const saved = await getDocument(page, documentId);
     expect(saved.id).toBe(original.id);
     expect(saved.bookId).toBe(bookId);
@@ -1800,7 +1809,7 @@ test("校对既有独立材料时新建并选择书籍，书名回车不提前�
     const conversations = await (await page.request.get(`/api/documents/${documentId}/conversations`)).json();
     expect(conversations.conversations).toEqual([discussion]);
     await page.reload();
-    await expect(page.getByRole("navigation", { name: "书页导航", exact: true }).getByLabel("书籍页面", { exact: true })).toHaveValue(documentId);
+    await expect(page.getByRole("navigation", { name: "文章导航", exact: true }).getByLabel("书籍文章", { exact: true })).toHaveValue(documentId);
     await page.getByRole("button", { name: "校对文字与注音", exact: true }).click();
     await expect(page.getByLabel("保存到书籍", { exact: true })).toHaveCount(0);
   } finally {
