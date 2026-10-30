@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import api from "./api.mjs";
-import { blocksToHtml, bodyRanges, htmlToBlocks, appendImageBodyHtml } from "../shared/article-html.mjs";
+import { blocksToHtml, hasCompleteSentenceBoundaries, htmlToBlocks, appendImageBodyHtml } from "../shared/article-html.mjs";
 import { parseText, serializeBlocks } from "../shared/document.mjs";
 import { kinds } from "./constants.mjs";
 import Icon from "./components/Icon.jsx";
 import Welcome from "./components/Welcome.jsx";
 import Reader from "./components/Reader.jsx";
+import ReadingPreparation from "./components/ReadingPreparation.jsx";
 import Editor from "./components/Editor.jsx";
 import AISettings from "./components/AISettings.jsx";
 import ImageImport from "./components/ImageImport.jsx";
@@ -144,6 +145,8 @@ function Workspace({ user, onLoggedOut }) {
   const pendingSegmentations = useRef(new Map());
   const automaticSegmentationAttempt = useRef(null);
   const currentView = useRef(null);
+  const currentReadingDocument = document?.id === activeId ? document : null;
+  const readingReady = !!currentReadingDocument && hasCompleteSentenceBoundaries(currentReadingDocument.bodyHtml || blocksToHtml(currentReadingDocument.blocks));
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -306,7 +309,7 @@ function Workspace({ user, onLoggedOut }) {
   useEffect(() => {
     if (!document || activeId !== document.id || draft || saving || (panel && panel !== "chat")) return;
     const html = document.bodyHtml || blocksToHtml(document.blocks);
-    if (bodyRanges(html).sentences.length) return;
+    if (hasCompleteSentenceBoundaries(html)) return;
     const attempt = `${document.id}:${document.revision}:${detailRefresh}`;
     if (automaticSegmentationAttempt.current === attempt) return;
     automaticSegmentationAttempt.current = attempt;
@@ -351,7 +354,7 @@ function Workspace({ user, onLoggedOut }) {
     setError("");
     try {
       const attempt = `${document.id}:${document.revision}:${detailRefresh}`;
-      if (!bodyRanges(document.bodyHtml || blocksToHtml(document.blocks)).sentences.length && automaticSegmentationAttempt.current !== attempt) {
+      if (!hasCompleteSentenceBoundaries(document.bodyHtml || blocksToHtml(document.blocks)) && automaticSegmentationAttempt.current !== attempt) {
         await segmentDocument(document, false);
       } else {
         // Initialization persists a new revision. Wait before opening a draft,
@@ -410,13 +413,6 @@ function Workspace({ user, onLoggedOut }) {
     setDirty(false);
     setNotice("任务已提交，可以离开此页面");
   };
-  const taskDeleted = () => {
-    if (!mounted.current) return;
-    setImportTask(null); setPanel(null); setDraft(null); setDirty(false); setError("");
-    setActiveId("tasks"); history.replaceState(null, "", "#tasks");
-    notifyImageTasksChanged();
-    setNotice("任务已删除");
-  };
   const resumeTaskDraft = (task) => {
     setImportTask(task);
     setImportSession((current) => current + 1);
@@ -441,7 +437,7 @@ function Workspace({ user, onLoggedOut }) {
       });
       let next = { ...value, bodyHtml: addition, sourceImages: images,
         sourceImageId: images[0]?.id, bookId: bookId || undefined,
-        ...(bookId ? { kind: "book" } : {}), initializeSentences: true,
+        ...(bookId ? { kind: "book" } : {}), initializeSentences: !hasCompleteSentenceBoundaries(addition),
         appendedImageId: value.appendedImageId || images[0]?.id };
       const targetId = Object.hasOwn(value, "appendToDocumentId") ? value.appendToDocumentId : appendTargetId;
       if (targetId) {
@@ -489,24 +485,44 @@ function Workspace({ user, onLoggedOut }) {
     let pending = pendingSegmentations.current.get(target.id);
     if (!pending) {
       pending = (async () => {
-        await api(`/documents/${encodeURIComponent(target.id)}/sentences`, {
-          method: "POST", body: JSON.stringify({ revision: target.revision, bodyHash: target.bodyHash, force }),
-        });
-        return api(`/documents/${encodeURIComponent(target.id)}`);
+        let latest = target;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            await api(`/documents/${encodeURIComponent(target.id)}/sentences`, {
+              method: "POST", body: JSON.stringify({ revision: latest.revision, bodyHash: latest.bodyHash, force }),
+            });
+            latest = await api(`/documents/${encodeURIComponent(target.id)}`);
+            if (!hasCompleteSentenceBoundaries(latest.bodyHtml || blocksToHtml(latest.blocks)))
+              throw new Error("分句结果尚未覆盖全文，请重试。");
+            return latest;
+          } catch (cause) {
+            if (cause.status === 409) {
+              latest = await api(`/documents/${encodeURIComponent(target.id)}`);
+              if (hasCompleteSentenceBoundaries(latest.bodyHtml || blocksToHtml(latest.blocks))) return latest;
+              if (attempt === 0) continue;
+            }
+            cause.latestDocument = latest;
+            throw cause;
+          }
+        }
       })();
       pendingSegmentations.current.set(target.id, pending);
     }
     try {
       const updated = await pending;
-      if (currentView.current.activeId === target.id)
-        setDocument((current) => current?.id === target.id && current.revision === target.revision ? updated : current);
+      if (mounted.current && currentView.current.activeId === target.id)
+        setDocument((current) => current?.id === target.id && current.revision <= updated.revision ? updated : current);
       return updated;
     } catch (cause) {
-      if (currentView.current.activeId === target.id)
+      if (mounted.current && currentView.current.activeId === target.id) {
+        const latest = cause.latestDocument || target;
+        automaticSegmentationAttempt.current = `${latest.id}:${latest.revision}:${detailRefresh}`;
+        setDocument((current) => current?.id === target.id && current.revision <= latest.revision ? latest : current);
         setSegmentation((current) => current.request === request ? { ...current, error: `分句未完成，原文已保留：${cause.message}` } : current);
+      }
     } finally {
       if (pendingSegmentations.current.get(target.id) === pending) pendingSegmentations.current.delete(target.id);
-      setSegmentation((current) => current.request === request ? { ...current, busy: false } : current);
+      if (mounted.current) setSegmentation((current) => current.request === request ? { ...current, busy: false } : current);
     }
   };
   const save = async (value) => {
@@ -539,7 +555,7 @@ function Workspace({ user, onLoggedOut }) {
       setDirty(false);
       setRefresh((n) => n + 1);
       setNotice(result.bookId ? "已保存到书籍" : "已保存到书架");
-      if (!value.id || value.initializeSentences) void segmentDocument(result, false);
+      if (!hasCompleteSentenceBoundaries(result.bodyHtml || blocksToHtml(result.blocks))) void segmentDocument(result, false);
     } catch (e) {
       if (mounted.current) {
         setError(e.message);
@@ -840,7 +856,6 @@ function Workspace({ user, onLoggedOut }) {
             initialTask={importTask}
             onTaskCreated={taskCreated}
             onSubmitted={taskSubmitted}
-            onDeleted={taskDeleted}
             onCancel={() => openDocument("tasks")}
             onDirty={setDirty}
             articles={articleTargets}
@@ -870,9 +885,9 @@ function Workspace({ user, onLoggedOut }) {
             onOpenDraft={resumeTaskDraft} onReady={imageReady}
             onBack={() => openDocument("tasks")} onDocumentOpen={openDocument} />
         ) : document ? (
-          <div className={`reader-workspace ${panel === "chat" ? "has-chat" : ""}`}>
+          <div className={`reader-workspace ${readingReady && panel === "chat" ? "has-chat" : ""}`}>
             <div className="reader-main-column">
-              {book ? (
+              {currentReadingDocument && book ? (
                 <BookNavigation
                   book={book}
                   currentPageId={document.id}
@@ -881,13 +896,13 @@ function Workspace({ user, onLoggedOut }) {
                   onAddImage={() => beginBookPage(true)}
                   disabled={saving || bookBusy}
                 />
-              ) : document.bookId ? (
+              ) : currentReadingDocument?.bookId ? (
                 <div className="book-promotion">
                   <button className="text-button" onClick={() => openBook(document.bookId)}>打开所属书籍</button>
                   <span>目录暂未加载，正文已保存，可重新打开书籍。</span>
                 </div>
               ) : null}
-              <Reader
+              {readingReady ? <Reader
                 document={document}
                 onEdit={beginEdit}
                 onDelete={remove}
@@ -915,9 +930,15 @@ function Workspace({ user, onLoggedOut }) {
                 setShowRuby={setShowRuby}
                 fontSize={fontSize}
                 setFontSize={setFontSize}
-              />
+              /> : <ReadingPreparation
+                document={currentReadingDocument}
+                error={segmentation.id === currentReadingDocument?.id ? segmentation.error : ""}
+                onRetry={() => segmentDocument(currentReadingDocument, false)}
+                onEdit={beginEdit}
+                onBack={() => openDocument("")}
+              />}
             </div>
-            {panel === "chat" && (
+            {readingReady && panel === "chat" && (
               <DocumentChat
                 document={document}
                 request={chatRequest} selectedGroupIds={selectedGroupIds}

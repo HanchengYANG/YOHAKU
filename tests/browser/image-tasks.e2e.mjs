@@ -4,8 +4,9 @@ import { readFile, writeFile, rename } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
 import { ensureOwnerSession } from "./session.mjs";
+import { discardFixtureTasks } from "./image-task-fixture.mjs";
 import { parseText } from "../../shared/document.mjs";
-import { bodyText, bodyRanges, blocksToHtml } from "../../shared/article-html.mjs";
+import { bodyText, bodyRanges, blocksToHtml, hasCompleteSentenceBoundaries } from "../../shared/article-html.mjs";
 
 const controlFile = new URL("../../artifacts/ai-e2e-data/image-runtime-controls.json", import.meta.url);
 let cookies = [], imageA, imageB;
@@ -20,16 +21,6 @@ const runtimeCalls = async () => {
   catch (error) { if (error.code === "ENOENT") return []; throw error; }
 };
 
-async function deleteTask(request, id) {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const response = await request.get(`/api/image-tasks/${id}`);
-    if (!response.ok()) return;
-    const task = await response.json();
-    const removed = await request.delete(`/api/image-tasks/${id}`, { data: { version: task.version } });
-    if (removed.status() !== 409) { expect(removed.ok()).toBe(true); return; }
-  }
-  throw new Error(`无法清理测试任务 ${id}`);
-}
 
 test.beforeAll(async () => {
   imageA = await sharp({ create: { width: 540, height: 720, channels: 3, background: "#f3eee3" } }).png().toBuffer();
@@ -50,8 +41,8 @@ test.beforeEach(async ({ page }) => {
   await controls();
 });
 test.afterEach(async ({ page }) => {
-  // Only clean up this test's work, preserving all other accounts and tasks.
-  for (const id of activeTasks) await deleteTask(page.request, id);
+  // Fixture teardown never bypasses product policy through a public route.
+  discardFixtureTasks(activeTasks);
   activeTasks.clear();
   await controls();
   const current = await page.request.get("/api/ai/status").catch(() => null);
@@ -193,34 +184,39 @@ test("注音持续失败可手工补充读音，识别正文与原图继续保�
   } finally { await removeDocument(page, saved.id); }
 });
 
-test("运行时不能人工处理，明确暂停后才可手动录入且迟到结果不会覆盖", async ({ page }, info) => {
-  await controls({ delayMs: 1200 });
+test("运行中禁止暂停和删除，只有出错暂停后才能人工处理或删除", async ({ page }, info) => {
+  await controls({ ocrFailures: "permanent", delayMs: 500 });
   await openImport(page);
-  const id = await upload(page, [photo(`停止-1-${info.project.name}.png`), photo(`停止-2-${info.project.name}.png`, imageB)]);
+  const id = await upload(page, [photo(`出错-1-${info.project.name}.png`), photo(`出错-2-${info.project.name}.png`, imageB)]);
+  await expect(page.getByRole("button", { name: "放弃导入草稿", exact: true })).toHaveCount(0);
+  const draft = await state(page, id);
+  expect(draft.canPause).toBe(false); expect(draft.canDelete).toBe(false);
+  expect((await page.request.delete(`/api/image-tasks/${id}`, { data: { version: draft.version } })).status()).toBe(409);
   await submit(page, id);
   await expect(page.getByRole("button", { name: /手动录入正文|先校对正文／手动注音|开始校对/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "暂停任务", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "删除任务", exact: true })).toHaveCount(0);
   const processing = await state(page, id);
+  expect(processing.canDelete).toBe(false); expect(processing.canPause).toBe(false);
+  for (const operation of ["pause", "cancel"]) {
+    expect((await page.request.post(`/api/image-tasks/${id}/${operation}`, { data: { version: processing.version } })).status()).toBe(409);
+  }
+  expect((await page.request.delete(`/api/image-tasks/${id}`, { data: { version: processing.version } })).status()).toBe(409);
   expect((await page.request.post(`/api/image-tasks/${id}/cancel`, { data: { version: processing.version, freezeResult: true } })).status()).toBe(409);
   expect((await page.request.post(`/api/images/${processing.items[0].imageId}/annotate`, { data: { content: "日本語" } })).status()).toBe(409);
-  await page.getByRole("button", { name: "暂停任务", exact: true }).click();
-  await expect.poll(async () => (await state(page, id)).state).toBe("paused");
-  const stopped = await state(page, id);
-  expect(stopped.counts.uploaded).toBe(2);
+  await expect.poll(async () => (await state(page, id)).state, { timeout: 20000 }).toBe("needs_attention");
+  const failed = await state(page, id);
+  expect(failed.canDelete).toBe(true); expect(failed.canPause).toBe(false);
+  expect(failed.counts.uploaded).toBe(2);
   await page.reload();
-  await page.getByRole("button", { name: /手动录入正文|先校对正文／手动注音/ }).click();
+  await expect(page.getByRole("button", { name: "删除任务", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "手动录入正文", exact: true }).click();
   await expect(page.getByRole("textbox", { name: "日语正文", exact: true })).toBeVisible();
-  expect(await page.getByAltText("用于校对正文和注音的日语原图", { exact: true }).count()).toBe(1);
   const current = await state(page, id);
-  expect(current.state).toBe("paused"); expect(current.resultVersion).toBeTruthy();
-  await expect.poll(async () => (await (await page.request.get("/api/ai/status")).json()).runtime.busy).toBe(false);
-  const afterLateResult = await state(page, id);
-  expect(afterLateResult.version).toBe(current.version);
-  expect(afterLateResult.resultVersion).toBe(current.resultVersion);
-  expect(afterLateResult.counts.completed).toBe(current.counts.completed);
+  expect(current.state).toBe("needs_attention"); expect(current.resultVersion).toBeTruthy();
+  expect(current.canDelete).toBe(true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: `artifacts/image-task-manual-${info.project.name}.png`, fullPage: true });
-  // Opening a task result is an unsaved editor session at the same #tasks/id
-  // URL. Explicitly leave it; goto(same URL) does not close the editor panel.
   const leaveEditor = (dialog) => dialog.accept();
   page.on("dialog", leaveEditor);
   try { await page.getByRole("button", { name: "取消", exact: true }).click(); }
@@ -433,7 +429,7 @@ test("无当前任务隐藏入口，草稿具备可辨名称，保存后归档�
     viewport: info.project.name === "phone" ? { width: 390, height: 844 } : { width: 1440, height: 1000 },
     isMobile: info.project.name === "phone", hasTouch: info.project.name === "phone", locale: "zh-CN", timezoneId: "Europe/Paris" });
   const owned = new Set();
-  let savedId;
+  let savedId, secondSavedId;
   try {
     const registered = await memberContext.request.post("/api/accounts/register", { data: {
       username: `task_${info.project.name}_${Date.now().toString(36)}`,
@@ -468,10 +464,18 @@ test("无当前任务隐藏入口，草稿具备可辨名称，保存后归档�
     expect(firstName).not.toBe(secondName);
 
     await secondCard.getByRole("button", { name: "继续上传", exact: true }).click();
-    member.once("dialog", (dialog) => dialog.accept());
-    await member.getByRole("button", { name: "放弃导入草稿", exact: true }).click();
-    await expect(member.getByRole("region", { name: "图片任务", exact: true })).toBeVisible();
-    expect((await member.request.get(`/api/image-tasks/${second.id}`)).status()).toBe(404);
+    await expect(member.getByRole("button", { name: "放弃导入草稿", exact: true })).toHaveCount(0);
+    expect((await member.request.delete(`/api/image-tasks/${second.id}`, { data: { version: second.version } })).status()).toBe(409);
+    await upload(member, photo("另一份独立材料.png"));
+    await submit(member, second.id);
+    await expect.poll(async () => (await state(member, second.id)).state).toBe("ready");
+    const readySecond = await state(member, second.id);
+    expect(readySecond.canDelete).toBe(false); expect(readySecond.canPause).toBe(false);
+    await expect(member.getByRole("button", { name: "删除任务", exact: true })).toHaveCount(0);
+    expect((await member.request.delete(`/api/image-tasks/${second.id}`, { data: { version: readySecond.version } })).status()).toBe(409);
+    await member.getByRole("button", { name: "开始校对", exact: true }).click();
+    secondSavedId = (await saveAndRead(member)).id;
+    await member.goto("/#tasks");
     await firstCard.getByRole("button", { name: "继续上传", exact: true }).click();
     expect(await upload(member, [photo("森林散步第一页.png"), photo("森林散步第二页.png", imageB)])).toBe(first.id);
     await member.goto("/#tasks");
@@ -506,33 +510,34 @@ test("无当前任务隐藏入口，草稿具备可辨名称，保存后归档�
     await expect(member.getByRole("article", { name: "日语原文", exact: true })).toBeVisible();
     await member.goto(`/#tasks/${first.id}`);
     await expect(member.getByRole("button", { name: "打开文章", exact: true })).toBeVisible();
-    await deleteTask(member.request, first.id);
+    const archived = await state(member, first.id);
+    expect(archived.canDelete).toBe(false); expect(archived.canPause).toBe(false);
+    await expect(member.getByRole("button", { name: "删除任务", exact: true })).toHaveCount(0);
+    expect((await member.request.delete(`/api/image-tasks/${first.id}`, { data: { version: archived.version } })).status()).toBe(409);
     expect((await member.request.get(`/api/documents/${savedId}`)).ok()).toBe(true);
     expect(await member.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   } finally {
-    for (const id of owned) await deleteTask(memberContext.request, id);
-    if (savedId) {
-      const response = await memberContext.request.get(`/api/documents/${savedId}`);
-      if (response.ok()) await memberContext.request.delete(`/api/documents/${savedId}`, { data: { revision: (await response.json()).revision } });
+    discardFixtureTasks(owned);
+    for (const documentId of [savedId, secondSavedId].filter(Boolean)) {
+      const response = await memberContext.request.get(`/api/documents/${documentId}`);
+      if (response.ok()) await memberContext.request.delete(`/api/documents/${documentId}`, { data: { revision: (await response.json()).revision } });
     }
     await memberContext.close();
   }
 });
 
-test("另一设备继续暂停任务只补未完成步骤，旧手动稿保存失败且内容保留", async ({ page, browser }, info) => {
+test("另一设备重试出错任务只补失败步骤，旧手动稿保存失败且内容保留", async ({ page, browser }, info) => {
   const cursor = (await runtimeCalls()).at(-1)?.sequence || 0;
-  await controls({ delayMs: 2000 });
+  await controls({ annotationFailures: "permanent", delayMs: 50 });
   await openImport(page);
   const id = await upload(page, [photo(`继续-1-${info.project.name}.png`), photo(`继续-2-${info.project.name}.png`, imageB)]);
   await submit(page, id);
-  await expect.poll(async () => (await state(page, id)).counts.recognized, { timeout: 20000 }).toBeGreaterThan(0);
-  await page.getByRole("button", { name: "暂停任务", exact: true }).click();
-  await expect.poll(async () => (await state(page, id)).state).toBe("paused");
+  await expect.poll(async () => (await state(page, id)).state, { timeout: 20000 }).toBe("needs_attention");
   const paused = await state(page, id);
   expect(paused.items[0].steps.recognize.state).toBe("succeeded");
   await page.getByRole("button", { name: "先校对正文／手动注音", exact: true }).click();
   const input = page.getByRole("textbox", { name: "日语正文", exact: true });
-  const manualText = `暂停后人工校对，需要手动保留的正文 ${info.project.name}。`;
+  const manualText = `出错后人工校对，需要手动保留的正文 ${info.project.name}。`;
   await input.fill(manualText);
   const fixed = await state(page, id);
   expect(fixed.resultVersion).toBeTruthy();
@@ -543,8 +548,8 @@ test("另一设备继续暂停任务只补未完成步骤，旧手动稿保存�
   try {
     const other = await otherContext.newPage();
     await other.goto(`/#tasks/${id}`);
-    await controls({ delayMs: 50 });
-    await other.getByRole("button", { name: "继续处理", exact: true }).click();
+    await controls({ annotationFailures: "permanent", delayMs: 200 });
+    await other.getByRole("button", { name: "重试失败步骤", exact: true }).click();
     const rejected = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === `/api/image-tasks/${id}/apply`);
     await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
     const response = await rejected;
@@ -553,7 +558,7 @@ test("另一设备继续暂停任务只补未完成步骤，旧手动稿保存�
     await expect(input).toHaveValue(manualText);
     await expect(page.getByText(/请先手动复制留存/).first()).toBeVisible();
     await expect(page.getByRole("button", { name: "另存为新文章", exact: true })).toHaveCount(0);
-    await expect.poll(async () => (await state(other, id)).state, { timeout: 20000 }).toBe("ready");
+    await expect.poll(async () => (await state(other, id)).state, { timeout: 20000 }).toBe("needs_attention");
     const completed = await state(other, id);
     expect(completed.items[0].steps.recognize).toEqual(paused.items[0].steps.recognize);
     expect((await runtimeCalls()).filter((call) => call.sequence > cursor && call.phase === "recognize")).toHaveLength(2);
@@ -574,32 +579,93 @@ test("另一设备继续暂停任务只补未完成步骤，旧手动稿保存�
   } finally { await otherContext.close(); }
 });
 
-test("另一设备删除上传草稿后，本机保留全部已选文件并明确另建草稿恢复", async ({ page, browser }, info) => {
+test("另一设备也不能删除或暂停上传草稿，本机继续上传仍属于原任务", async ({ page, browser }, info) => {
   await openImport(page);
-  const title = `删除后恢复草稿 ${info.project.name}`;
+  const title = `草稿不能删除 ${info.project.name}`;
   await page.getByLabel("新文章标题", { exact: true }).fill(title);
   const id = await upload(page, photo(`本机已上传-${info.project.name}.png`));
   const original = await state(page, id);
   const otherContext = await browser.newContext({ baseURL: "http://127.0.0.1:4319", storageState: await page.context().storageState() });
   try {
-    expect((await otherContext.request.delete(`/api/image-tasks/${id}`, { data: { version: original.version } })).ok()).toBe(true);
-    await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(photo(`本机刚选择-${info.project.name}.png`, imageB));
-    await expect(page.getByRole("button", { name: "将本机图片另建草稿", exact: true })).toBeVisible();
-    await expect(page.getByLabel("选择日语图片", { exact: true })).toBeDisabled();
-    await expect(page.getByRole("button", { name: "识别并注音", exact: true })).toBeDisabled();
-    expect((await otherContext.request.get(`/api/image-tasks/${id}`)).status()).toBe(404);
-    await page.getByRole("button", { name: "将本机图片另建草稿", exact: true }).click();
+    expect(original.canDelete).toBe(false); expect(original.canPause).toBe(false);
+    expect((await otherContext.request.delete(`/api/image-tasks/${id}`, { data: { version: original.version } })).status()).toBe(409);
+    for (const operation of ["pause", "cancel"]) {
+      expect((await otherContext.request.post(`/api/image-tasks/${id}/${operation}`, { data: { version: original.version } })).status()).toBe(409);
+    }
+    await expect(page.getByRole("button", { name: "放弃导入草稿", exact: true })).toHaveCount(0);
+    await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(photo(`本机继续上传-${info.project.name}.png`, imageB));
     await expect(page.getByRole("button", { name: "识别并注音", exact: true })).toBeEnabled();
-    const nextId = await page.evaluate(() => location.hash.slice(7));
-    activeTasks.add(nextId);
-    expect(nextId).not.toBe(id);
-    const recovered = await state(page, nextId);
-    expect(recovered.state).toBe("draft");
-    expect(recovered.title).toBe(title);
-    expect(recovered.items.map((item) => item.name)).toEqual([`本机已上传-${info.project.name}.png`, `本机刚选择-${info.project.name}.png`]);
-    expect(recovered.counts.uploaded).toBe(2);
-    expect(recovered.items[0].imageId).not.toBe(original.items[0].imageId);
-    await expect(page.getByLabel("新文章标题", { exact: true })).toHaveValue(title);
+    expect(await page.evaluate(() => location.hash.slice(7))).toBe(id);
+    const continued = await state(page, id);
+    expect(continued.state).toBe("draft"); expect(continued.title).toBe(title);
+    expect(continued.items.map((item) => item.name)).toEqual([`本机已上传-${info.project.name}.png`, `本机继续上传-${info.project.name}.png`]);
+    expect(continued.items[0].imageId).toBe(original.items[0].imageId);
+    expect(continued.counts.uploaded).toBe(2);
+    await expect(page.getByRole("button", { name: "将本机图片另建草稿", exact: true })).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   } finally { await otherContext.close(); }
+});
+
+test("全部图片识别注音后继续显示整批分句，分句完成才进入待校对", async ({ page }, info) => {
+  const cursor = (await runtimeCalls()).at(-1)?.sequence || 0;
+  const text = `整批分句等待${info.project.name}${Date.now()}。次の文です。`;
+  await controls({ ocrText: text, sentenceDelayMs: 4000 });
+  await openImport(page);
+  const id = await upload(page, [photo(`分句-1-${info.project.name}.png`), photo(`分句-2-${info.project.name}.png`, imageB)]);
+  await submit(page, id);
+  await expect.poll(async () => {
+    const task = await state(page, id);
+    return task.counts.completed === 2 && task.segmentation.state === "running";
+  }, { timeout: 20000 }).toBe(true);
+  const segmenting = await state(page, id);
+  expect(segmenting.phase).toBe("segment"); expect(segmenting.state).toBe("running");
+  expect(segmenting.canReview).toBe(false); expect(segmenting.canDelete).toBe(false);
+  expect((await page.request.get(`/api/image-tasks/${id}/result`)).status()).toBe(409);
+  await page.reload();
+  await expect(page.locator('[data-task-phase="segment"]')).toContainText("正在整批分句");
+  await expect(page.getByRole("button", { name: "开始校对", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "删除任务", exact: true })).toHaveCount(0);
+  await expect.poll(async () => (await state(page, id)).state, { timeout: 20000 }).toBe("ready");
+  await expect(page.getByRole("button", { name: "开始校对", exact: true })).toBeVisible();
+  const ready = await state(page, id);
+  expect(ready.segmentation.state).toBe("succeeded"); expect(ready.segmentation.hasResult).toBe(true);
+  const response = await page.request.get(`/api/image-tasks/${id}/result`);
+  expect(response.ok()).toBe(true);
+  const result = await response.json();
+  expect(result.initializeSentences).toBe(false);
+  expect(result.sourceImages).toHaveLength(2);
+  expect(hasCompleteSentenceBoundaries(result.bodyHtml)).toBe(true);
+  const calls = (await runtimeCalls()).filter((call) => call.sequence > cursor);
+  expect(calls.filter((call) => call.phase === "recognize")).toHaveLength(2);
+  expect(calls.filter((call) => call.phase === "annotate")).toHaveLength(2);
+  const sentences = calls.filter((call) => call.phase === "sentences");
+  expect(sentences).toHaveLength(1);
+  expect(JSON.parse(sentences[0].prompt.split("\n输入正文：\n").at(-1))).toBe(bodyText(result.bodyHtml));
+});
+
+test("整批分句失败可删除或只重试分句，不重做成功的识别注音", async ({ page }, info) => {
+  const cursor = (await runtimeCalls()).at(-1)?.sequence || 0;
+  const text = `分句失败后重试${info.project.name}${Date.now()}。結果を保ちます。`;
+  await controls({ ocrText: text, sentenceFailures: "permanent" });
+  await openImport(page);
+  const id = await upload(page, [photo(`重试分句-1-${info.project.name}.png`), photo(`重试分句-2-${info.project.name}.png`, imageB)]);
+  await submit(page, id);
+  await expect.poll(async () => (await state(page, id)).state, { timeout: 20000 }).toBe("needs_attention");
+  const failed = await state(page, id);
+  expect(failed.phase).toBe("segment"); expect(failed.segmentation.state).toBe("failed");
+  expect(failed.counts.completed).toBe(2); expect(failed.canDelete).toBe(true);
+  await page.reload();
+  await expect(page.locator('[data-task-phase="segment"]')).toContainText("识别与注音结果已保留");
+  await expect(page.getByRole("button", { name: "删除任务", exact: true })).toBeVisible();
+  const beforeRetry = (await runtimeCalls()).filter((call) => call.sequence > cursor);
+  const imageSteps = failed.items.map((item) => ({ recognize: item.steps.recognize, annotate: item.steps.annotate }));
+  await controls({ ocrText: text });
+  await page.getByRole("button", { name: "重试分句", exact: true }).click();
+  await expect.poll(async () => (await state(page, id)).state, { timeout: 20000 }).toBe("ready");
+  const ready = await state(page, id);
+  expect(ready.items.map((item) => ({ recognize: item.steps.recognize, annotate: item.steps.annotate }))).toEqual(imageSteps);
+  expect(ready.segmentation.state).toBe("succeeded");
+  const afterRetry = (await runtimeCalls()).filter((call) => call.sequence > cursor);
+  expect(afterRetry.filter((call) => call.type === "image")).toEqual(beforeRetry.filter((call) => call.type === "image"));
+  expect(afterRetry.filter((call) => call.phase === "sentences")).toHaveLength(beforeRetry.filter((call) => call.phase === "sentences").length + 1);
 });

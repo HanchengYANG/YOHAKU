@@ -441,10 +441,10 @@ export function createApp({
     const previous = sourceDocument ? fromRow(sourceDocument).sourceImages : [];
     const allowed = new Map([...sourceImages, ...previous].map((image) => [image.id, image]));
     const requested = value.sourceImages;
-    if (!Array.isArray(requested) || !requested.length || requested.length > 100 ||
+    if (!Array.isArray(requested) || requested.length > 100 ||
         requested.some((image) => !image || typeof image.id !== "string") ||
         new Set(requested.map((image) => image.id)).size !== requested.length)
-      throw new HttpError(400, "文章来源图片无效，请保留任务中的原图。");
+      throw new HttpError(400, "文章来源图片列表无效。");
     // A conflict recovery can copy the current edited article into a new one.
     // Deleted originals still have owned image files, but their old recognition
     // metadata is not taken from the client or invented after deletion.
@@ -455,8 +455,6 @@ export function createApp({
     }
     if (requested.some((image) => !allowed.has(image.id)))
       throw new HttpError(400, "文章来源图片无效，请保留任务中的原图。");
-    if (!requested.some((image) => sourceImages.some((source) => source.id === image.id)))
-      throw new HttpError(400, "请选择至少一张本次任务的图片。");
     const images = requested.map(({ id }) => {
       const image = allowed.get(id);
       const { reviewAnnotations, ...source } = image;

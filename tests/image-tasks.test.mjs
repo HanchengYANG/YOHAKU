@@ -12,7 +12,8 @@ import sharp from "sharp";
 import { createApp } from "../server/app.mjs";
 import { OCR_BODY_SCHEMA } from "../shared/ocr.mjs";
 import { ANNOTATION_SCHEMA } from "../shared/ocr-correction.mjs";
-import { blocksToHtml, bodyRanges, bodyText, appendImageBodyHtml } from "../shared/article-html.mjs";
+import { SENTENCE_SCHEMA } from "../shared/sentences.mjs";
+import { blocksToHtml, bodyRanges, bodyText, appendImageBodyHtml, hasCompleteSentenceBoundaries } from "../shared/article-html.mjs";
 import { parseText, serializeBlocks } from "../shared/document.mjs";
 import { cookieFromResponse, ensureSession } from "./helpers/session.mjs";
 
@@ -26,7 +27,7 @@ function fakeServices() {
     status: () => ({ busy: false, model: "task-fixture-model" }),
     stop: () => state.stop?.(),
     run: async (input) => {
-      const phase = input.schema === OCR_BODY_SCHEMA ? "recognize" : input.schema === ANNOTATION_SCHEMA ? "annotate" : "other";
+      const phase = input.schema === OCR_BODY_SCHEMA ? "recognize" : input.schema === ANNOTATION_SCHEMA ? "annotate" : input.schema === SENTENCE_SCHEMA ? "segment" : "other";
       state.calls.push({ phase, input });
       await state.onRun?.(phase, input);
       let output = { text: "日本" };
@@ -34,6 +35,7 @@ function fakeServices() {
         const targets = JSON.parse(input.prompt.split("\n输入目标：\n").at(-1));
         output = { blocks: targets.map(({ text }) => ({ words: [{ t: text, r: "にほん" }] })) };
       }
+      if (phase === "segment") output = { sentences: [JSON.parse(input.prompt.split("\n输入正文：\n").at(-1))] };
       return { completed: true, text: JSON.stringify(output), model: "task-fixture-model", reasoningEffort: "medium" };
     },
   };
@@ -101,11 +103,24 @@ async function fixture(t, { runnerOptions = {} } = {}) {
   }
   async function freeze(task) {
     if (task.state === "draft") task = await submit(task);
-    if (["queued", "running", "blocked"].includes(task.state)) {
-      const paused = await request(`/image-tasks/${task.id}/pause`, "POST", { version: task.version });
-      assert.equal(paused.status, 200, JSON.stringify(paused.data)); task = paused.data;
+    if (task.state === "queued") {
+      // Enter manual fixtures through a real authorization error, never through
+      // a public pause endpoint. This adds no fake model inference calls.
+      const connected = injected.state.connected;
+      injected.state.connected = false;
+      try { task = await runUntil(task.id, "blocked"); }
+      finally { injected.state.connected = connected; }
     }
     return request(`/image-tasks/${task.id}/cancel`, "POST", { version: task.version, freezeResult: true });
+  }
+  async function legacyPause(task, state = "paused") {
+    // Compatibility fixtures seed tasks created by the previous release. New
+    // clients cannot create these manual stop states through the API.
+    const db = new DatabaseSync(join(directory, "yohaku.sqlite"));
+    try { db.prepare("UPDATE image_tasks SET state=?,version=version+1,completed_at=coalesce(completed_at,?) WHERE id=?")
+      .run(state, new Date(clock.value).toISOString(), task.id); }
+    finally { db.close(); }
+    return get(task.id);
   }
   async function runUntil(id, state, maximum = 30) {
     for (let i = 0; i < maximum; i++) {
@@ -117,7 +132,7 @@ async function fixture(t, { runnerOptions = {} } = {}) {
     assert.fail(`task did not reach ${state}: ${JSON.stringify(await get(id))}`);
   }
   return { get app() { return app; }, get url() { return url; }, get cookie() { return cookie; },
-    directory, state: injected.state, clock, request, create, add, upload, prepared, get, submit, freeze, runUntil,
+    directory, state: injected.state, clock, request, create, add, upload, prepared, get, submit, freeze, legacyPause, runUntil,
     restart: async () => { await stop(); await start(); },
     inspect: (work) => { const db = new DatabaseSync(join(directory, "yohaku.sqlite")); try { return work(db); } finally { db.close(); } } };
 }
@@ -189,8 +204,9 @@ test("单图注音失败继续后续图片，重试只补失败注音", async (t
   const retry = await f.request(`/image-tasks/${task.id}/retry`, "POST", { version: task.version });
   assert.equal(retry.status, 202);
   task = await f.runUntil(task.id, "ready");
-  assert.equal(f.state.calls.length - callsBefore, 1);
-  assert.equal(f.state.calls.at(-1).phase, "annotate");
+  assert.equal(f.state.calls.filter((call) => call.phase !== "segment").length - callsBefore, 1);
+  assert.equal(f.state.calls.filter((call) => call.phase === "segment").length, 1);
+  assert.equal(f.state.calls.filter((call) => call.phase !== "segment").at(-1).phase, "annotate");
   assert.equal(task.counts.completed, 3);
 });
 
@@ -279,7 +295,7 @@ test("共享授权失效进入blocked，恢复后只执行未完成步骤", asyn
   f.clock.value += 100;
   const ready = await f.runUntil(task.id, "ready");
   assert.equal(ready.counts.completed, 1);
-  assert.equal(f.state.calls.length, 2);
+  assert.equal(f.state.calls.filter((call) => call.phase !== "segment").length, 2);
 });
 
 test("任务列表、原图、结果与操作遵守网站账号隔离", async (t) => {
@@ -328,7 +344,8 @@ test("自主runner在提交设备退出登录后仍执行整批，另一登录�
   const result = await f.request(`/image-tasks/${task.id}/result`, "GET", undefined, deviceB);
   assert.equal(result.status, 200);
   assert.equal(result.data.sourceImages.length, 3);
-  assert.equal(f.state.calls.length, 6);
+  assert.equal(f.state.calls.filter((call) => call.phase !== "segment").length, 6);
+  assert.equal(f.state.calls.filter((call) => call.phase === "segment").length, 1);
 });
 
 test("追加目标被其他设备修改时拒绝覆盖，刷新合并后采用只追加一次", async (t) => {
@@ -461,7 +478,7 @@ test("同一图片条目并发上传不同文件只接纳一个，晚到上传�
   assert.equal((await f.request(`/image-tasks/${task.id}/items`, "POST", { version: task.version, items: [{ id: randomUUID(), name: "too-late.png" }] })).status, 409);
 });
 
-test("转人工处理原子作废当前AI尝试，迟到识别不覆盖人工草稿", async (t) => {
+test("旧暂停任务转人工时作废旧AI尝试，迟到识别不覆盖人工草稿", async (t) => {
   const f = await fixture(t);
   let task = await f.submit(await f.prepared());
   await f.app.imageTasks.runNext();
@@ -472,7 +489,7 @@ test("转人工处理原子作废当前AI尝试，迟到识别不覆盖人工草
   f.state.stop = release;
   const currentRun = f.app.imageTasks.runNext();
   await started;
-  task = await f.get(task.id);
+  task = await f.legacyPause(await f.get(task.id));
   const frozen = await f.freeze(task);
   assert.equal(frozen.status, 200);
   const before = (await f.request(`/image-tasks/${task.id}/result`)).data;
@@ -670,19 +687,19 @@ test("全失败只手输第一张时第二张保留待录入，重开普通编�
   assert.deepEqual(bodyRanges(completed.data.bodyHtml).sources.map((source) => source.id), result.sourceImages.map((image) => image.id));
 });
 
-test("失败任务稍后停止或转人工时保留实际处理结束时间，不把等待校对算入耗时", async (t) => {
+test("失败任务禁止手动停止，稍后转人工保留实际处理结束时间", async (t) => {
   const f = await fixture(t);
   f.state.onRun = async () => { throw Object.assign(new Error("fixture invalid image text"), { status:400 }); };
-  for (const freezeResult of [false, true]) {
-    const task = await f.submit(await f.prepared());
-    const failed = await f.runUntil(task.id, "needs_attention");
-    assert.ok(failed.completedAt);
-    f.clock.value += 60 * 60 * 1000;
-    const stopped = await f.request(`/image-tasks/${task.id}/cancel`, "POST", { version:failed.version, freezeResult });
-    assert.equal(stopped.status, 200);
-    assert.equal(stopped.data.completedAt, failed.completedAt);
-    assert.notEqual(stopped.data.updatedAt, failed.updatedAt);
-  }
+  const task = await f.submit(await f.prepared());
+  const failed = await f.runUntil(task.id, "needs_attention");
+  assert.ok(failed.completedAt);
+  f.clock.value += 60 * 60 * 1000;
+  assert.equal((await f.request(`/image-tasks/${task.id}/cancel`, "POST", { version:failed.version })).status, 409);
+  assert.equal((await f.get(task.id)).version, failed.version);
+  const stopped = await f.freeze(failed);
+  assert.equal(stopped.status, 200);
+  assert.equal(stopped.data.completedAt, failed.completedAt);
+  assert.notEqual(stopped.data.updatedAt, failed.updatedAt);
 });
 
 test("多图提交读完A等待B期间禁止旋转，重叠失败提交不会提前解除输入锁", async (t) => {
@@ -829,7 +846,7 @@ test("任务书名与目标标题来自服务端，草稿更新及提交刷新�
   assert.equal((await f.create({ createNewBook: true, newBookTitle: "新书" })).bookTitle, "新书");
 });
 
-test("任务列表只在采用后归档，范围内分页与计数一致，删除归档任务保留文章及原图", async (t) => {
+test("任务列表只在采用后归档，范围内分页与计数一致，已归档任务不能删除", async (t) => {
   const f = await fixture(t);
   const draft = await f.create();
   let savedTask = await f.runUntil((await f.submit(await f.prepared())).id, "ready");
@@ -856,25 +873,31 @@ test("任务列表只在采用后归档，范围内分页与计数一致，删�
   assert.deepEqual(new Set((await f.request("/image-tasks")).data.tasks.map((task) => task.id)), new Set([draft.id, ready.id]));
   assert.equal((await f.request("/image-tasks?scope=invalid")).status, 400);
   savedTask = await f.get(savedTask.id);
-  assert.equal((await f.request(`/image-tasks/${savedTask.id}`, "DELETE", { version: savedTask.version })).status, 204);
-  assert.equal((await f.request("/image-tasks?scope=archived")).data.total, 0);
+  assert.equal(savedTask.canDelete, false);
+  assert.equal((await f.request(`/image-tasks/${savedTask.id}`, "DELETE", { version: savedTask.version })).status, 409);
+  assert.equal((await f.request("/image-tasks?scope=archived")).data.total, 1);
   assert.equal((await f.request(`/documents/${saved.data.id}`)).status, 200);
   assert.equal((await f.request(`/images/${savedTask.items[0].imageId}`)).status, 200);
 });
 
-test("显式暂停跨重启保留成功checkpoint，恢复固定结果后旧编辑保存与注音得到明确冲突", async (t) => {
+test("出错任务固定人工稿后跨重启保留checkpoint，恢复后旧编辑保存与注音明确冲突", async (t) => {
   const f = await fixture(t);
   let task = await f.submit(await f.prepared(2));
   await f.app.imageTasks.runNext(); await f.app.imageTasks.runNext(); await f.app.imageTasks.runNext();
   task = await f.get(task.id);
   assert.equal(task.counts.completed, 1);
-  const paused = await f.request(`/image-tasks/${task.id}/pause`, "POST", { version: task.version });
-  assert.equal(paused.status, 200);
-  assert.equal(paused.data.state, "paused");
-  assert.equal(paused.data.resultVersion, null);
+  f.state.connected = false;
+  task = await f.runUntil(task.id, "blocked");
+  f.state.connected = true;
+  assert.equal(task.canDelete, true);
+  assert.equal(task.canPause, false);
+  assert.equal(task.resultVersion, null);
   assert.equal((await f.request(`/images/${task.items[0].imageId}/rotate`, "POST", { quarterTurns: 1, revision: 1 })).status, 409);
+  task = (await f.freeze(task)).data;
+  assert.equal(task.state, "needs_attention");
+  assert.ok(task.blockedReason);
   await f.restart();
-  assert.equal((await f.get(task.id)).state, "paused");
+  assert.equal((await f.get(task.id)).state, "needs_attention");
   const before = f.state.calls.length;
   await f.app.imageTasks.runNext();
   assert.equal(f.state.calls.length, before);
@@ -918,12 +941,12 @@ test("显式暂停跨重启保留成功checkpoint，恢复固定结果后旧编�
 test("旧停止任务及失败后已固定的任务仍能恢复，只重试未成功步骤", async (t) => {
   const f = await fixture(t);
   let draft = await f.prepared();
-  draft = (await f.request(`/image-tasks/${draft.id}/cancel`, "POST", { version: draft.version })).data;
+  draft = await f.legacyPause(draft, "cancelled");
   assert.equal(draft.state, "cancelled");
   draft = (await f.request(`/image-tasks/${draft.id}/resume`, "POST", { version: draft.version })).data;
   assert.equal(draft.state, "draft");
   let task = await f.submit(draft);
-  task = (await f.request(`/image-tasks/${task.id}/cancel`, "POST", { version: task.version })).data;
+  task = await f.legacyPause(task, "cancelled");
   task = (await f.freeze(task)).data;
   assert.equal(task.state, "cancelled");
   assert.equal((await f.request(`/image-tasks/${task.id}/resume`, "POST", { version: task.version })).status, 202);
@@ -938,7 +961,7 @@ test("旧停止任务及失败后已固定的任务仍能恢复，只重试未�
   assert.equal(f.state.calls.filter((call) => call.phase === "recognize").length, 1);
 });
 
-test("草稿及处理中不能隐式转人工，旧单图注音接口同样拒绝活动任务图片", async (t) => {
+test("草稿及正常处理中不能转人工，授权出错后可固定结果且旧注音不能竞争", async (t) => {
   const f = await fixture(t);
   let task = await f.prepared();
   const freeze = () => f.request(`/image-tasks/${task.id}/cancel`, "POST", { version: task.version, freezeResult: true });
@@ -950,9 +973,17 @@ test("草稿及处理中不能隐式转人工，旧单图注音接口同样拒�
   await f.app.imageTasks.runNext(); await f.app.imageTasks.runNext();
   task = await f.get(task.id);
   assert.equal(task.state, "blocked");
-  assert.equal((await freeze()).status, 409);
   assert.equal((await f.request(`/images/${task.items[0].imageId}/annotate`, "POST", { content: "日本" })).status, 409);
   assert.equal(f.state.calls.length, 0);
+  const reason = task.blockedReason;
+  const fixed = await freeze();
+  assert.equal(fixed.status, 200);
+  task = fixed.data;
+  assert.equal(task.state, "needs_attention");
+  assert.equal(task.blockedReason, reason);
+  assert.equal(task.canDelete, true);
+  assert.equal(task.canReview, true);
+  assert.ok(task.resultVersion);
   f.state.connected = true;
   assert.equal((await f.request(`/image-tasks/${task.id}/resume`, "POST", { version: task.version })).status, 202);
   assert.equal((await f.runUntil(task.id, "ready")).counts.completed, 1);
@@ -986,19 +1017,24 @@ test("人工注音执行中恢复或删除任务，迟到回复不会写入任�
   }
 });
 
-test("删除运行中任务使迟到AI失效，重启不复活且相同创建请求返回已删除", async (t) => {
+test("运行中任务禁止删除，出错后可删除且重启及相同创建请求不能复活", async (t) => {
   const f = await fixture(t), key = randomUUID();
   let task = await f.submit(await f.prepared(1, { idempotencyKey: key }));
   await f.app.imageTasks.runNext();
   let release, entered;
   const gate = new Promise((resolve) => { release = resolve; }), started = new Promise((resolve) => { entered = resolve; });
-  f.state.onRun = async () => { entered(); await gate; }; f.state.stop = release;
+  f.state.onRun = async () => { entered(); await gate; throw Object.assign(new Error("fixture failed OCR"), { status: 400 }); }; f.state.stop = release;
   const running = f.app.imageTasks.runNext(); await started;
   task = await f.get(task.id);
   assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version - 1 })).status, 409);
-  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
-  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
+  assert.equal(task.canDelete, false);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 409);
   release(); await running;
+  task = await f.runUntil(task.id, "needs_attention");
+  assert.equal(task.canDelete, true);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version - 1 })).status, 409);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
   assert.equal(f.inspect((db) => db.prepare("SELECT recognition_json FROM image_task_items WHERE task_id=?").get(task.id).recognition_json), null);
   assert.equal((await f.request(`/image-tasks/${task.id}`)).status, 404);
   const deletedApply = await f.request(`/image-tasks/${task.id}/apply`, "POST", { version: task.version, resultVersion: 1, document: {} });
@@ -1012,7 +1048,7 @@ test("删除运行中任务使迟到AI失效，重启不复活且相同创建请
   assert.equal(f.state.calls.length, 1);
 });
 
-test("删除上传中的草稿后迟到图片不能重新绑定任务", async (t) => {
+test("上传中的草稿禁止删除，原上传正常完成并保留草稿", async (t) => {
   const f = await fixture(t), task = await f.add(await f.create()), item = task.items[0];
   const originalSave = f.app.ai.saveImage;
   let release, entered;
@@ -1022,11 +1058,11 @@ test("删除上传中的草稿后迟到图片不能重新绑定任务", async (t
   const form = new FormData(); form.append("image", new Blob([pixels], { type: "image/png" }), item.name);
   const pending = fetch(`${f.url}/api/image-tasks/${task.id}/items/${item.id}/image`, { method: "POST", headers: { Cookie: f.cookie }, body: form });
   await started;
-  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 409);
   release();
-  assert.equal((await pending).status, 404);
-  assert.equal(f.inspect((db) => db.prepare("SELECT image_id FROM image_task_items WHERE task_id=?").get(task.id).image_id), null);
-  assert.equal((await f.request("/image-tasks")).data.total, 0);
+  assert.equal((await pending).status, 200);
+  assert.ok(f.inspect((db) => db.prepare("SELECT image_id FROM image_task_items WHERE task_id=?").get(task.id).image_id));
+  assert.equal((await f.request("/image-tasks")).data.total, 1);
 });
 
 test("旧任务迁移持久保存书名快照及删除字段，幂等创建保持兼容", async (t) => {
@@ -1049,7 +1085,7 @@ test("旧任务迁移持久保存书名快照及删除字段，幂等创建保�
   assert.equal((await f.get(task.id)).bookTitle, "旧书名");
   assert.equal(f.inspect((db) => JSON.parse(db.prepare("SELECT input_json FROM image_tasks WHERE id=?").get(task.id).input_json).bookTitle), "旧书名");
   assert.equal((await f.request("/image-tasks", "POST", { idempotencyKey: key, title: "任务文章", bookId: book.id })).data.id, task.id);
-  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 409);
 });
 
 test("恢复旧停止任务前校验所有原图版本，包括无需再执行的成功图片", async (t) => {
@@ -1057,7 +1093,7 @@ test("恢复旧停止任务前校验所有原图版本，包括无需再执行�
   let task = await f.submit(await f.prepared(2));
   await f.app.imageTasks.runNext(); await f.app.imageTasks.runNext(); await f.app.imageTasks.runNext();
   task = await f.get(task.id);
-  task = (await f.request(`/image-tasks/${task.id}/cancel`, "POST", { version: task.version })).data;
+  task = await f.legacyPause(task, "cancelled");
   const ownerId = f.inspect((db) => db.prepare("SELECT user_id FROM image_tasks WHERE id=?").get(task.id).user_id);
   // Reproduce a pixel update made while stopped under the previous version's guard.
   await f.app.ai.rotateImage(ownerId, task.items[0].imageId, { quarterTurns: 1, revision: 1 }, { internal: true });
@@ -1072,7 +1108,7 @@ test("恢复旧停止任务前校验所有原图版本，包括无需再执行�
 test("恢复任务读取多张图片期间锁住全部输入，避免已读取原图被并发旋转", async (t) => {
   const f = await fixture(t);
   let task = await f.submit(await f.prepared(2));
-  task = (await f.request(`/image-tasks/${task.id}/cancel`, "POST", { version: task.version })).data;
+  task = await f.legacyPause(task, "cancelled");
   const originalGet = f.app.ai.getImage;
   let release, entered;
   const gate = new Promise((resolve) => { release = resolve; }), started = new Promise((resolve) => { entered = resolve; });
@@ -1089,12 +1125,13 @@ test("恢复任务读取多张图片期间锁住全部输入，避免已读取�
   assert.equal((await f.get(task.id)).state, "queued");
 });
 
-test("暂停后先固定人工稿才允许旋转并保存，旋转后恢复会拒绝重用旧checkpoint", async (t) => {
+test("出错后先固定人工稿才允许旋转并保存，旋转后恢复拒绝旧checkpoint", async (t) => {
   const f = await fixture(t);
   let task = await f.submit(await f.prepared());
   await f.app.imageTasks.runNext(); await f.app.imageTasks.runNext();
-  task = await f.get(task.id);
-  task = (await f.request(`/image-tasks/${task.id}/pause`, "POST", { version: task.version })).data;
+  f.state.onRun = async (phase) => { if (phase === "annotate") throw Object.assign(new Error("fixture annotation failure"), { status: 400 }); };
+  task = await f.runUntil(task.id, "needs_attention");
+  f.state.onRun = null;
   const imageId = task.items[0].imageId;
   assert.equal((await f.request(`/images/${imageId}/rotate`, "POST", { quarterTurns: 1, revision: 1 })).status, 409);
   task = (await f.freeze(task)).data;
@@ -1117,5 +1154,326 @@ test("暂停后先固定人工稿才允许旋转并保存，旋转后恢复会�
   assert.deepEqual(bodyRanges(saved.data.bodyHtml).sources.map((source) => source.id), [imageId]);
   assert.equal(saved.data.sourceImages[0].id, imageId);
   assert.equal((await f.request(`/images/${imageId}`)).data.revision, 2);
-  assert.equal(f.state.calls.length, 1);
+  assert.equal(f.state.calls.filter((call) => call.phase === "recognize").length, 1);
+});
+
+test("正常任务、旧手动暂停及已归档任务均不能手动暂停或删除，权限不接受客户端自报", async (t) => {
+  const f = await fixture(t);
+  const assertProtected = async (task) => {
+    assert.equal(task.canPause, false);
+    assert.equal(task.canDelete, false);
+    for (const operation of ["pause", "cancel"]) {
+      const denied = await f.request(`/image-tasks/${task.id}/${operation}`, "POST", { version: task.version, canPause: true });
+      assert.equal(denied.status, 409);
+      assert.match(denied.data.error, /不支持手动暂停/);
+    }
+    const deleted = await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version, canDelete: true, state: "needs_attention" });
+    assert.equal(deleted.status, 409);
+    assert.match(deleted.data.error, /只有出错/);
+    assert.equal((await f.get(task.id)).version, task.version);
+  };
+  let task = await f.prepared();
+  await assertProtected(task);
+  task = await f.submit(task);
+  await assertProtected(task);
+  await f.app.imageTasks.runNext();
+  let release, entered;
+  const gate = new Promise((resolve) => { release = resolve; }), started = new Promise((resolve) => { entered = resolve; });
+  f.state.onRun = async () => { entered(); await gate; }; f.state.stop = release;
+  const pending = f.app.imageTasks.runNext(); await started;
+  await assertProtected(await f.get(task.id));
+  release(); await pending; f.state.onRun = null;
+  task = await f.runUntil(task.id, "ready");
+  await assertProtected(task);
+  const result = (await f.request(`/image-tasks/${task.id}/result`)).data;
+  assert.equal((await f.request(`/image-tasks/${task.id}/apply`, "POST", { version: task.version, resultVersion: task.resultVersion, document: result })).status, 200);
+  await assertProtected(await f.get(task.id));
+  for (const state of ["paused", "cancelled"]) await assertProtected(await f.legacyPause(await f.prepared(), state));
+});
+
+test("授权出错允许按版本删除，恢复后即使使用最新版本也不再允许删除", async (t) => {
+  const f = await fixture(t);
+  f.state.connected = false;
+  let task = await f.runUntil((await f.submit(await f.prepared())).id, "blocked");
+  assert.equal(task.canDelete, true);
+  assert.equal(task.canPause, false);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version - 1 })).status, 409);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
+  task = await f.runUntil((await f.submit(await f.prepared())).id, "blocked");
+  const failedVersion = task.version;
+  f.state.connected = true;
+  task = (await f.request(`/image-tasks/${task.id}/resume`, "POST", { version: task.version })).data;
+  assert.equal(task.state, "queued");
+  assert.equal(task.canDelete, false);
+  for (const version of [failedVersion, task.version])
+    assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version })).status, 409);
+  assert.equal((await f.get(task.id)).version, task.version);
+  await f.runUntil(task.id, "ready");
+});
+
+test("任务校对可移除最后来源图并保存无图正文，拒绝遗留来源标记且归档重试幂等", async (t) => {
+  const f = await fixture(t);
+  const task = await f.runUntil((await f.submit(await f.prepared())).id, "ready");
+  const result = (await f.request(`/image-tasks/${task.id}/result`)).data;
+  const version = { version: task.version, resultVersion: task.resultVersion };
+  assert.equal((await f.request(`/image-tasks/${task.id}/apply`, "POST", {
+    ...version, document: { ...result, sourceImages: [], sourceImageId: null },
+  })).status, 400);
+  const payload = { ...version, document: { ...result, sourceImages: [], sourceImageId: null,
+    bodyHtml: blocksToHtml(parseText("保留的手动正文")),
+  } };
+  const saved = await f.request(`/image-tasks/${task.id}/apply`, "POST", payload);
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  assert.deepEqual(saved.data.sourceImages, []);
+  assert.equal(saved.data.sourceImageId, null);
+  assert.equal(saved.data.recognition, null);
+  assert.equal(bodyText(saved.data.bodyHtml), "保留的手动正文");
+  assert.deepEqual(bodyRanges(saved.data.bodyHtml).sources, []);
+  const replay = await f.request(`/image-tasks/${task.id}/apply`, "POST", payload);
+  assert.equal(replay.status, 200);
+  assert.equal(replay.data.id, saved.data.id);
+  assert.equal(replay.data.revision, saved.data.revision);
+  assert.equal((await f.request("/image-tasks")).data.total, 0);
+  assert.deepEqual((await f.request("/image-tasks?scope=archived")).data.tasks.map((value) => value.id), [task.id]);
+  assert.equal((await f.request(`/images/${task.items[0].imageId}`)).status, 200);
+});
+
+test("追加任务可移除全部本批图片而保留目标旧图，只采用可信旧图记录", async (t) => {
+  const f = await fixture(t);
+  const first = await f.runUntil((await f.submit(await f.prepared())).id, "ready");
+  const firstResult = (await f.request(`/image-tasks/${first.id}/result`)).data;
+  const original = (await f.request(`/image-tasks/${first.id}/apply`, "POST", {
+    version: first.version, resultVersion: first.resultVersion, document: firstResult,
+  })).data;
+  const task = await f.runUntil((await f.submit(await f.prepared(1, { targetId: original.id }))).id, "ready");
+  const unrelated = await f.prepared();
+  const version = { version: task.version, resultVersion: task.resultVersion };
+  const onlyOldDocument = { ...original, sourceImages: original.sourceImages.map(({ id }) => ({ id, recognition: { content: "伪造记录" } })) };
+  assert.equal((await f.request(`/image-tasks/${task.id}/apply`, "POST", {
+    ...version, document: { ...onlyOldDocument, sourceImages: [{ id: unrelated.items[0].imageId }] },
+  })).status, 400);
+  const saved = await f.request(`/image-tasks/${task.id}/apply`, "POST", { ...version, document: onlyOldDocument });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  assert.equal(saved.data.id, original.id);
+  assert.equal(saved.data.bodyHtml, original.bodyHtml);
+  assert.equal(saved.data.revision, original.revision + 1);
+  assert.deepEqual(saved.data.sourceImages, original.sourceImages);
+  assert.equal((await f.get(task.id)).appliedDocumentId, original.id);
+});
+
+test("整批图片注音完成后仍等待跨图分句，最终分句落盘后才就绪且重启不重跑", async (t) => {
+  const f = await fixture(t);
+  let task = await f.submit(await f.prepared(2));
+  for (let index = 0; index < 6; index++) await f.app.imageTasks.runNext();
+  task = await f.get(task.id);
+  assert.equal(task.state, "queued");
+  assert.equal(task.counts.completed, 2);
+  assert.equal(task.phase, "segment");
+  assert.equal(task.segmentation.state, "pending");
+  assert.equal(task.resultVersion, null);
+  assert.equal(task.completedAt, null);
+  assert.equal((await f.request(`/image-tasks/${task.id}/result`)).status, 409);
+  let release, entered;
+  const gate = new Promise((resolve) => { release = resolve; }), started = new Promise((resolve) => { entered = resolve; });
+  f.state.onRun = async (phase) => { if (phase === "segment") { entered(); await gate; } }; f.state.stop = release;
+  const pending = f.app.imageTasks.runNext(); await started;
+  task = await f.get(task.id);
+  assert.equal(task.state, "running");
+  assert.equal(task.phase, "segment");
+  assert.equal(task.segmentation.state, "running");
+  assert.equal(task.segmentation.hasResult, false);
+  assert.equal(task.counts.completed, 2);
+  assert.equal(task.canReview, false);
+  assert.equal(task.canDelete, false);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 409);
+  const inference = f.state.calls.find((call) => call.phase === "segment");
+  assert.equal(JSON.parse(inference.input.prompt.split("\n输入正文：\n").at(-1)), "日本日本");
+  release(); await pending;
+  task = await f.get(task.id);
+  assert.equal(task.state, "ready");
+  assert.equal(task.segmentation.state, "succeeded");
+  assert.equal(task.segmentation.hasResult, true);
+  assert.equal(task.phase, null);
+  const result = (await f.request(`/image-tasks/${task.id}/result`)).data;
+  assert.equal(result.segmentationCompleted, true);
+  assert.equal(result.initializeSentences, false);
+  assert.ok(hasCompleteSentenceBoundaries(result.bodyHtml));
+  assert.equal(bodyRanges(result.bodyHtml).sentences.length, 1);
+  assert.equal(bodyRanges(result.bodyHtml).sentences[0].text, "日本日本");
+  assert.deepEqual(bodyRanges(result.bodyHtml).sources.map(({ id }) => id), task.items.map(({ imageId }) => imageId));
+  const persisted = f.inspect((db) => JSON.parse(db.prepare("SELECT segmentation_json FROM image_tasks WHERE id=?").get(task.id).segmentation_json));
+  assert.equal(persisted.result.bodyHtml, result.bodyHtml);
+  await f.restart(); await f.app.imageTasks.runNext();
+  const restored = (await f.request(`/image-tasks/${task.id}/result`)).data;
+  assert.equal(restored.bodyHtml, result.bodyHtml);
+  assert.equal(restored.taskResultVersion, result.taskResultVersion);
+  assert.equal(f.state.calls.filter((call) => call.phase === "recognize").length, 2);
+  assert.equal(f.state.calls.filter((call) => call.phase === "annotate").length, 2);
+  assert.equal(f.state.calls.filter((call) => call.phase === "segment").length, 1);
+});
+
+test("最终分句自动重试预算跨重启持久，用尽后只重试分句并保留图片checkpoint", async (t) => {
+  const f = await fixture(t, { runnerOptions: { maxAutomaticRetries: 2 } });
+  let fail = true;
+  f.state.onRun = async (phase) => { if (phase === "segment" && fail) throw Object.assign(new Error("fixture segmentation failure"), { status: 502 }); };
+  let task = await f.submit(await f.prepared(2));
+  for (let index = 0; index < 7; index++) await f.app.imageTasks.runNext();
+  task = await f.get(task.id);
+  assert.equal(task.state, "queued");
+  assert.equal(task.segmentation.attempts, 1);
+  assert.equal(task.segmentation.state, "pending");
+  await f.restart();
+  assert.equal((await f.get(task.id)).segmentation.attempts, 1);
+  task = await f.runUntil(task.id, "needs_attention");
+  assert.equal(task.phase, "segment");
+  assert.equal(task.segmentation.state, "failed");
+  assert.equal(task.segmentation.attempts, 3);
+  assert.equal(task.counts.completed, 2);
+  assert.equal(task.counts.failed, 0);
+  assert.equal(task.canDelete, true);
+  assert.match(task.lastError, /segmentation failure/);
+  assert.equal(task.resultVersion, null);
+  const checkpoints = f.inspect((db) => db.prepare("SELECT recognition_json,annotation_json,steps_json FROM image_task_items WHERE task_id=? ORDER BY position").all(task.id));
+  fail = false;
+  const retry = await f.request(`/image-tasks/${task.id}/retry`, "POST", { version: task.version });
+  assert.equal(retry.status, 202);
+  assert.equal(retry.data.segmentation.state, "pending");
+  assert.equal(retry.data.canDelete, false);
+  task = await f.runUntil(task.id, "ready");
+  assert.equal(task.segmentation.state, "succeeded");
+  assert.deepEqual(f.inspect((db) => db.prepare("SELECT recognition_json,annotation_json,steps_json FROM image_task_items WHERE task_id=? ORDER BY position").all(task.id)), checkpoints);
+  assert.equal(f.state.calls.filter((call) => call.phase === "recognize").length, 2);
+  assert.equal(f.state.calls.filter((call) => call.phase === "annotate").length, 2);
+  assert.equal(f.state.calls.filter((call) => call.phase === "segment").length, 4);
+});
+
+test("分句执行中服务重启使旧attempt失效，只恢复最后一步且不写关闭的数据库", async (t) => {
+  const f = await fixture(t);
+  let task = await f.submit(await f.prepared(2));
+  for (let index = 0; index < 6; index++) await f.app.imageTasks.runNext();
+  let release, entered;
+  const gate = new Promise((resolve) => { release = resolve; }), started = new Promise((resolve) => { entered = resolve; });
+  f.state.onRun = async (phase) => { if (phase === "segment") { entered(); await gate; } }; f.state.stop = release;
+  const old = f.app.imageTasks.runNext(); await started;
+  assert.equal((await f.get(task.id)).segmentation.state, "running");
+  await f.restart(); f.state.onRun = null; release(); await old;
+  task = await f.get(task.id);
+  assert.equal(task.state, "queued");
+  assert.equal(task.phase, "segment");
+  assert.equal(task.segmentation.state, "pending");
+  assert.equal(task.segmentation.attempts, 0);
+  assert.equal(task.counts.completed, 2);
+  assert.equal(task.resultVersion, null);
+  assert.equal(f.inspect((db) => db.prepare("SELECT segmentation_token FROM image_tasks WHERE id=?").get(task.id).segmentation_token), null);
+  task = await f.runUntil(task.id, "ready");
+  assert.equal(task.segmentation.state, "succeeded");
+  assert.equal(f.state.calls.filter((call) => call.phase === "recognize").length, 2);
+  assert.equal(f.state.calls.filter((call) => call.phase === "annotate").length, 2);
+  assert.equal(f.state.calls.filter((call) => call.phase === "segment").length, 2);
+});
+
+test("分句授权出错可继续或删除，删除后的最后步骤不能重启复活", async (t) => {
+  const f = await fixture(t);
+  let task = await f.submit(await f.prepared());
+  for (let index = 0; index < 3; index++) await f.app.imageTasks.runNext();
+  f.state.connected = false;
+  await f.app.imageTasks.runNext();
+  task = await f.get(task.id);
+  assert.equal(task.state, "blocked");
+  assert.equal(task.phase, "segment");
+  assert.equal(task.segmentation.state, "pending");
+  assert.equal(task.segmentation.attempts, 0);
+  assert.equal(task.counts.completed, 1);
+  assert.equal(task.canDelete, true);
+  assert.match(task.lastError, /授权/);
+  const fixed = (await f.freeze(task)).data;
+  assert.equal(fixed.state, "needs_attention");
+  const partial = (await f.request(`/image-tasks/${task.id}/result`)).data;
+  assert.equal(partial.initializeSentences, true);
+  assert.equal(partial.segmentationCompleted, false);
+  assert.match(partial.segmentationError, /授权/);
+  f.state.connected = true;
+  assert.equal((await f.request(`/image-tasks/${task.id}/resume`, "POST", { version: fixed.version })).status, 202);
+  task = await f.runUntil(task.id, "ready");
+  assert.equal(task.counts.completed, 1);
+  assert.equal(f.state.calls.filter((call) => call.phase === "recognize").length, 1);
+  assert.equal(f.state.calls.filter((call) => call.phase === "annotate").length, 1);
+  assert.equal(f.state.calls.filter((call) => call.phase === "segment").length, 1);
+  // A distinct body avoids the successful task's sentence cache.
+  task = await f.submit(await f.prepared(2));
+  for (let index = 0; index < 6; index++) await f.app.imageTasks.runNext();
+  f.state.connected = false; await f.app.imageTasks.runNext();
+  task = await f.get(task.id);
+  assert.equal(task.phase, "segment");
+  assert.equal(task.canDelete, true);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
+  const calls = f.state.calls.length;
+  await f.restart(); f.state.connected = true; await f.app.imageTasks.runNext();
+  assert.equal((await f.request(`/image-tasks/${task.id}`)).status, 404);
+  assert.equal((await f.request(`/image-tasks/${task.id}/retry`, "POST", { version: task.version })).status, 404);
+  assert.equal(f.state.calls.length, calls);
+});
+
+test("旧ready仅未采用任务迁移补最后分句，已采用及旧人工暂停不会被自动执行", async (t) => {
+  const f = await fixture(t);
+  const ready = await f.runUntil((await f.submit(await f.prepared())).id, "ready");
+  const adopted = await f.runUntil((await f.submit(await f.prepared())).id, "ready");
+  const adoptedResult = (await f.request(`/image-tasks/${adopted.id}/result`)).data;
+  const applied = { version: adopted.version, resultVersion: adopted.resultVersion, document: adoptedResult };
+  const saved = (await f.request(`/image-tasks/${adopted.id}/apply`, "POST", applied)).data;
+  const paused = await f.legacyPause(await f.runUntil((await f.submit(await f.prepared())).id, "ready"));
+  f.inspect((db) => {
+    db.exec("DELETE FROM sentence_cache");
+    db.exec("ALTER TABLE image_tasks DROP COLUMN segmentation_token");
+    db.exec("ALTER TABLE image_tasks DROP COLUMN segmentation_json");
+  });
+  const calls = f.state.calls.length;
+  await f.restart();
+  let migrated = await f.get(ready.id);
+  assert.equal(migrated.state, "queued");
+  assert.equal(migrated.phase, "segment");
+  assert.equal(migrated.resultVersion, null);
+  assert.equal(migrated.counts.completed, 1);
+  assert.equal((await f.get(adopted.id)).state, "ready");
+  assert.equal((await f.get(adopted.id)).appliedDocumentId, saved.id);
+  assert.equal((await f.get(paused.id)).state, "paused");
+  migrated = await f.runUntil(ready.id, "ready");
+  assert.equal(migrated.segmentation.state, "succeeded");
+  assert.deepEqual(f.state.calls.slice(calls).map((call) => call.phase), ["segment"]);
+  const replay = await f.request(`/image-tasks/${adopted.id}/apply`, "POST", applied);
+  assert.equal(replay.status, 200);
+  assert.equal(replay.data.id, saved.id);
+  const legacy = await f.get(paused.id);
+  assert.equal((await f.request(`/image-tasks/${paused.id}/resume`, "POST", { version: legacy.version })).status, 202);
+  assert.equal((await f.runUntil(paused.id, "ready")).segmentation.state, "succeeded");
+  assert.deepEqual(f.state.calls.slice(calls).map((call) => call.phase), ["segment"]);
+});
+
+test("重启后分句出错被删除，旧进程迟到的分句结果不能写回或复活任务", async (t) => {
+  const f = await fixture(t);
+  let task = await f.submit(await f.prepared());
+  for (let index = 0; index < 3; index++) await f.app.imageTasks.runNext();
+  let release, entered;
+  const gate = new Promise((resolve) => { release = resolve; }), started = new Promise((resolve) => { entered = resolve; });
+  f.state.onRun = async (phase) => { if (phase === "segment") { entered(); await gate; } };
+  f.state.stop = () => {};
+  t.after(() => release());
+  const old = f.app.imageTasks.runNext(); await started;
+  await f.restart();
+  f.state.onRun = async (phase) => { if (phase === "segment") throw Object.assign(new Error("fixture current final step failed"), { status: 400 }); };
+  task = await f.runUntil(task.id, "needs_attention");
+  assert.equal(task.phase, "segment");
+  assert.equal(task.canDelete, true);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
+  release(); await old;
+  const tombstone = f.inspect((db) => db.prepare("SELECT deleted_at,segmentation_token,segmentation_json FROM image_tasks WHERE id=?").get(task.id));
+  assert.ok(tombstone.deleted_at);
+  assert.equal(tombstone.segmentation_token, null);
+  assert.equal(JSON.parse(tombstone.segmentation_json).state, "failed");
+  assert.equal(JSON.parse(tombstone.segmentation_json).result, undefined);
+  assert.equal((await f.request(`/image-tasks/${task.id}/result`)).status, 404);
+  assert.equal(f.state.calls.filter((call) => call.phase === "recognize").length, 1);
+  assert.equal(f.state.calls.filter((call) => call.phase === "annotate").length, 1);
+  assert.equal(f.state.calls.filter((call) => call.phase === "segment").length, 2);
 });

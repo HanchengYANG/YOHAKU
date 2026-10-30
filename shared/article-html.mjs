@@ -192,6 +192,12 @@ export function bodyRanges(html) {
   return result;
 }
 
+export function hasCompleteSentenceBoundaries(html) {
+  const text = bodyText(html), sentences = bodyRanges(html).sentences;
+  return !!text.trim() && sentences.length > 0 &&
+    sentences.map((sentence) => sentence.text).join("").replace(/\n/g, "") === text.replace(/\n/g, "");
+}
+
 function mapRanges(html, boundaries, transform) {
   let offset = 0, boundaryIndex = 0;
   const sorted = [...new Set(boundaries)].sort((a, b) => a - b);

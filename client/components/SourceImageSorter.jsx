@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import "../editor-workflow.css";
 
-export default function SourceImageSorter({ items, activeId, onSelect, onReorder, onRemove, summary, minItems = 0, disabled = false, label = "图片顺序" }) {
+export default function SourceImageSorter({ items, activeId, onSelect, onReorder, onRemove, removeBody = false, summary, minItems = 0, disabled = false, label = "图片顺序" }) {
   const [status, setStatus] = useState("");
   const list = useRef(null);
   const previousRects = useRef(null);
@@ -47,7 +47,7 @@ export default function SourceImageSorter({ items, activeId, onSelect, onReorder
         </button>
         {item.status && <span className="source-sort-item-status" title={item.status}>{item.status}</span>}
         {onRemove && <button type="button" className="source-sort-remove" aria-label={`移除${item.name || `来源图 ${index + 1}`}`} disabled={disabled || minimumReached}
-          title={minimumReached ? minimumMessage : `移除此图片${minItems ? "及对应正文" : ""}`} onClick={() => { if (!disabled && !minimumReached) onRemove(item.id); }}>×</button>}
+          title={minimumReached ? minimumMessage : `移除此图片${removeBody ? "及对应正文" : ""}`} onClick={() => { if (!disabled && !minimumReached) onRemove(item.id); }}>×</button>}
       </div>)}
     </div>
     {onRemove && minItems > 0 && minimumReached && <p className="source-sort-minimum">{minimumMessage}</p>}

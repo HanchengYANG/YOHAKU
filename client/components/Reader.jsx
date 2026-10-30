@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { blocksToHtml, bodyRanges } from "../../shared/article-html.mjs";
+import { blocksToHtml, bodyRanges, hasCompleteSentenceBoundaries } from "../../shared/article-html.mjs";
 import ArticleBody from "./ArticleBody.jsx";
 import { stats } from "../../shared/document.mjs";
 import { kinds } from "../constants.mjs";
@@ -24,6 +24,7 @@ export default function Reader({
   const [custom, setCustom] = useState(false);
   const html = document.bodyHtml || blocksToHtml(document.blocks);
   useEffect(() => { setSelection(null); setCustom(false); }, [document.id, document.bodyHtml]);
+  if (!hasCompleteSentenceBoundaries(html)) return null;
   const ask = (operation) => {
     if (!selection) return;
     const { rect, ...reference } = selection;

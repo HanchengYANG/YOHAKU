@@ -1,9 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseText, serializeBlocks, plainText, annotateBlocks } from "../shared/document.mjs";
-import { blocksToHtml, htmlToBlocks, normalizeBodyHtml, bodyText, bodyRanges, applySentenceBoundaries, initializeSentenceBoundaries, markBodyRange, removeQaMarks, editBodyText, syncBodyReadings, appendBodyHtml } from "../shared/article-html.mjs";
+import { blocksToHtml, htmlToBlocks, normalizeBodyHtml, bodyText, bodyRanges, hasCompleteSentenceBoundaries, applySentenceBoundaries, initializeSentenceBoundaries, markBodyRange, removeQaMarks, editBodyText, syncBodyReadings, appendBodyHtml } from "../shared/article-html.mjs";
 
 const sample = () => blocksToHtml(parseText("{日本語|にほんご}。次の文。\n\n歌う空"), { sourceImageId: "img-1" });
+
+test("分句完成必须覆盖全部正文，不能只凭存在一句或忽略未分句空格", () => {
+  const complete = applySentenceBoundaries(sample(), [bodyText(sample())]);
+  assert.equal(hasCompleteSentenceBoundaries(complete), true);
+  assert.equal(hasCompleteSentenceBoundaries(sample()), false);
+  assert.equal(hasCompleteSentenceBoundaries(complete + "<p>未分句</p>"), false);
+  assert.equal(hasCompleteSentenceBoundaries(complete + "<p> </p>"), false);
+  assert.equal(hasCompleteSentenceBoundaries(complete + "<p></p>"), true);
+  assert.equal(hasCompleteSentenceBoundaries("<p></p>"), false);
+});
 
 test("受控HTML往返保留段落、UTF16原文、振假名与来源，清洗可执行属性", () => {
   const html = sample();

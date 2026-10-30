@@ -31,7 +31,7 @@ function ImagePreview({ entry }) {
     style={{ width: scale === null ? "100%" : size.width * scale, height: scale === null ? "100%" : size.height * scale, maxWidth: "none", maxHeight: "none", transform: `translate(-50%, -50%) rotate(${(entry.quarterTurns || 0) * 90}deg)` }} /></span>;
 }
 
-export default function ImageImport({ taskId = null, initialTask = null, onTaskCreated, onSubmitted, onDeleted, onCancel, onDirty,
+export default function ImageImport({ taskId = null, initialTask = null, onTaskCreated, onSubmitted, onCancel, onDirty,
   articles = [], books = [], initialBookId = null, initialTargetId = null }) {
   const initial = initialTask || null;
   const [task, setTask] = useState(initial);
@@ -248,25 +248,7 @@ export default function ImageImport({ taskId = null, initialTask = null, onTaskC
     onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setDragActive(false); }}
     onDrop={(event) => { if ([...event.dataTransfer.types].includes("Files")) { event.preventDefault(); setDragActive(false); chooseFiles(event.dataTransfer.files); } }}>
     <div className="stage2-heading"><div><span className="eyebrow">从原图开始</span><h1>导入照片或截图</h1></div>
-      <div className="task-preparation-actions"><button className="button subtle" type="button" onClick={onCancel}>任务与归档</button>
-        {task && !frozen && <button className="text-button" type="button" disabled={busy} onClick={() => {
-          if (window.confirm(`删除导入草稿「${taskDisplayName(task)}」？这份草稿和未保存的识别结果将删除。`)) enqueue(async () => {
-            let current = taskRef.current;
-            for (let attempt = 0; attempt < 3; attempt++) {
-              try {
-                await api(`/image-tasks/${encodeURIComponent(current.id)}`, { method: "DELETE", body: JSON.stringify({ version: current.version }) });
-                break;
-              } catch (cause) {
-                if (cause.status === 404) break;
-                if (cause.status !== 409 || attempt === 2) throw cause;
-                try { current = await refresh(); }
-                catch (latestError) { if (latestError.status === 404) break; throw latestError; }
-              }
-            }
-            notifyImageTasksChanged();
-            if (mounted.current) { onDirty?.(false); onDeleted?.(); }
-          });
-        }}>放弃导入草稿</button>}</div></div>
+      <div className="task-preparation-actions"><button className="button subtle" type="button" onClick={onCancel}>任务与归档</button></div></div>
     <p className="stage2-description">先上传图片，再提交识别任务。草稿会保存到你的账号，可换设备继续上传。</p>
     {task && <p className="task-preparation-name">{taskDisplayName(task)}</p>}
     {loading && <p role="status">正在读取导入草稿…</p>}

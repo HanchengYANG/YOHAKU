@@ -21,14 +21,29 @@ export function taskDisplayName(task) {
 }
 
 export function taskStateLabel(task) {
-  return task?.appliedDocumentId ? "已保存" : labels[task?.state] || "正在读取";
+  if (task?.appliedDocumentId) return "已保存";
+  if (task?.phase === "segment") {
+    if (task.state === "needs_attention") return "分句待处理";
+    if (task.state === "blocked") return "分句等待恢复";
+    if (["queued", "running"].includes(task.state)) return "整批分句中";
+  }
+  return labels[task?.state] || "正在读取";
+}
+
+export function taskSegmentationState(task) {
+  const step = task?.segmentation;
+  if (!step || task.appliedDocumentId) return null;
+  if (step.state === "succeeded") return { status: "整批分句已完成", statusKind: "done" };
+  if (step.state === "failed") return { status: "整批分句未完成，识别与注音结果已保留", statusKind: "error" };
+  if (task.phase !== "segment") return { status: "整批分句：等待识别与注音完成", statusKind: "pending" };
+  return { status: step.state === "running" ? "正在整批分句，请稍候" : "等待整批分句，图片识别与注音已完成", statusKind: "working" };
 }
 
 export function taskItemState(item) {
   const recognized = !!(item.hasRecognition || item.recognized || item.recognition);
   const annotated = !!(item.hasAnnotation || item.annotated || item.annotation);
   if (item.error || item.status === "failed") return { status: recognized ? "注音未完成 · 正文已保留" : "识别未完成 · 可手动录入", statusKind: "error" };
-  if (annotated) return { status: "已完成", statusKind: "done" };
+  if (annotated) return { status: "识别与注音已完成", statusKind: "done" };
   if (item.status === "running") return { status: item.phase === "annotate" ? "生成注音" : item.phase === "prepare" ? "保存方向" : "识别正文", statusKind: "working" };
   if (recognized) return { status: "正文已保留", statusKind: "retained" };
   return { status: item.imageId ? "原图已上传" : "等待上传", statusKind: "pending" };

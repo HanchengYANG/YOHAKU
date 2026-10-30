@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from "node:crypto";
 import multer from "multer";
-import { blocksToHtml, htmlToBlocks, appendImageBodyHtml } from "../shared/article-html.mjs";
+import { blocksToHtml, htmlToBlocks, appendImageBodyHtml, bodyText, hasCompleteSentenceBoundaries } from "../shared/article-html.mjs";
 import { serializeBlocks, plainText, parseText } from "../shared/document.mjs";
 
 const phases = ["prepare", "recognize", "annotate"];
@@ -9,7 +9,8 @@ const json = (value) => value == null ? null : JSON.stringify(value);
 const parse = (value) => value == null ? null : JSON.parse(value);
 const publicImage = (image) => { const { path, ...metadata } = image; return metadata; };
 const identifier = (value) => typeof value === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(value);
-const initialSteps = () => Object.fromEntries(phases.map((phase) => [phase, { state: "pending", attempts: 0, error: null, nextRunAt: 0 }]));
+const initialStep = () => ({ state: "pending", attempts: 0, error: null, nextRunAt: 0 });
+const initialSteps = () => Object.fromEntries(phases.map((phase) => [phase, initialStep()]));
 const canonical = (value) => Array.isArray(value) ? value.map(canonical)
   : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
 const adoptionHash = (document, resultVersion) => createHash("sha256")
@@ -36,7 +37,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
       next_run_at INTEGER NOT NULL DEFAULT 0, queue_order INTEGER NOT NULL DEFAULT 0,
       result_version INTEGER, applied_document_id TEXT, applied_at TEXT,
       applied_input_hash TEXT, applied_copies_json TEXT NOT NULL DEFAULT '{}',
-      deleted_at TEXT,
+      deleted_at TEXT, segmentation_json TEXT, segmentation_token TEXT,
       UNIQUE(user_id,idempotency_key)
     );
     CREATE INDEX IF NOT EXISTS image_tasks_user ON image_tasks(user_id,updated_at);
@@ -56,6 +57,8 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   if (!taskColumns.includes("applied_input_hash")) database.exec("ALTER TABLE image_tasks ADD COLUMN applied_input_hash TEXT");
   if (!taskColumns.includes("applied_copies_json")) database.exec("ALTER TABLE image_tasks ADD COLUMN applied_copies_json TEXT NOT NULL DEFAULT '{}'");
   if (!taskColumns.includes("deleted_at")) database.exec("ALTER TABLE image_tasks ADD COLUMN deleted_at TEXT");
+  if (!taskColumns.includes("segmentation_json")) database.exec("ALTER TABLE image_tasks ADD COLUMN segmentation_json TEXT");
+  if (!taskColumns.includes("segmentation_token")) database.exec("ALTER TABLE image_tasks ADD COLUMN segmentation_token TEXT");
   let closed = false, timer = null, active = null;
   const submittingImages = new Map();
   let queueOrder = database.prepare("SELECT coalesce(max(queue_order),0) AS value FROM image_tasks").get().value;
@@ -116,6 +119,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   }
   function present(row, items = getItems.all(row.id)) {
     const described = items.map(describeItem);
+    const segmentation = segmentationStep(row), { result, ...segmentationStatus } = segmentation;
     const input = parse(row.input_json);
     let legacyTitles = {};
     if (input.bookTitle === undefined || input.targetTitle === undefined) {
@@ -125,24 +129,39 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
       bookTitle: input.bookTitle ?? (legacyTitles.bookTitle || input.newBookTitle || ""), targetTitle: input.targetTitle ?? legacyTitles.targetTitle ?? "",
       createdAt: row.created_at, updatedAt: row.updated_at, submittedAt: row.submitted_at,
       startedAt: row.started_at, completedAt: row.completed_at, blockedReason: row.blocked_reason,
-      lastError: row.blocked_reason || described.find((item) => item.error)?.error || null,
+      lastError: row.blocked_reason || segmentation.error || described.find((item) => item.error)?.error || null,
+      phase: !row.applied_document_id && imagesComplete(items) && segmentation.state !== "succeeded" ? "segment" : null,
+      segmentation: { ...segmentationStatus, hasResult: !!result },
       resultVersion: row.result_version, appliedDocumentId: row.applied_document_id, appliedAt: row.applied_at,
+      canPause: false, canDelete: canDeleteTask(row),
+      canReview: !row.applied_document_id && items.some((item) => item.image_id) && ["ready", "blocked", "needs_attention", "paused", "cancelled"].includes(row.state),
       items: described, counts: { total: items.length, uploaded: items.filter((item) => item.image_id).length,
         recognized: items.filter((item) => item.recognition_json).length,
         completed: items.filter((item) => item.annotation_json).length,
         failed: described.filter((item) => item.status === "failed").length,
         pending: described.filter((item) => ["pending", "running"].includes(item.status)).length } };
   }
+  function canDeleteTask(row) {
+    return !row.applied_document_id && ["blocked", "needs_attention"].includes(row.state);
+  }
+  function segmentationStep(row) { return parse(row?.segmentation_json) || initialStep(); }
+  function imagesComplete(items) {
+    return items.length > 0 && items.every((item) => phases.every((phase) => parse(item.steps_json)[phase].state === "succeeded"));
+  }
+  function mergedBody(items) {
+    const fragments = items.filter((item) => item.recognition_json).map((item) => {
+      const recognition = parse(item.recognition_json), annotation = parse(item.annotation_json);
+      return blocksToHtml((annotation || recognition).blocks, { sourceImageId: item.image_id });
+    });
+    return fragments.length ? fragments.slice(1).reduce(appendImageBodyHtml, fragments[0]) : "<p></p>";
+  }
   function taskFor(userId, id) { return present(requireTask(userId, id)); }
   function resultFor(userId, id) {
     const task = requireTask(userId, id);
     if (task.result_version == null) throw fail(409, "请先停止处理并固定结果，再开始人工校对。");
     const items = getItems.all(id).filter((item) => item.image_id), input = parse(task.input_json);
-    const fragments = items.filter((item) => item.recognition_json).map((item) => {
-      const recognition = parse(item.recognition_json), annotation = parse(item.annotation_json);
-      return blocksToHtml((annotation || recognition).blocks, { sourceImageId: item.image_id });
-    });
-    const bodyHtml = fragments.length ? fragments.slice(1).reduce(appendImageBodyHtml, fragments[0]) : "<p></p>";
+    const segmentation = segmentationStep(task);
+    const bodyHtml = segmentation.state === "succeeded" ? segmentation.result.bodyHtml : mergedBody(items);
     const blocks = htmlToBlocks(bodyHtml);
     const sourceImages = items.map((item) => ({ id: item.image_id, taskId: task.id, taskItemId: item.id, name: item.name,
       reviewAnnotations: parse(item.review_annotations_json) || [],
@@ -159,7 +178,8 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
       recognition: sourceImages[0]?.recognition || null, appendedImageId: items[0]?.image_id || null,
       autoAnnotationCompleted: items.length > 0 && items.every((item) => item.annotation_json),
       annotationError: items.some((item) => !item.annotation_json) ? "部分图片未完成自动识别或注音，可对照原图手动录入及校正。" : "",
-      initializeSentences: true };
+      segmentationCompleted: segmentation.state === "succeeded", segmentationError: segmentation.error || "",
+      initializeSentences: segmentation.state !== "succeeded" };
   }
 
   function checkDraft(row) {
@@ -176,17 +196,23 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
       for (const step of Object.values(steps)) if (step.state === "running") { step.state = "pending"; step.attempts = Math.max(0, step.attempts - 1); }
       setSteps(item, steps, { attempt_token: null });
     }
+    const task = database.prepare("SELECT segmentation_json FROM image_tasks WHERE id=?").get(taskId), segmentation = segmentationStep(task);
+    if (segmentation.state === "running") {
+      segmentation.state = "pending"; segmentation.attempts = Math.max(0, segmentation.attempts - 1);
+      database.prepare("UPDATE image_tasks SET segmentation_json=?,segmentation_token=NULL WHERE id=?").run(json(segmentation), taskId);
+    } else database.prepare("UPDATE image_tasks SET segmentation_token=NULL WHERE id=?").run(taskId);
     if (active?.taskId === taskId) active.controller.abort();
   }
   function freezeResult(userId, id, version) {
     return transaction(() => {
       const row = requireTask(userId, id);
-      if (["draft", ...processingStates].includes(row.state)) throw fail(409, "请先暂停任务，再进入人工校对。");
+      if (["draft", "queued", "running"].includes(row.state)) throw fail(409, "任务正在处理，不能手动暂停或进入人工校对；请等待处理完成或出错后再处理。");
       if (row.result_version != null) return present(row);
       expectVersion(row, version);
       if (!getItems.all(id).some((item) => item.image_id)) throw fail(400, "请至少上传一张图片后再进入人工处理。");
       invalidateAttempt(id);
-      changeTask(id, { blocked_reason: null, completed_at: row.completed_at || iso(), result_version: row.version + 1 });
+      changeTask(id, { ...(row.state === "blocked" ? { state: "needs_attention" } : {}),
+        completed_at: row.completed_at || iso(), result_version: row.version + 1 });
       return taskFor(userId, id);
     });
   }
@@ -197,6 +223,11 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
     for (const row of database.prepare("SELECT * FROM image_tasks WHERE state='running' AND deleted_at IS NULL").all()) {
       invalidateAttempt(row.id);
       changeTask(row.id, { state: "queued", queue_order: ++queueOrder });
+    }
+    for (const row of database.prepare("SELECT * FROM image_tasks WHERE state='ready' AND applied_document_id IS NULL AND deleted_at IS NULL").all()) {
+      if (segmentationStep(row).state !== "succeeded") changeTask(row.id, {
+        state: "queued", result_version: null, completed_at: null, next_run_at: 0, queue_order: ++queueOrder,
+      });
     }
   });
 
@@ -216,10 +247,17 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   }
   function validAttempt(taskId, itemId, token) {
     if (closed) return false;
-    const task = database.prepare("SELECT state,deleted_at FROM image_tasks WHERE id=?").get(taskId);
-    return task?.state === "running" && !task.deleted_at && getItem.get(taskId, itemId)?.attempt_token === token;
+    const task = database.prepare("SELECT state,deleted_at,segmentation_token FROM image_tasks WHERE id=?").get(taskId);
+    return task?.state === "running" && !task.deleted_at && (itemId ? getItem.get(taskId, itemId)?.attempt_token : task.segmentation_token) === token;
   }
   async function perform(task, item, phase, signal) {
+    if (phase === "segment") {
+      const bodyHtml = mergedBody(getItems.all(task.id));
+      const result = await ai.segmentHtml(task.user_id, { bodyHtml, priority: "background", signal });
+      if (typeof result?.bodyHtml !== "string" || bodyText(result.bodyHtml) !== bodyText(bodyHtml) || !hasCompleteSentenceBoundaries(result.bodyHtml))
+        throw fail(502, "分句未完整覆盖原正文，识别和注音结果已保留，请重试分句。");
+      return result;
+    }
     if (phase === "prepare") {
       const image = await ai.getImage(task.user_id, item.image_id);
       const expected = item.base_revision + (item.quarter_turns ? 1 : 0);
@@ -242,8 +280,15 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   async function execute(task, item, phase, token, controller) {
     try {
       const output = await perform(task, item, phase, controller.signal);
-      if (!validAttempt(task.id, item.id, token)) return;
+      if (!validAttempt(task.id, item?.id, token)) return;
       transaction(() => {
+        if (phase === "segment") {
+          const current = requireTask(task.user_id, task.id), step = segmentationStep(current);
+          changeTask(task.id, { state: "ready", segmentation_json: json({ ...step, state: "succeeded", error: null, nextRunAt: 0, result: output }),
+            segmentation_token: null, blocked_reason: null, next_run_at: 0,
+            result_version: current.version + 1, completed_at: iso() });
+          return;
+        }
         const current = getItem.get(task.id, item.id), steps = parse(current.steps_json);
         steps[phase] = { ...steps[phase], state: "succeeded", error: null, nextRunAt: 0 };
         const patch = { attempt_token: null };
@@ -253,26 +298,26 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
           patch.recognition_json = json(output);
         } else patch.annotation_json = json(output);
         setSteps(current, steps, patch);
-        const complete = getItems.all(task.id).every((value) => phases.every((name) => parse(value.steps_json)[name].state === "succeeded"));
-        const currentTask = requireTask(task.user_id, task.id);
-        changeTask(task.id, { state: complete ? "ready" : "queued", queue_order: ++queueOrder,
-          ...(complete ? { result_version: currentTask.version + 1, completed_at: iso() } : {}) });
+        changeTask(task.id, { state: "queued", queue_order: ++queueOrder });
       });
     } catch (error) {
-      if (!validAttempt(task.id, item.id, token)) return;
+      if (!validAttempt(task.id, item?.id, token)) return;
       transaction(() => {
-        const current = getItem.get(task.id, item.id), steps = parse(current.steps_json), step = steps[phase];
+        const current = phase === "segment" ? requireTask(task.user_id, task.id) : getItem.get(task.id, item.id);
+        const steps = phase === "segment" ? null : parse(current.steps_json), step = steps ? steps[phase] : segmentationStep(current);
         const authRequired = error.code === "AI_AUTH_REQUIRED" || error.status === 401;
         const busy = error.code === "AI_BUSY";
         const transient = error.name === "TypeError" || [408, 429, 500, 502, 503, 504].includes(error.status) || ["ETIMEDOUT", "ECONNRESET", "ENETUNREACH"].includes(error.code);
         const retry = authRequired || busy || transient && step.attempts <= maxAutomaticRetries;
         const message = authRequired ? "网站 AI 授权需要恢复，请联系网站拥有者；已上传图片和已完成结果均已保留。" : String(error.message || "处理失败，请重试或手动处理。").slice(0, 1000);
-        steps[phase] = { ...step, state: retry ? "pending" : "failed", error: message,
+        const failed = { ...step, state: retry ? "pending" : "failed", error: message,
           attempts: authRequired || busy ? Math.max(0, step.attempts - 1) : step.attempts,
           nextRunAt: retry ? now() + (authRequired ? blockedRetryMs : retryDelayMs * Math.max(1, step.attempts)) : 0 };
-        setSteps(current, steps, { attempt_token: null });
-        changeTask(task.id, { state: authRequired ? "blocked" : "queued", blocked_reason: authRequired ? message : null,
-          next_run_at: authRequired ? now() + blockedRetryMs : 0, queue_order: ++queueOrder });
+        if (steps) { steps[phase] = failed; setSteps(current, steps, { attempt_token: null }); }
+        changeTask(task.id, { state: authRequired ? "blocked" : phase === "segment" && !retry ? "needs_attention" : "queued",
+          blocked_reason: authRequired ? message : null, next_run_at: authRequired ? now() + blockedRetryMs : 0, queue_order: ++queueOrder,
+          ...(phase === "segment" ? { segmentation_json: json(failed), segmentation_token: null,
+            ...(!retry ? { completed_at: iso() } : {}) } : {}) });
       });
     }
   }
@@ -287,9 +332,19 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
         const candidate = candidates.find(({ next }) => next.step.nextRunAt <= now());
         if (!candidate) {
           if (!candidates.length) {
-            const complete = items.length > 0 && items.every((item) => !!item.annotation_json);
-            changeTask(task.id, { state: complete ? "ready" : "needs_attention", completed_at: iso(),
-              blocked_reason: null, ...(complete ? { result_version: task.version + 1 } : {}) });
+            const segmentation = segmentationStep(task);
+            if (!imagesComplete(items) || segmentation.state === "failed") {
+              changeTask(task.id, { state: "needs_attention", completed_at: iso(), blocked_reason: null });
+            } else if (segmentation.state === "succeeded") {
+              changeTask(task.id, { state: "ready", completed_at: iso(), blocked_reason: null, result_version: task.version + 1 });
+            } else if (segmentation.nextRunAt <= now()) {
+              const token = randomUUID(), controller = new AbortController();
+              changeTask(task.id, { state: "running", blocked_reason: null, next_run_at: 0,
+                started_at: task.started_at || iso(), queue_order: ++queueOrder, segmentation_token: token,
+                segmentation_json: json({ ...segmentation, state: "running", attempts: segmentation.attempts + 1, error: null }) });
+              selected = { task: requireTask(task.user_id, task.id), item: null, phase: "segment", token, controller };
+              break;
+            }
           }
           continue;
         }
@@ -304,7 +359,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
     });
     if (!selected) { schedule(pollIntervalMs); return Promise.resolve(false); }
     const { task, item, phase, token, controller } = selected;
-    active = { taskId: task.id, itemId: item.id, token, controller, promise: null };
+    active = { taskId: task.id, itemId: item?.id || null, token, controller, promise: null };
     active.promise = execute(task, item, phase, token, controller).finally(() => {
       active = null;
       schedule(0);
@@ -480,16 +535,11 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
       }
     }
   });
-  app.post("/api/image-tasks/:id/pause", (req, res) => res.json(transaction(() => {
-    const row = requireTask(req.user.id, req.params.id);
-    if (row.applied_document_id || ![...processingStates, "needs_attention", "paused"].includes(row.state))
-      throw fail(409, "任务当前不能暂停。");
-    if (row.state === "paused") return present(row);
-    expectVersion(row, req.body?.version);
-    invalidateAttempt(row.id);
-    changeTask(row.id, { state: "paused", completed_at: row.completed_at || iso() });
-    return taskFor(req.user.id, row.id);
-  })));
+  function rejectManualPause(req) {
+    requireTask(req.user.id, req.params.id);
+    throw fail(409, "任务不支持手动暂停。只有出错导致暂停的任务可以重试、人工处理或删除。");
+  }
+  app.post("/api/image-tasks/:id/pause", (req) => rejectManualPause(req));
   async function resume(req, res, allowedStates) {
     const initial = requireTask(req.user.id, req.params.id), snapshots = getItems.all(initial.id);
     const imageIds = snapshots.filter((item) => item.image_id).map((item) => item.image_id);
@@ -512,8 +562,10 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
           for (const step of Object.values(steps)) if (step.state !== "succeeded") Object.assign(step, { state: "pending", attempts: 0, error: null, nextRunAt: 0 });
           setSteps(item, steps, { attempt_token: null, review_annotations_json: "[]" });
         }
+        const segmentation = segmentationStep(requireTask(req.user.id, row.id));
         changeTask(row.id, { state: row.submitted_at ? "queued" : "draft", result_version: null,
-          completed_at: null, blocked_reason: null, next_run_at: 0, queue_order: ++queueOrder });
+          completed_at: null, blocked_reason: null, next_run_at: 0, queue_order: ++queueOrder, segmentation_token: null,
+          ...(segmentation.state === "succeeded" ? {} : { segmentation_json: json(initialStep()) }) });
         return taskFor(req.user.id, row.id);
       });
       res.status(202).json(result); schedule(0);
@@ -529,14 +581,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   app.post("/api/image-tasks/:id/retry", (req, res) => resume(req, res, ["needs_attention", "blocked"]));
   app.post("/api/image-tasks/:id/cancel", (req, res) => {
     if (req.body?.freezeResult) return res.json(freezeResult(req.user.id, req.params.id, req.body.version));
-    res.json(transaction(() => {
-      const row = requireTask(req.user.id, req.params.id);
-      if (row.state === "cancelled" || row.state === "ready") return present(row);
-      expectVersion(row, req.body?.version);
-      invalidateAttempt(row.id);
-      changeTask(row.id, { state: "cancelled", blocked_reason: null, completed_at: row.completed_at || iso() });
-      return taskFor(req.user.id, row.id);
-    }));
+    rejectManualPause(req);
   });
   app.post("/api/image-tasks/:id/items/:itemId/annotate", async (req, res) => {
     const task = requireTask(req.user.id, req.params.id), item = getItem.get(task.id, req.params.itemId);
@@ -608,6 +653,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
       const row = database.prepare("SELECT * FROM image_tasks WHERE id=? AND user_id=?").get(req.params.id, req.user.id);
       if (!row) throw fail(404, "找不到你账号下的图片任务。", "TASK_UNAVAILABLE");
       if (row.deleted_at) return;
+      if (!canDeleteTask(row)) throw fail(409, "只有出错导致暂停且尚未保存的任务可以删除。");
       expectVersion(row, req.body?.version);
       invalidateAttempt(row.id);
       changeTask(row.id, { deleted_at: iso() });

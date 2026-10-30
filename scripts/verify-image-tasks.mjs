@@ -14,20 +14,21 @@ import { createCodexRuntime } from "../server/providers/openai/runtime.mjs";
 import { selectVerificationUser } from "./verify-ai.mjs";
 import { OCR_BODY_SCHEMA } from "../shared/ocr.mjs";
 import { ANNOTATION_SCHEMA } from "../shared/ocr-correction.mjs";
+import { SENTENCE_SCHEMA } from "../shared/sentences.mjs";
 import { plainText } from "../shared/document.mjs";
-import { bodyText } from "../shared/article-html.mjs";
+import { bodyText, hasCompleteSentenceBoundaries } from "../shared/article-html.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const args = process.argv.slice(2);
 if (args.includes("--help")) {
-  console.log("npm run verify:image-tasks -- --image=/绝对路径/原图.png [--user=网站拥有者用户名]\n使用已有共享订阅真实识别、注音一张原图，并验证提交连接关闭、跨登录会话读取及服务重开恢复。所有验证数据写入 artifacts/image-tasks-live/，不创建或修改现有网站文章，不需要 API key。");
+  console.log("npm run verify:image-tasks -- --image=/绝对路径/原图.png [--user=网站拥有者用户名]\n使用已有共享订阅真实识别、注音并分句一张原图，并验证提交连接关闭、跨登录会话读取及服务重开恢复。所有验证数据写入 artifacts/image-tasks-live/，不创建或修改现有网站文章，不需要 API key。");
   process.exit(0);
 }
 
 const output = join(root, "artifacts", "image-tasks-live", randomUUID());
 await mkdir(output, { recursive: true, mode: 0o700 });
 const report = { startedAt: new Date().toISOString(), stage: "preflight", preflightPassed: false,
-  realInference: false, inferenceCalls: { recognize: 0, annotate: 0 }, checks: {}, passed: false };
+  realInference: false, inferenceCalls: { recognize: 0, annotate: 0, segment: 0 }, checks: {}, passed: false };
 const save = () => writeFile(join(output, "report.json"), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
 const safeMessage = (error) => String(error?.message || "验证未完成")
   .replace(/Bearer\s+\S+/gi, "Bearer [已隐藏]")
@@ -95,11 +96,11 @@ try {
     const instance = createCodexRuntime({ auth, storageDir: join(output, directory), turnTimeoutMs: 180000 });
     cli = instance;
     return { ...instance, run: async (input) => {
-      check(input.schema === OCR_BODY_SCHEMA || input.schema === ANNOTATION_SCHEMA, "验证范围仅允许真实识别与注音。");
+      check([OCR_BODY_SCHEMA, ANNOTATION_SCHEMA, SENTENCE_SCHEMA].includes(input.schema), "验证范围仅允许真实识别、注音与分句。");
       check(input.expectedAccountId === identity.expectedAccountId && input.expectedSubject === identity.expectedSubject,
         "运行时授权身份不匹配，真实验证已停止。");
       report.realInference = true;
-      report.inferenceCalls[input.schema === OCR_BODY_SCHEMA ? "recognize" : "annotate"]++;
+      report.inferenceCalls[input.schema === OCR_BODY_SCHEMA ? "recognize" : input.schema === ANNOTATION_SCHEMA ? "annotate" : "segment"]++;
       await save();
       return instance.run(input);
     } };
@@ -158,6 +159,7 @@ try {
   const recognized = source?.recognition?.blocks;
   const annotated = source?.recognition?.annotation?.blocks;
   report.checks.taskReady = true;
+  report.checks.segmentationCompleted = task.segmentation?.state === "succeeded" && hasCompleteSentenceBoundaries(result.bodyHtml);
   report.checks.ocrNonempty = Array.isArray(recognized) && plainText(recognized).trim().length > 0;
   report.checks.annotationExactBody = Array.isArray(annotated) && plainText(annotated) === plainText(recognized);
   report.checks.resultExactBody = bodyText(result.bodyHtml) === plainText(recognized);
@@ -176,11 +178,11 @@ try {
   const restored = (await request(`/image-tasks/${task.id}`, { cookie: deviceB })).data;
   const restoredResult = (await request(`/image-tasks/${task.id}/result`, { cookie: deviceB })).data;
   report.checks.restartPersisted = restored.state === "ready" && restored.resultVersion === task.resultVersion &&
-    restoredResult.content === result.content && restoredResult.sourceImages[0]?.id === source.id;
+    restoredResult.content === result.content && restoredResult.bodyHtml === result.bodyHtml && restoredResult.sourceImages[0]?.id === source.id;
   const database = new DatabaseSync(join(isolatedData, "yohaku.sqlite"), { readOnly: true });
   try { report.checks.noFormalArticles = database.prepare("SELECT count(*) AS count FROM documents").get().count === 0; }
   finally { database.close(); }
-  report.checks.onlyExpectedInference = report.inferenceCalls.recognize === 1 && report.inferenceCalls.annotate === 1;
+  report.checks.onlyExpectedInference = report.inferenceCalls.recognize === 1 && report.inferenceCalls.annotate === 1 && report.inferenceCalls.segment === 1;
   report.passed = Object.values(report.checks).every((value) => value === true);
   report.stage = report.passed ? "passed" : "failed";
 } catch (error) {

@@ -268,4 +268,28 @@ test("保存删除图片的文章后原图仍在，完整讨论保留且失去�
   assert.equal(records.conversations[0].messages.length, 4);
   assert.equal(records.conversations[0].groups.find(group => group.quote === "日本").orphaned, true);
   assert.equal(records.conversations[0].groups.find(group => group.quote === "空").orphaned, false);
+  const emptyBody = removeSourceBodyHtml(updated.bodyHtml, imageIds[1]);
+  assert.equal(bodyText(emptyBody), "");
+  const emptySave = await fetch(`${origin}/api/documents/${document.id}`, {
+    method: "PUT", headers: { Cookie: cookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ ...updated, bodyHtml: emptyBody, content: "", sourceImages: [], sourceImageId: null }),
+  });
+  assert.equal(emptySave.status, 400, "移除唯一图片可产生空草稿，但不能把正式文章保存为空");
+  const replacement = blocksToHtml(parseText("{手|て}で書く。"));
+  const textOnly = await request(`/documents/${document.id}`, {
+    ...updated, bodyHtml: replacement, content: serializeBlocks(htmlToBlocks(replacement)), sourceImages: [], sourceImageId: null,
+  }, "PUT");
+  assert.deepEqual(textOnly.sourceImages, []);
+  assert.equal(textOnly.sourceImageId, null);
+  assert.equal(textOnly.recognition, null);
+  assert.deepEqual(bodyRanges(textOnly.bodyHtml).sources, []);
+  assert.equal(serializeBlocks(textOnly.blocks), "{手|て}で書く。");
+  const reopened = await request(`/documents/${document.id}`);
+  assert.deepEqual(reopened.sourceImages, []);
+  assert.equal(reopened.sourceImageId, null);
+  assert.equal(reopened.recognition, null);
+  const orphaned = await request(`/documents/${document.id}/conversations`);
+  assert.equal(orphaned.conversations[0].messages.length, 4);
+  assert.ok(orphaned.conversations[0].groups.every(group => group.orphaned));
+  for (const id of imageIds) assert.equal((await fetch(`${origin}/api/images/${id}/raw`, { headers: { Cookie: cookie } })).status, 200);
 });

@@ -42,6 +42,18 @@ async function imageFault(phase) {
     { status: 502, expose: true });
 }
 
+async function sentenceFault() {
+  if (!existsSync(imageControlsPath)) return;
+  const controls = JSON.parse(readFileSync(imageControlsPath, "utf8"));
+  const fail = controls.sentenceFailures === "permanent" || controls.sentenceFailures > 0;
+  if (Number.isFinite(controls.sentenceFailures) && controls.sentenceFailures > 0) {
+    controls.sentenceFailures--;
+    writeFileSync(imageControlsPath, JSON.stringify(controls));
+  }
+  if (controls.sentenceDelayMs) await new Promise((resolve) => setTimeout(resolve, controls.sentenceDelayMs));
+  if (fail) throw Object.assign(new Error("浏览器测试故障：整批分句暂时失败。"), { status: 502, expose: true });
+}
+
 const auth = {
   async status() {
     return {
@@ -134,6 +146,7 @@ const runtime = {
       writeFileSync(new URL("../../artifacts/ai-e2e-data/runtime-calls.json", import.meta.url), JSON.stringify(runtimeCalls));
       if (phase === "recognize" || phase === "annotate") await imageFault(phase);
       if (schema === SENTENCE_SCHEMA) {
+        await sentenceFault();
         const text = JSON.parse(prompt.split("\n输入正文：\n").at(-1));
         return { completed: true, text: JSON.stringify({ sentences: text.match(/[^。！？\n]+(?:[。！？][」』）]*)?|\n/g) || [text] }), model: "UI-TEST-DOUBLE", threadId: id };
       }
@@ -172,7 +185,8 @@ const runtime = {
           throw new Error("真实图片无法读取。");
         return {
           completed: true,
-          text: JSON.stringify({ text: ocrText }),
+          text: JSON.stringify({ text: existsSync(imageControlsPath)
+            ? JSON.parse(readFileSync(imageControlsPath, "utf8")).ocrText ?? ocrText : ocrText }),
           model: "UI-TEST-DOUBLE",
           threadId: id,
           reasoningEffort: reasoningEffort ?? null,

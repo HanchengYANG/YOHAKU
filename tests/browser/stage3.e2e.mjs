@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import sharp from "sharp";
-import { bodyRanges, bodyText, sourceBodyHtml } from "../../shared/article-html.mjs";
+import { bodyRanges, bodyText, hasCompleteSentenceBoundaries, sourceBodyHtml } from "../../shared/article-html.mjs";
 import { ensureOwnerSession } from "./session.mjs";
 import { selectArticleText } from "./article-selection.mjs";
 
@@ -172,14 +172,18 @@ test("图片文字 pair 追加同篇文章、逐图编辑与按钮排序，保�
         if(!await title.isVisible()) await page.locator(".editor-meta-details > summary").click();
         await title.fill(`多图文章 ${info.project.name}`);
       }
-      const response=page.waitForResponse((response)=>/\/sentences$/.test(new URL(response.url()).pathname));
+      const sentenceCallsBeforeSave=(await calls()).filter(call=>call.type==="sentences").length;
+      const response=page.waitForResponse(result=>result.request().method()==="POST"&&new URL(result.url()).pathname===`/api/image-tasks/${taskId}/apply`);
       await page.getByRole("button",{name:"保存并阅读"}).click();
-      if(response) expect((await response).ok()).toBe(true);
+      expect((await response).ok()).toBe(true);
       await expect(page.getByRole("button",{name:"重新分句",exact:true})).toBeEnabled();
       const nextId=await page.evaluate(()=>location.hash.slice(1));
       if(id) expect(nextId).toBe(id); else id=nextId;
       if(index===1) {
-        firstPairText=bodyText((await current(page,id)).bodyHtml);
+        const saved=await current(page,id);
+        expect(hasCompleteSentenceBoundaries(saved.bodyHtml)).toBe(true);
+        expect((await calls()).filter(call=>call.type==="sentences")).toHaveLength(sentenceCallsBeforeSave);
+        firstPairText=bodyText(saved.bodyHtml);
       }
     }
     let saved=await current(page,id);
@@ -384,7 +388,7 @@ test("阅读旧文章立即初始化并保存分句，保留原文和注音，�
   } finally { await remove(page, document.id); }
 });
 
-test("旧文章自动分句失败保留已存正文，阅读仍可用且能手动重试", async ({page}, info) => {
+test("旧文章自动分句失败隐藏正文，保留编辑和返回入口且能手动重试", async ({page}, info) => {
   const document = await createUnsegmentedArticle(page, `失败 ${info.project.name}`);
   const routePattern = `**${sentencePath(document.id)}`;
   let attempts = 0;
@@ -394,26 +398,178 @@ test("旧文章自动分句失败保留已存正文，阅读仍可用且能手�
   });
   try {
     await page.goto(`/#${document.id}`);
-    await expect(page.getByRole("article", {name:"日语原文",exact:true})).toBeVisible();
+    await expect(page.getByRole("article", {name:"日语原文",exact:true})).toHaveCount(0);
+    await expect(page.getByRole("region", {name:"准备阅读",exact:true})).toBeVisible();
     await expect(page.getByRole("alert")).toContainText("旧文章分句暂不可用");
-    await expect(page.getByRole("button", {name:"初始化分句",exact:true})).toBeEnabled();
+    await expect(page.getByRole("button", {name:"重试分句",exact:true})).toBeEnabled();
     await expect(page.getByRole("button", {name:"校对文字与注音",exact:true})).toBeEnabled();
+    await expect(page.getByRole("button", {name:"返回书架",exact:true})).toBeEnabled();
+    await expect(page.getByRole("button", {name:"对话记录",exact:true})).toHaveCount(0);
     await page.waitForLoadState("networkidle");
     expect(attempts).toBe(1);
     const unchanged = await current(page, document.id);
     expect(unchanged.bodyHtml).toBe(document.bodyHtml);
     expect(unchanged.revision).toBe(document.revision);
+    await page.getByRole("button", {name:"校对文字与注音",exact:true}).click();
+    await expect(page.getByRole("textbox", {name:"日语正文",exact:true})).toHaveValue(bodyText(document.bodyHtml));
+    expect(attempts).toBe(1);
+    await page.getByRole("button", {name:"取消",exact:true}).click();
+    await expect(page.getByRole("region", {name:"准备阅读",exact:true})).toBeVisible();
     await page.unroute(routePattern);
     const retry = page.waitForResponse(sentenceResponse(document.id));
-    await page.getByRole("button", {name:"初始化分句",exact:true}).click();
+    await page.getByRole("button", {name:"重试分句",exact:true}).click();
     expect((await retry).ok()).toBe(true);
     await expect(page.getByRole("button", {name:"重新分句",exact:true})).toBeEnabled();
     await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(page.getByRole("article", {name:"日语原文",exact:true})).toBeVisible();
     const saved = await current(page, document.id);
     expect(bodyText(saved.bodyHtml)).toBe(bodyText(document.bodyHtml));
     expect(saved.content).toBe(document.content);
     expect(bodyRanges(saved.bodyHtml).sentences.length).toBeGreaterThan(1);
   } finally { await page.unroute(routePattern); await remove(page, document.id); }
+});
+
+for (const partial of [false, true]) test(`${partial ? "部分分句" : "未分句"}文章等待全文处理时不挂载正文，完成后才允许阅读`, async ({page}, info) => {
+  let document = await createUnsegmentedArticle(page, `等待 ${partial} ${info.project.name}`);
+  if (partial) {
+    const response = await page.request.put(`/api/documents/${document.id}`, {data:{...document,
+      bodyHtml:document.bodyHtml.replace("資料",'<span data-sentence-id="partial-sentence">資料</span>')}});
+    expect(response.ok()).toBe(true);
+    document = await response.json();
+    expect(bodyRanges(document.bodyHtml).sentences).toHaveLength(1);
+    expect(hasCompleteSentenceBoundaries(document.bodyHtml)).toBe(false);
+  }
+  let release, signalStarted;
+  const held = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { signalStarted = resolve; });
+  const pattern = `**${sentencePath(document.id)}`;
+  await page.addInitScript(() => {
+    window.__readingGateAllowed = false;
+    window.__readingGateFlashed = false;
+    new MutationObserver(() => {
+      if (!window.__readingGateAllowed && document.querySelector('article[aria-label="日语原文"]')) window.__readingGateFlashed = true;
+    }).observe(document, {childList:true,subtree:true});
+  });
+  await page.route(pattern, async route => {
+    const response = await route.fetch();
+    signalStarted();
+    await held;
+    await route.fulfill({response});
+  });
+  try {
+    await page.goto(`/#${document.id}`);
+    await started;
+    const waiting = page.getByRole("region", {name:"准备阅读",exact:true});
+    await expect(waiting).toBeVisible();
+    await expect(waiting.getByRole("progressbar", {name:"正在分句",exact:true})).toBeVisible();
+    await expect(waiting.getByRole("progressbar")).not.toHaveAttribute("aria-valuenow");
+    await expect(page.getByRole("article", {name:"日语原文",exact:true})).toHaveCount(0);
+    await expect(page.locator(".article-body,.selection-questions,.document-chat")).toHaveCount(0);
+    await expect(page.getByRole("button", {name:"对话记录",exact:true})).toHaveCount(0);
+    expect(await page.evaluate(() => window.__readingGateFlashed)).toBe(false);
+    await page.evaluate(() => { window.__readingGateAllowed = true; });
+    release();
+    await expect(page.getByRole("article", {name:"日语原文",exact:true})).toBeVisible();
+    await expect(waiting).toHaveCount(0);
+    const saved = await current(page, document.id);
+    expect(hasCompleteSentenceBoundaries(saved.bodyHtml)).toBe(true);
+    expect(bodyText(saved.bodyHtml)).toBe(bodyText(document.bodyHtml));
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  } finally { release(); await page.unroute(pattern); await remove(page, document.id); }
+});
+
+test("阅读分句遇到旧版本时读取最新正文，只重试一次且不展示旧正文", async ({page}, info) => {
+  const document = await createUnsegmentedArticle(page, `版本变化 ${info.project.name}`);
+  const pattern = `**${sentencePath(document.id)}`;
+  const requests = [];
+  let updated;
+  await page.route(pattern, async route => {
+    requests.push(route.request().postDataJSON());
+    if (requests.length > 1) return route.continue();
+    const response = await page.request.put(`/api/documents/${document.id}`, {data:{...document,
+      bodyHtml:document.bodyHtml.replace("資料", "最新文章")}});
+    expect(response.ok()).toBe(true);
+    updated = await response.json();
+    await route.fulfill({status:409,contentType:"application/json",body:JSON.stringify({error:"测试：文章已在其他页面更新。"})});
+  });
+  try {
+    await page.goto(`/#${document.id}`);
+    await expect(page.getByRole("article", {name:"日语原文",exact:true})).toBeVisible();
+    await page.waitForLoadState("networkidle");
+    expect(requests).toHaveLength(2);
+    expect(requests[0].revision).toBe(document.revision);
+    expect(requests[1].revision).toBe(updated.revision);
+    const saved = await current(page, document.id);
+    expect(bodyText(saved.bodyHtml)).toBe(bodyText(updated.bodyHtml));
+    expect(hasCompleteSentenceBoundaries(saved.bodyHtml)).toBe(true);
+    expect(await page.getByRole("article", {name:"日语原文",exact:true}).textContent()).toContain("最新文章");
+  } finally { await page.unroute(pattern); await remove(page, document.id); }
+});
+
+test("阅读分句持续版本冲突只尝试两次，停止等待并保留明确重试入口", async ({page}, info) => {
+  const document = await createUnsegmentedArticle(page, `持续冲突 ${info.project.name}`);
+  const pattern = `**${sentencePath(document.id)}`;
+  let attempts = 0;
+  await page.route(pattern, route => {
+    attempts++;
+    return route.fulfill({status:409,contentType:"application/json",body:JSON.stringify({error:"测试：分句版本持续冲突。"})});
+  });
+  try {
+    await page.goto(`/#${document.id}`);
+    await expect(page.getByRole("alert")).toContainText("分句版本持续冲突");
+    await expect(page.getByRole("article", {name:"日语原文",exact:true})).toHaveCount(0);
+    await expect(page.getByRole("button", {name:"重试分句",exact:true})).toBeEnabled();
+    await page.waitForLoadState("networkidle");
+    expect(attempts).toBe(2);
+    await page.unroute(pattern);
+    await page.getByRole("button", {name:"重试分句",exact:true}).click();
+    await expect(page.getByRole("article", {name:"日语原文",exact:true})).toBeVisible();
+    expect(hasCompleteSentenceBoundaries((await current(page, document.id)).bodyHtml)).toBe(true);
+  } finally { await page.unroute(pattern); await remove(page, document.id); }
+});
+
+for (const failure of [false, true]) test(`等待分句时新建草稿不被迟到${failure ? "错误" : "结果"}改写，取消后恢复阅读状态`, async ({page}, info) => {
+  const document = await createUnsegmentedArticle(page, `草稿切换 ${failure} ${info.project.name}`);
+  const pattern = `**${sentencePath(document.id)}`;
+  let release, signalStarted, signalFinished;
+  const held = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { signalStarted = resolve; });
+  const finished = new Promise(resolve => { signalFinished = resolve; });
+  let attempts = 0;
+  await page.route(pattern, async route => {
+    attempts++;
+    signalStarted();
+    await held;
+    try {
+      if (failure) await route.fulfill({status:502,contentType:"application/json",body:JSON.stringify({error:"测试：草稿打开期间分句失败。"})});
+      else await route.fulfill({response:await route.fetch()});
+    } finally { signalFinished(); }
+  });
+  try {
+    await page.goto(`/#${document.id}`);
+    await started;
+    await expect(page.getByRole("region", {name:"准备阅读",exact:true})).toBeVisible();
+    const shelf = page.getByRole("button", {name:"打开书架",exact:true});
+    if (await shelf.isVisible()) await shelf.click();
+    await page.getByRole("button", {name:"导入文字",exact:true}).click();
+    const input = page.getByRole("textbox", {name:"日语正文",exact:true});
+    const manual = `新しい草稿は変更しない。${info.project.name}`;
+    await input.fill(manual);
+    release();
+    await finished;
+    await expect(input).toHaveValue(manual);
+    page.once("dialog", dialog => dialog.accept());
+    await page.getByRole("button", {name:"取消",exact:true}).click();
+    if (failure) {
+      await expect(page.getByRole("alert")).toContainText("草稿打开期间分句失败");
+      await expect(page.getByRole("button", {name:"重试分句",exact:true})).toBeEnabled();
+      await expect(page.getByRole("article", {name:"日语原文",exact:true})).toHaveCount(0);
+    } else {
+      await expect(page.getByRole("article", {name:"日语原文",exact:true})).toBeVisible();
+      expect(hasCompleteSentenceBoundaries((await current(page, document.id)).bodyHtml)).toBe(true);
+    }
+    expect(attempts).toBe(1);
+  } finally { release(); await page.unroute(pattern); await remove(page, document.id); }
 });
 
 test("旧文章分句的迟到结果不覆盖其他文章，进入校对后仍能保存当前草稿", async ({page}, info) => {
@@ -442,6 +598,8 @@ test("旧文章分句的迟到结果不覆盖其他文章，进入校对后仍�
     });
     await page.goto(`/#${first.id}`);
     await firstStarted;
+    await expect(page.getByRole("region", {name:"准备阅读",exact:true})).toBeVisible();
+    await expect(page.getByRole("article", {name:"日语原文",exact:true})).toHaveCount(0);
     await page.evaluate(id => { location.hash = id; }, second.id);
     await expect(page.getByRole("heading", {name:second.title,exact:true})).toBeVisible();
     releaseFirst();
@@ -460,6 +618,7 @@ test("旧文章分句的迟到结果不覆盖其他文章，进入校对后仍�
     });
     await page.evaluate(id => { location.hash = id; }, editable.id);
     await editStarted;
+    await expect(page.getByRole("region", {name:"准备阅读",exact:true})).toBeVisible();
     await page.getByRole("button", {name:"校对文字与注音",exact:true}).click();
     releaseEdit();
     const body = page.getByRole("textbox", {name:"日语正文",exact:true});

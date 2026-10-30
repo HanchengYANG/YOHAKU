@@ -28,7 +28,7 @@ import {
 } from "../../shared/ocr.mjs";
 import { plainText, serializeBlocks, parseText } from "../../shared/document.mjs";
 
-import { blocksToHtml, htmlToBlocks, bodyText, bodyRanges, normalizeBodyHtml, applySentenceBoundaries, initializeSentenceBoundaries, markBodyRange, removeQaMarks } from "../../shared/article-html.mjs";
+import { blocksToHtml, htmlToBlocks, bodyText, bodyRanges, hasCompleteSentenceBoundaries, normalizeBodyHtml, applySentenceBoundaries, initializeSentenceBoundaries, markBodyRange, removeQaMarks } from "../../shared/article-html.mjs";
 import { SENTENCE_SCHEMA, sentencePrompt, validateSentences } from "../../shared/sentences.mjs";
 
 const bodyHash = (html) => createHash("sha256").update(bodyText(html)).digest("hex");
@@ -768,6 +768,47 @@ export function attachAIRoutes({
     const row = getDocument(req.user.id, req.params.id), record = canonicalConversation(row, req.user.id);
     res.json({ conversations: record ? [presentConversation(record)] : [] });
   });
+  async function segmentHtml(userId, { bodyHtml, force = false, priority = "background", signal } = {}) {
+    assertOpen(signal);
+    const html = normalizeBodyHtml(bodyHtml), text = bodyText(html), hash = bodyHash(html), ranges = bodyRanges(html);
+    if (text.length > 200000 || !text.trim()) throw fail(400, "正文长度无效。");
+    if (!force && hasCompleteSentenceBoundaries(html)) return { bodyHtml: html, bodyHash: hash, sentences: ranges.sentences };
+    const cachedFragments = () => {
+      const cached = !force && !ranges.sentences.length && database.prepare("SELECT fragments_json FROM sentence_cache WHERE body_hash=?").get(hash);
+      return cached ? validateSentences({ sentences: JSON.parse(cached.fragments_json) }, text) : null;
+    };
+    let fragments = cachedFragments();
+    if (!fragments) await withProvider(userId, preferred(), async (provider) => {
+      // Another request may have filled the same cache while this one queued.
+      fragments = cachedFragments();
+      if (fragments) return;
+      const { accountId, expectedSubject } = await identity(provider);
+      const split = async (part) => {
+        if (!part.trim()) return [part];
+        const result = await provider.runtime.run({ prompt: sentencePrompt(part), schema: SENTENCE_SCHEMA,
+          expectedAccountId: accountId, expectedSubject, webSearch: false });
+        assertOpen(signal);
+        if (result.completed !== true) throw fail(502, "分句未完成，现有正文已保留。");
+        try { return validateSentences(JSON.parse(result.text), part); }
+        catch (error) { throw fail(502, error.expose ? error.message : "分句返回格式无效，现有正文已保留，请重试。"); }
+      };
+      if (force || !ranges.sentences.length) fragments = await split(text);
+      else {
+        fragments = []; let offset = 0;
+        for (const sentence of ranges.sentences) {
+          if (sentence.start > offset) fragments.push(...await split(text.slice(offset, sentence.start)));
+          fragments.push(text.slice(sentence.start, sentence.end)); offset = sentence.end;
+        }
+        if (offset < text.length) fragments.push(...await split(text.slice(offset)));
+      }
+      assertOpen(signal);
+      database.prepare("INSERT INTO sentence_cache VALUES(?,?) ON CONFLICT(body_hash) DO UPDATE SET fragments_json=excluded.fragments_json").run(hash, JSON.stringify(fragments));
+    }, { priority, signal });
+    assertOpen(signal);
+    const next = force ? applySentenceBoundaries(html, fragments) : initializeSentenceBoundaries(html, fragments);
+    if (bodyText(next) !== text || !hasCompleteSentenceBoundaries(next)) throw fail(502, "分句尚未覆盖全部正文，请重试。");
+    return { bodyHtml: next, bodyHash: hash, sentences: bodyRanges(next).sentences };
+  }
   app.post("/api/documents/:id/sentences", async (req, res) => {
     const row = getDocument(req.user.id, req.params.id), supplied = typeof req.body?.bodyHtml === "string", html = supplied ? normalizeBodyHtml(req.body.bodyHtml) : rowHtml(row), hash = bodyHash(html);
     if (req.body?.revision !== row.revision || req.body?.bodyHash !== hash) throw fail(409, "正文版本已变化，请重试分句。");
@@ -786,37 +827,8 @@ export function attachAIRoutes({
       }
       for (const group of ranges.qa) if (!database.prepare("SELECT id FROM qa_groups WHERE id=? AND user_id=? AND document_id=?").get(group.id, req.user.id, row.id)) throw fail(400, "草稿引用了不属于本文的问答组。");
     }
-    const existingText = ranges.sentences.map((item) => item.text).join("").replace(/\n/g, ""), wholeText = bodyText(html).replace(/\n/g, "");
-    let next = html;
-    if (force || existingText !== wholeText || !ranges.sentences.length) {
-      const text = bodyText(html);
-      const cache = !force && !ranges.sentences.length && database.prepare("SELECT fragments_json FROM sentence_cache WHERE body_hash=?").get(hash);
-      let fragments;
-      if (cache) fragments = validateSentences({ sentences: JSON.parse(cache.fragments_json) }, text);
-      else await withProvider(req.user.id, preferred(), async (provider) => {
-        const { accountId, expectedSubject } = await identity(provider);
-        const split = async (part) => {
-          if (!part.trim()) return [part];
-          const result = await provider.runtime.run({ prompt: sentencePrompt(part), schema: SENTENCE_SCHEMA, expectedAccountId: accountId, expectedSubject, webSearch: false });
-          assertOpen(req.aiSignal);
-          if (result.completed !== true) throw fail(502, "分句未完成，现有正文已保留。");
-          try { return validateSentences(JSON.parse(result.text), part); } catch (error) { throw fail(502, error.expose ? error.message : "分句返回格式无效，现有正文已保留，请重试。"); }
-        };
-        if (force || !ranges.sentences.length) fragments = await split(text);
-        else {
-          fragments = []; let offset = 0;
-          for (const sentence of ranges.sentences) {
-            if (sentence.start > offset) fragments.push(...await split(text.slice(offset, sentence.start)));
-            fragments.push(text.slice(sentence.start, sentence.end)); offset = sentence.end;
-          }
-          if (offset < text.length) fragments.push(...await split(text.slice(offset)));
-        }
-        assertOpen(req.aiSignal);
-        database.prepare("INSERT INTO sentence_cache VALUES(?,?) ON CONFLICT(body_hash) DO UPDATE SET fragments_json=excluded.fragments_json").run(hash, JSON.stringify(fragments));
-      }, { signal: req.aiSignal });
-      next = force ? applySentenceBoundaries(html, fragments) : initializeSentenceBoundaries(html, fragments);
-
-    }
+    const { bodyHtml: next } = await segmentHtml(req.user.id, { bodyHtml: html, force,
+      priority: "interactive", signal: req.aiSignal });
     const current = getDocument(req.user.id, row.id);
     if (current.revision !== row.revision || rowHtml(current) !== rowHtml(row)) throw fail(409, "分句期间正文已编辑，原修改已保留，请重新分句。");
     let revision = row.revision;
@@ -904,7 +916,7 @@ export function attachAIRoutes({
     res.status(204).end();
   });
   return {
-    getImage, saveImage, rotateImage, recognizeImage, annotateImage,
+    getImage, saveImage, rotateImage, recognizeImage, annotateImage, segmentHtml,
     setImageMutationGuard: (guard) => { imageMutationGuard = guard; },
     setImageAnnotationGuard: (guard) => { imageAnnotationGuard = guard; },
     isImageMutating: (id) => imageMutations.has(id),

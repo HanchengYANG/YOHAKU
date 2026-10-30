@@ -381,8 +381,15 @@ test("删除图片与正文可撤销重做及取消，保护旋转并保留其�
     await expect(card(imageIds[2])).toHaveAttribute("aria-pressed","true");
     await removeImage(imageIds[2]).click();
     await expect(card(imageIds[0])).toHaveAttribute("aria-pressed","true");
-    await expect(removeImage(imageIds[0])).toBeDisabled();
-    await expect(sorter.getByText("至少保留一张图片",{exact:true})).toBeVisible();
+    await expect(removeImage(imageIds[0])).toBeEnabled();
+    await expect(sorter.getByText("至少保留一张图片",{exact:true})).toHaveCount(0);
+    await removeImage(imageIds[0]).click();
+    await expect(sorter).toHaveCount(0);
+    await expect(input).toHaveValue("");
+    await expect(page.locator(".preview-panel")).toHaveAttribute("aria-label","阅读预览");
+    await undo.click();
+    await expect(card(imageIds[0])).toHaveAttribute("aria-pressed","true");
+    await expect(input).toHaveValue(bodyText(sourceBodyHtml(document.bodyHtml,imageIds[0])));
     const saved=page.waitForResponse(response=>response.request().method()==="PUT"&&new URL(response.url()).pathname===`/api/documents/${document.id}`);
     await page.getByRole("button",{name:"保存并阅读",exact:true}).click();expect((await saved).ok()).toBe(true);
     await expect(page.getByRole("article",{name:"日语原文",exact:true})).toBeVisible();
@@ -400,4 +407,71 @@ test("删除图片与正文可撤销重做及取消，保护旋转并保留其�
     expect(imageMutations).toEqual([]);
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   } finally {await remove(page,document.id);}
+});
+
+test("唯一图片可移除并撤销重做或取消，补正文保存后保持无图片文章",async({page},info)=>{
+  const created=await imagePairFixture(page,`最后图片 ${info.project.name}`,1);
+  const [imageId]=created.imageIds;
+  const original=created.document;
+  try {
+    const response=await page.request.post(`/api/documents/${original.id}/conversations`,{data:{operation:"translation",selection:{start:0,end:2,text:"同じ",bodyHash:original.bodyHash,
+      sentenceIds:bodyRanges(original.bodyHtml).sentences.filter(range=>range.start<2&&range.end>0).map(range=>range.id)}}});
+    expect(response.ok(),await response.text()).toBe(true);
+    const document=await(await page.request.get(`/api/documents/${original.id}`)).json();
+    const records=await(await page.request.get(`/api/documents/${original.id}/conversations`)).json();
+    const input=inputFor(page), sorter=page.locator(".source-image-sorter");
+    const removeImage=()=>sorter.getByRole("button",{name:/^移除/});
+    const undo=page.getByRole("button",{name:"撤销",exact:true}), redo=page.getByRole("button",{name:"重做",exact:true});
+    const edit=async()=>{
+      await page.getByRole("button",{name:"校对文字与注音",exact:true}).click();
+      await expect(removeImage()).toBeEnabled();
+      await expect(removeImage()).toHaveAttribute("title","移除此图片及对应正文");
+    };
+    await page.goto(`/#${document.id}`);
+    await edit();
+    await removeImage().click();
+    await expect(sorter).toHaveCount(0);
+    await expect(input).toHaveValue("");
+    await expect(page.locator(".preview-panel")).toHaveAttribute("aria-label","阅读预览");
+    await expect(page.getByRole("img",{name:"用于校对正文和注音的日语原图",exact:true})).toHaveCount(0);
+    await expect(page.getByRole("button",{name:"保存并阅读",exact:true})).toBeDisabled();
+    await undo.click();
+    await expect(sorter.locator(`[data-sort-image-id="${imageId}"]`)).toHaveAttribute("aria-pressed","true");
+    await expect(input).toHaveValue(bodyText(document.bodyHtml));
+    await expect(page.locator(".qa-orphan-warning")).toHaveCount(0);
+    await redo.click();
+    await expect(sorter).toHaveCount(0);
+    await expect(input).toHaveValue("");
+    page.once("dialog",dialog=>dialog.accept());
+    await page.getByRole("button",{name:"取消",exact:true}).click();
+    await expect(page.getByRole("article",{name:"日语原文",exact:true})).toBeVisible();
+    const cancelled=await(await page.request.get(`/api/documents/${document.id}`)).json();
+    expect(cancelled.bodyHtml).toBe(document.bodyHtml);
+    expect(cancelled.sourceImages.map(image=>image.id)).toEqual([imageId]);
+
+    await edit();
+    await removeImage().click();
+    const replacement="最後の写真を外した後の本文。";
+    await input.fill(replacement);
+    const saved=page.waitForResponse(result=>result.request().method()==="PUT"&&new URL(result.url()).pathname===`/api/documents/${document.id}`);
+    await page.getByRole("button",{name:"保存并阅读",exact:true}).click();
+    expect((await saved).ok()).toBe(true);
+    await expect(page.getByRole("article",{name:"日语原文",exact:true})).toBeVisible();
+    await page.reload();
+    const reopened=await(await page.request.get(`/api/documents/${document.id}`)).json();
+    expect(reopened.sourceImages).toEqual([]);
+    expect(reopened.sourceImageId).toBeNull();
+    expect(reopened.recognition).toBeNull();
+    expect(bodyText(reopened.bodyHtml)).toBe(replacement);
+    expect(bodyRanges(reopened.bodyHtml).sources).toEqual([]);
+    expect(await(await page.request.get(`/api/images/${imageId}/raw`)).body()).toEqual(created.buffers[0]);
+    const history=await(await page.request.get(`/api/documents/${document.id}/conversations`)).json();
+    expect(history.conversations.flatMap(item=>item.messages).length).toBe(records.conversations.flatMap(item=>item.messages).length);
+    expect(history.conversations.flatMap(item=>item.groups).every(group=>group.orphaned)).toBe(true);
+    await page.getByRole("button",{name:"校对文字与注音",exact:true}).click();
+    await expect(sorter).toHaveCount(0);
+    await expect(input).toHaveValue(replacement);
+    await expect(page.getByRole("img",{name:"用于校对正文和注音的日语原图",exact:true})).toHaveCount(0);
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  } finally {await remove(page,original.id);}
 });

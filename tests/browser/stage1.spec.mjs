@@ -207,9 +207,13 @@ test("多页面版本冲突后可以重新打开最新材料", async ({ page }) 
   await page.goto(`/#${old.id}`);
   await page.getByRole("button", { name: "校对文字与注音" }).click();
   await page.getByRole("textbox", { name: "材料标题" }).fill("旧页面的修改");
-  await page.request.put(`/api/documents/${old.id}`, {
-    data: { ...old, title: "其他页面已更新" },
+  // Preparing the first read persists sentence boundaries and advances the
+  // revision. The competing page must update that actual current revision.
+  const latest = await (await page.request.get(`/api/documents/${old.id}`)).json();
+  const updated = await page.request.put(`/api/documents/${old.id}`, {
+    data: { ...latest, title: "其他页面已更新" },
   });
+  expect(updated.ok()).toBe(true);
   await page.getByRole("button", { name: "保存并阅读" }).click();
   await expect(page.getByRole("alert")).toContainText("其他页面修改");
   page.once("dialog", (dialog) => dialog.accept());

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pendingLocalEntries, newerTask, taskCounts, taskDisplayName, taskDuration, taskImageUrl, taskItemState, taskStateLabel } from "../client/image-tasks.mjs";
+import { pendingLocalEntries, newerTask, taskCounts, taskDisplayName, taskDuration, taskImageUrl, taskItemState, taskSegmentationState, taskStateLabel } from "../client/image-tasks.mjs";
 
 test("任务视图忽略迟到的旧版本，同账号新任务仍可切换", () => {
   const current = { id: "same", version: 5, state: "ready" };
@@ -52,4 +52,21 @@ test("暂停任务显示可恢复状态且计时停止增长", () => {
   const task = { state: "paused", startedAt: "2026-10-30T10:00:00Z", updatedAt: "2026-10-30T10:01:10Z" };
   assert.equal(taskStateLabel(task), "已暂停");
   assert.equal(taskDuration(task, Date.parse("2026-10-30T12:00:00Z")), "1 分 10 秒");
+});
+
+test("全部图片完成后整批分句仍属于处理中，不显示待校对", () => {
+  const task = { state: "running", phase: "segment", counts: { total: 2, completed: 2 }, segmentation: { state: "running" } };
+  assert.equal(taskCounts(task).completed, 2);
+  assert.equal(taskStateLabel(task), "整批分句中");
+  assert.deepEqual(taskSegmentationState(task), { status: "正在整批分句，请稍候", statusKind: "working" });
+  assert.match(taskItemState({ hasAnnotation: true }).status, /识别与注音已完成/);
+  assert.equal(taskStateLabel({ ...task, state: "ready", phase: null, segmentation: { state: "succeeded" } }), "待校对");
+});
+
+test("整批分句失败单独提示结果保留，保存后的归档任务不再显示分句进度", () => {
+  const task = { state: "needs_attention", phase: "segment", segmentation: { state: "failed", error: "超时" } };
+  assert.equal(taskStateLabel(task), "分句待处理");
+  assert.deepEqual(taskSegmentationState(task), { status: "整批分句未完成，识别与注音结果已保留", statusKind: "error" });
+  assert.equal(taskStateLabel({ ...task, appliedDocumentId: "saved" }), "已保存");
+  assert.equal(taskSegmentationState({ ...task, appliedDocumentId: "saved" }), null);
 });

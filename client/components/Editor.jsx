@@ -57,7 +57,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
   const knownQaIds = useRef(new Set(initialQaIds.current));
   const currentQaIds = new Set(bodyRanges(bodyHtml).qa.map((range) => range.id));
   const orphanedIds = initialQaIds.current.filter((id) => !currentQaIds.has(id));
-  const [imageSources, setImageSources] = useState(() => initial.sourceImages?.length ? initial.sourceImages : (initial.sourceImageId || initial.recognition?.sourceImage?.id) ? [{id:initial.sourceImageId || initial.recognition?.sourceImage?.id, recognition:initial.recognition}] : []);
+  const [imageSources, setImageSources] = useState(() => Array.isArray(initial.sourceImages) ? initial.sourceImages : (initial.sourceImageId || initial.recognition?.sourceImage?.id) ? [{id:initial.sourceImageId || initial.recognition?.sourceImage?.id, recognition:initial.recognition}] : []);
   const [activeSourceId, setActiveSourceId] = useState(initial.appendedImageId || imageSources[0]?.id || null);
   const [selection, setSelection] = useState(null);
   const [reading, setReading] = useState("");
@@ -541,10 +541,10 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
     restoredRotation.current = null;
     setActiveSourceId(id); setImageMetadata(null); setImageMetadataLoading(!!id); setImageMetadataError("");
     setImageRotation(0); setImageSize(null); setImageError(false); setLoadedImageUrl(null);
-    setImageSaveError(""); setImageConflict(false); setPreviewMode("image");
+    setImageSaveError(""); setImageConflict(false); setPreviewMode(id ? "image" : "reading");
   };
   const removeSource = (id) => {
-    if (busy || compositionActive.current || imageSources.length <= 1) return;
+    if (busy || compositionActive.current) return;
     const index = imageSources.findIndex((image) => image.id === id);
     if (index < 0) return;
     const nextSources = imageSources.filter((image) => image.id !== id);
@@ -552,7 +552,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
     updateBlocks(htmlToBlocks(nextHtml), false, nextHtml);
     setImageSources(nextSources);
     resetSourceTools();
-    if (id === activeSourceId) resetSourceImage(nextSources[Math.min(index, nextSources.length - 1)].id);
+    if (id === activeSourceId) resetSourceImage(nextSources[Math.min(index, nextSources.length - 1)]?.id || null);
     editorViews.current.delete(id);
     setValue((old) => ({...old, initializeSentences:true}));
     setContentDirty(true);
@@ -920,7 +920,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
             name:image.id === activeSourceId && imageMetadata?.originalName || image.originalName || image.name || image.recognition?.sourceImage?.originalName || `来源图 ${index + 1}`,
             src:image.id === activeSourceId ? imageUrl : undefined,
             ...(emptySourceIds.has(image.id) ? {status:"待录入正文",statusKind:"pending"} : {})}))}
-          activeId={activeSourceId} onSelect={chooseSource} onReorder={reorderSources} onRemove={removeSource} minItems={1} disabled={busy} />}
+          activeId={activeSourceId} onSelect={chooseSource} onReorder={reorderSources} onRemove={removeSource} removeBody disabled={busy} />}
         {emptySourceIds.size > 0 && <p className="editor-message" role="status">有 {emptySourceIds.size} 张图片尚未录入正文。保存时会保留原图并标为待录入，也可逐张补录或移除。</p>}
         <div className={`editor-workspace ${!sourceImageId && tab === "text" ? "editor-text-only" : ""}`}>
           <section className="source-panel" aria-label="编辑区域">
