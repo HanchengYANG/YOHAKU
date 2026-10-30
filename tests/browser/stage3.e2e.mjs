@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import sharp from "sharp";
-import { bodyRanges, bodyText } from "../../shared/article-html.mjs";
+import { bodyRanges, bodyText, sourceBodyHtml } from "../../shared/article-html.mjs";
 import { ensureOwnerSession } from "./session.mjs";
 import { selectArticleText } from "./article-selection.mjs";
 
@@ -82,6 +82,7 @@ test("划词不发模型请求，快捷问答只送选区句子，校对与重�
     await chat.getByRole("button", { name: "发送问题", exact: true }).click();
     await expect(chat.locator(".chat-message.assistant")).toHaveCount(2);
     expect((await calls()).filter((call) => call.type === "chat").at(-1).prompt).toContain('"selectedText":"背中"');
+    await chat.getByRole("button", { name: "关闭 AI 讨论", exact: true }).click();
     const resegmented = page.waitForResponse((response) => /\/sentences$/.test(new URL(response.url()).pathname));
     await page.getByRole("button", { name: "重新分句", exact: true }).click();
     expect((await resegmented).ok()).toBe(true);
@@ -113,7 +114,7 @@ test("删除选区即时提示游离，撤销取消恢复标记，保存后仍�
     const body = page.getByRole("textbox",{name:"日语正文",exact:true});
     const original = await body.inputValue();
     await body.fill(original.replace("背中", ""));
-    await expect(page.locator(".qa-orphan-warning")).toContainText("1 个问答组");
+    await expect(page.locator(".qa-orphan-warning")).toContainText("1 组讨论对应的文字已移除。记录会保留");
     await page.getByRole("button",{name:"撤销",exact:true}).click();
     await expect(body).toHaveValue(original);
     await expect(page.locator(".qa-orphan-warning")).toHaveCount(0);
@@ -138,9 +139,9 @@ test("删除选区即时提示游离，撤销取消恢复标记，保存后仍�
   } finally {await remove(page,document.id);}
 });
 
-test("多张来源图追加为同篇文章，保存重开、来源双向定位与原图像素保持", async ({page},info)=>{
+test("图片文字 pair 追加同篇文章、逐图编辑与按钮排序，保存重开保留来源和注音", async ({page},info)=>{
   const sources=[];
-  let id, finalSentenceId, finalSentenceText;
+  let id, firstPairText;
   try {
     for(let index=1;index<=2;index++) {
       const path = new URL(`../../artifacts/stage3-real-images/source-${index}.png`,import.meta.url);
@@ -152,50 +153,101 @@ test("多张来源图追加为同篇文章，保存重开、来源双向定位�
         if(await page.getByRole("button",{name:"打开书架",exact:true}).isVisible()) await page.getByRole("button",{name:"打开书架",exact:true}).click();
         await page.getByRole("button",{name:"导入图片",exact:true}).click();
       } else {
-        await page.getByRole("button",{name:"追加来源图片",exact:true}).click();
-        await page.getByRole("combobox",{name:"追加正文方式",exact:true}).selectOption("continue");
+        await page.getByRole("button",{name:"继续添加图片",exact:true}).click();
+        await expect(page.getByRole("combobox",{name:"追加正文方式",exact:true})).toHaveCount(0);
       }
       await page.getByLabel("选择日语图片",{exact:true}).setInputFiles({name:`来源${index}.png`,mimeType:"image/png",buffer:bytes});
       await page.getByRole("button",{name:"识别并注音",exact:true}).click();
       await expect(page.getByRole("textbox",{name:"日语正文",exact:true})).toBeVisible();
-      if(index===1) await page.getByRole("textbox",{name:"材料标题"}).fill(`多图文章 ${info.project.name}`);
-      const response=index===1 ? page.waitForResponse((response)=>/\/sentences$/.test(new URL(response.url()).pathname)) : null;
+      if(index===1) {
+        const title=page.getByRole("textbox",{name:"材料标题"});
+        if(!await title.isVisible()) await page.locator(".editor-meta-details > summary").click();
+        await title.fill(`多图文章 ${info.project.name}`);
+      }
+      const response=page.waitForResponse((response)=>/\/sentences$/.test(new URL(response.url()).pathname));
       await page.getByRole("button",{name:"保存并阅读"}).click();
       if(response) expect((await response).ok()).toBe(true);
       await expect(page.getByRole("button",{name:"重新分句",exact:true})).toBeEnabled();
       const nextId=await page.evaluate(()=>location.hash.slice(1));
       if(id) expect(nextId).toBe(id); else id=nextId;
       if(index===1) {
-        const sentence=bodyRanges((await current(page,id)).bodyHtml).sentences.at(-1);
-        finalSentenceId=sentence.id; finalSentenceText=sentence.text;
+        firstPairText=bodyText((await current(page,id)).bodyHtml);
       }
     }
-    const saved=await current(page,id);
+    let saved=await current(page,id);
     expect(saved.sourceImages).toHaveLength(2);
-    expect(bodyRanges(saved.bodyHtml).sentences.find(sentence=>sentence.id===finalSentenceId)?.text).toContain(`${finalSentenceText}僕が生まれた日の空は`);
+    const sourceIds=saved.sourceImages.map(source=>source.id);
+    const secondPairText=bodyText(sourceBodyHtml(saved.bodyHtml,sourceIds[1]));
+    expect(bodyText(sourceBodyHtml(saved.bodyHtml,sourceIds[0]))).toBe(firstPairText);
+    expect(bodyText(saved.bodyHtml)).toBe(firstPairText+secondPairText);
     expect(new Set(bodyRanges(saved.bodyHtml).sources.map((source)=>source.id)).size).toBe(2);
     for(let i=0;i<2;i++) {
       const raw=await page.request.get(`/api/images/${saved.sourceImages[i].id}/raw`);
       expect(await raw.body()).toEqual(sources[i]);
       expect(saved.sourceImages[i].recognition).toBeTruthy();
     }
+    const selectedText=bodyText(saved.bodyHtml).slice(0,2);
+    const question=await page.request.post(`/api/documents/${id}/conversations`,{data:{operation:"translation",selection:{start:0,end:2,text:selectedText,bodyHash:saved.bodyHash,
+      sentenceIds:bodyRanges(saved.bodyHtml).sentences.filter(range=>range.start<2&&range.end>0).map(range=>range.id)}}});
+    expect(question.ok()).toBe(true);
+    saved=await current(page,id);
+    const groupId=bodyRanges(saved.bodyHtml).qa[0].id;
+    const readings=saved.blocks.flatMap(block=>block.segments).filter(segment=>segment.reading).map(segment=>[segment.text,segment.reading,segment.origin]).sort();
     await page.reload();
     await page.getByRole("button",{name:"校对文字与注音"}).click();
-    const second=page.getByRole("button",{name:"来源图 2",exact:true});
+    const first=page.locator(`.source-sort-card[data-sort-image-id="${sourceIds[0]}"]`);
+    const second=page.locator(`.source-sort-card[data-sort-image-id="${sourceIds[1]}"]`);
+    const input=page.getByRole("textbox",{name:"日语正文",exact:true});
+    const moveBefore=page.getByRole("button",{name:"前移当前照片",exact:true});
+    const moveAfter=page.getByRole("button",{name:"后移当前照片",exact:true});
+    await expect(moveBefore).toBeDisabled();
+    await expect(moveAfter).toBeEnabled();
     await second.click();
-    const preview=page.locator(".editor-structure-preview");
-    await expect(preview.locator(`[data-source-image-id="${saved.sourceImages[1].id}"].active-source`).first()).toBeAttached();
-    await expect(page.getByRole("region",{name:"原图对照",exact:true}).getByRole("img")).toHaveAttribute("src",new RegExp(saved.sourceImages[1].id));
-    const details=page.locator(".editor-structure-preview");
-    await details.locator("summary").click();
-    await details.locator(`[data-source-image-id="${saved.sourceImages[0].id}"]`).first().click();
-    await expect(page.getByRole("region",{name:"原图对照",exact:true}).getByRole("img")).toHaveAttribute("src",new RegExp(saved.sourceImages[0].id));
+    await expect(input).toHaveValue(secondPairText);
+    await expect(page.locator(".body-editor-part.active-source")).toHaveCount(0);
+    await expect(page.getByRole("region",{name:"原图对照",exact:true}).getByRole("img")).toHaveAttribute("src",new RegExp(sourceIds[1]));
+    await first.click();
+    await expect(input).toHaveValue(firstPairText);
+    await expect(page.locator(".body-editor-part[data-qa-group-ids]")).not.toHaveCount(0);
+    await expect(page.getByText("在上方选中字词，为它标注读音",{exact:true})).toHaveCount(0);
+    await expect(page.locator(".sentence-boundary")).toHaveCount(0);
+    const corrected=firstPairText+"校正した。";
+    await input.fill(corrected);
+    await second.click();
+    await expect(input).toHaveValue(secondPairText);
+    await first.click();
+    await expect(input).toHaveValue(corrected);
+    await moveAfter.click();
+    await expect(page.locator(".source-sort-list button[data-sort-image-id]").first()).toHaveAttribute("data-sort-image-id",sourceIds[1]);
+    await expect(first).toHaveAttribute("aria-pressed","true");
+    await expect(input).toHaveValue(corrected);
+    await expect(moveAfter).toBeDisabled();
+    await expect(moveBefore).toBeEnabled();
+    await page.getByRole("button",{name:"全文检查",exact:true}).click();
+    const full=page.getByRole("dialog",{name:"全文检查",exact:true});
+    const fullSources=await full.locator("[data-source-image-id]").evaluateAll(nodes=>[...new Set(nodes.map(node=>node.dataset.sourceImageId))]);
+    expect(fullSources).toEqual([sourceIds[1],sourceIds[0]]);
+    await expect(full.locator(`[data-qa-group-ids~="${groupId}"]`)).not.toHaveCount(0);
+    await full.getByRole("button",{name:"关闭全文检查",exact:true}).click();
+    const persisted=page.waitForResponse(response=>response.request().method()==="PUT"&&new URL(response.url()).pathname===`/api/documents/${id}`);
+    await page.getByRole("button",{name:"保存并阅读",exact:true}).click();
+    expect((await persisted).ok()).toBe(true);
+    await expect(page.getByRole("article",{name:"日语原文",exact:true})).toBeVisible();
+    const reordered=await current(page,id);
+    expect(reordered.sourceImages.map(source=>source.id)).toEqual([sourceIds[1],sourceIds[0]]);
+    expect(bodyText(reordered.bodyHtml)).toBe(secondPairText+corrected);
+    expect(bodyRanges(reordered.bodyHtml).qa.map(range=>range.id)).toContain(groupId);
+    expect(reordered.blocks.flatMap(block=>block.segments).filter(segment=>segment.reading).map(segment=>[segment.text,segment.reading,segment.origin]).sort()).toEqual(readings);
+    await page.reload();
+    await page.getByRole("button",{name:"校对文字与注音",exact:true}).click();
+    await expect(input).toHaveValue(secondPairText);
+    await expect(page.locator(".source-sort-list button[data-sort-image-id]").first()).toHaveAttribute("data-sort-image-id",sourceIds[1]);
     await page.screenshot({path:`artifacts/stage3-multi-image-${info.project.name}.png`,fullPage:true});
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   }finally{if(id)await remove(page,id);}
 });
 
-test("句子交界可选择后句插入，普通编辑保持稳定ID，分句失败可重试", async ({page},info)=>{
+test("正文直接编辑不展示交界选项，保留稳定ID且分句失败可重试", async ({page},info)=>{
   const document=await importText(page,`边界 ${info.project.name}`);
   try {
     const original=bodyText(document.bodyHtml);
@@ -206,14 +258,14 @@ test("句子交界可选择后句插入，普通编辑保持稳定ID，分句失
     const body=page.getByRole("textbox",{name:"日语正文",exact:true});
     await body.evaluate((element,at)=>{element.focus();element.setSelectionRange(at-1,at-1);},boundary);
     await body.press("ArrowRight");
-    await expect(page.locator(".sentence-boundary")).toBeVisible();
-    await page.getByRole("radio",{name:/后句/}).check();
+    await expect(page.locator(".sentence-boundary")).toHaveCount(0);
     await body.focus();
     await page.keyboard.insertText("新しい");
     await page.getByRole("button",{name:"保存并阅读"}).click();
     await expect(page.getByRole("article",{name:"日语原文"})).toBeVisible();
     const saved=await current(page,document.id);
-    expect(bodyRanges(saved.bodyHtml).sentences.find((sentence)=>sentence.text.includes("新しい誰にも"))?.id).toBe(following.id);
+    expect(bodyText(saved.bodyHtml)).toBe(original.slice(0,boundary)+"新しい"+original.slice(boundary));
+    expect(bodyRanges(saved.bodyHtml).sentences.map(sentence=>sentence.id)).toEqual(bodyRanges(document.bodyHtml).sentences.map(sentence=>sentence.id));
     const route=`**/api/documents/${document.id}/sentences`;
     await page.route(route,route=>route.fulfill({status:502,contentType:"application/json",body:JSON.stringify({error:"测试：分句未完成，请重试。"})}));
     await page.getByRole("button",{name:"重新分句",exact:true}).click();
@@ -244,9 +296,13 @@ test("编辑器删除对话后撤销和重做保留文字且不会恢复失效�
     await body.fill(newest);
     await page.getByRole("button",{name:"撤销",exact:true}).click();
     await expect(body).toHaveValue(middle);
-    const structure=page.locator(".editor-structure-preview");
-    await structure.locator("summary").click();
-    await structure.locator("[data-qa-group-ids]").first().click();
+    const structure=page.locator(".body-editor-mirror");
+    const qaStart=original.indexOf("背中");
+    await body.evaluate((element,at)=>{
+      element.focus({preventScroll:true});element.setSelectionRange(at,at);
+      element.dispatchEvent(new KeyboardEvent("keyup",{key:"ArrowRight",bubbles:true}));
+    },qaStart);
+    await page.getByRole("button",{name:/查看此处记录/}).click();
     const overlay=page.locator(".editor-chat-overlay");
     await expect(overlay.locator(".qa-group")).toHaveCount(1);
     page.once("dialog",dialog=>dialog.accept());

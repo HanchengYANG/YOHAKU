@@ -90,7 +90,7 @@ export default function Reader({
         <button type="button" className="text-button" disabled={segmentationBusy} onClick={onSegment}>
           {segmentationBusy ? "正在分句…" : bodyRanges(html).sentences.length ? "重新分句" : "初始化分句"}
         </button>
-        {onAppendImage && <button type="button" className="text-button" onClick={onAppendImage}>追加来源图片</button>}
+        {onAppendImage && <button type="button" className="text-button" onClick={onAppendImage}>继续添加图片</button>}
         {segmentationError && <span role="alert">{segmentationError}</span>}
       </div>}
       <article

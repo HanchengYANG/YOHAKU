@@ -1,5 +1,14 @@
-.article-body mark[data-qa-group-ids] { background: transparent; color: inherit; text-decoration: underline; text-decoration-color: #ab7c40; text-decoration-style: dotted; text-underline-offset: .3em; cursor: pointer; }
-.article-body mark[data-qa-group-ids]:hover { background: #f1dfb856; }
+:root { --sentence-highlight: #eeebe2; --qa-highlight: #e2ebdb; --qa-highlight-hover: #d5e3cd; --reading-transition: 120ms; }
+.article-text-surface { position: relative; isolation: isolate; }
+.article-body { position: relative; }
+.article-highlight-layer { position: absolute; inset: 0; pointer-events: none; z-index: -1; }
+.article-highlight-layer > span { position: absolute; border-radius: 4px; transition: background-color var(--reading-transition) ease-out; }
+.article-sentence-highlight { background: transparent; }
+.article-sentence-highlight.active { background: var(--sentence-highlight); }
+.article-qa-highlight { background: var(--qa-highlight); }
+.article-body mark[data-qa-group-ids] { background: transparent; color: inherit; text-decoration: underline dotted #62784e; text-decoration-thickness: 1px; text-underline-offset: .3em; cursor: pointer; }
+.article-body mark[data-qa-group-ids]:hover { background: transparent; }
+.article-body mark[role=button]:focus-visible { outline: 2px solid #62784e; outline-offset: 3px; border-radius: 2px; }
 .article-body [data-source-image-id].active-source { background: #c0d2b64a; border-radius: 2px; }
 .article-body p.text-line { white-space: pre-wrap; }
 .article-body .article-list-item::before { content: "• "; }
@@ -14,8 +23,6 @@
 .sentence-boundary { padding: 10px; border: 1px solid #d9d5ca; border-radius: 8px; font-size: 12px; }
 .sentence-boundary label { display:flex; align-items:center; gap:5px; margin: 6px 0; }
 .sentence-boundary input { width:auto; }
-.editor-structure-preview { margin: 10px 0; padding:10px; border:1px solid #e8e1d5; border-radius:6px; }
-.editor-structure-preview summary { cursor:pointer; font-size:12px; color:#6b665c; }
 .source-image-picker { display:flex; flex-wrap:wrap; gap:5px; padding:10px; border-bottom:1px solid #e5dfd3; }
 .source-image-picker button { padding:6px 9px; font-size:12px; }
 .qa-group { border: 1px solid transparent; border-radius:8px; padding:10px 8px; margin:8px 0 18px; }
@@ -31,8 +38,21 @@
 .image-article-target { max-width:600px; }
 .image-article-target select { width:100%; }
 @media(max-width:700px) { .selection-questions { font-size:12px; } .selection-actions .button { min-height:36px; } .sentence-boundary label { line-height:1.6; } }
-.editor-chat-overlay { position:fixed; z-index:45; inset:60px 20px 20px auto; width:min(430px,calc(100vw - 24px)); box-shadow:0 12px 45px #30281838; background:#fffdf8; border:1px solid #dfd4c0; border-radius:12px; overflow:auto; }
-.editor-chat-overlay .document-chat { width:100%; height:100%; position:static; }
-@media(max-width:700px) { .editor-chat-overlay { inset:20vh 0 0; width:100%; border-radius:16px 16px 0 0; } }
-.article-body mark[data-qa-count]::after { content:attr(data-qa-count); display:inline; font:9px sans-serif; vertical-align:super; color:#9b7d43; padding-left:2px; text-decoration:none; }
+.editor-chat-overlay { position:fixed; z-index:45; inset:0 0 0 auto; width:clamp(320px,26vw,380px); box-shadow:-8px 0 24px #203b390a; background:var(--paper); border-left:1px solid var(--line); overflow:hidden; }
+.editor-chat-overlay .document-chat { width:100%; height:100%; min-height:0; max-height:none; margin:0; border:0; border-radius:0; position:static; overflow:hidden; display:flex; flex-direction:column; padding:20px; }
+.editor-chat-overlay .document-chat .chat-messages { flex:1; min-height:0; max-height:none; }
+@media(min-width:1024px) {
+  .editor-page.editor-persisted:not(.editor-has-source):has(.editor-text-only) {
+    width:calc(100% - clamp(320px,26vw,380px) - 40px);
+    margin-left:20px;
+    margin-right:calc(clamp(320px,26vw,380px) + 20px);
+  }
+}
+@media(max-width:1023px) {
+  .editor-chat-overlay { inset:auto 0 0; width:100%; height:min(65dvh,680px); max-height:calc(100dvh - 70px); border:1px solid var(--line); border-radius:16px 16px 0 0; }
+  .editor-chat-overlay .document-chat { padding:16px; }
+}
 .chat-linked-groups { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:8px 20px; font-size:12px; border-bottom:1px solid #e8e1d5; }
+@media (prefers-reduced-motion: reduce) {
+  .article-highlight-layer > span { transition: none; }
+}

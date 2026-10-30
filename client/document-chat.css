@@ -1,0 +1,63 @@
+.chat-timeline-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.chat-timeline-panel > .document-chat-heading,
+.chat-timeline-panel > .chat-document-title,
+.chat-timeline-panel > .chat-history-scope,
+.chat-timeline-panel > .chat-composer,
+.chat-timeline-panel > .chat-delete,
+.chat-timeline-panel > .stage2-error { flex-shrink: 0; }
+.chat-timeline-panel .chat-document-title { margin: 9px 0 12px; }
+.chat-history-scope { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 7px 0 11px; border-bottom: 1px solid var(--line); font-size: 11px; color: var(--muted); }
+.chat-history-scope .text-button { font-size: 12px; }
+.chat-timeline-panel .chat-messages {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  overflow-x: hidden;
+}
+.chat-timeline-panel .chat-group-contexts { margin-bottom: 16px; }
+.chat-timeline-panel .chat-group-contexts > summary { color: var(--muted); font-size: 11px; cursor: pointer; padding: 3px 0; }
+.chat-timeline-panel .qa-group { margin: 0 0 6px; padding: 7px 8px; }
+.chat-timeline-panel .qa-group-heading { font-size: 11px; cursor: pointer; line-height: 1.65; }
+.chat-timeline-panel .qa-group blockquote { font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.chat-timeline-panel .chat-message { min-width: 0; margin-left: 0; margin-right: 0; padding: 11px 12px; }
+.chat-timeline-panel .chat-message > .chat-user-text { white-space: pre-wrap; }
+.chat-timeline-panel .chat-message > .chat-markdown { white-space: normal; }
+.chat-markdown { overflow-wrap: anywhere; }
+.chat-markdown > :first-child { margin-top: 0; }
+.chat-markdown > :last-child { margin-bottom: 0; }
+.chat-markdown p, .chat-markdown ul, .chat-markdown ol, .chat-markdown blockquote, .chat-markdown pre, .chat-markdown .chat-table-scroll { margin: .75em 0; }
+.chat-markdown h1, .chat-markdown h2, .chat-markdown h3, .chat-markdown h4, .chat-markdown h5, .chat-markdown h6 { font-family: inherit; font-weight: 600; line-height: 1.5; margin: 1em 0 .45em; }
+.chat-markdown h1 { font-size: 1.35em; }
+.chat-markdown h2 { font-size: 1.25em; }
+.chat-markdown h3, .chat-markdown h4, .chat-markdown h5, .chat-markdown h6 { font-size: 1.1em; }
+.chat-markdown ul, .chat-markdown ol { padding-left: 1.5em; }
+.chat-markdown li > p { margin: .3em 0; }
+.chat-markdown blockquote { border-left: 2px solid #b8c7aa; padding-left: .8em; color: #65765a; }
+.chat-markdown a { color: #526d61; text-decoration: underline; text-underline-offset: .18em; }
+.chat-markdown code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .9em; background: #eeeee5; border-radius: 3px; padding: .1em .25em; white-space: break-spaces; }
+.chat-markdown pre { max-width: 100%; overflow-x: auto; padding: 10px 12px; border-radius: 5px; background: #eeeee5; line-height: 1.65; overscroll-behavior-x: contain; }
+.chat-markdown pre code { padding: 0; border-radius: 0; background: none; white-space: pre; overflow-wrap: normal; }
+.chat-table-scroll { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
+.chat-markdown table { border-collapse: collapse; font-size: 12px; width: max-content; min-width: 100%; }
+.chat-markdown th, .chat-markdown td { text-align: left; border-bottom: 1px solid var(--line); padding: 6px 9px; min-width: 5em; max-width: 24em; overflow-wrap: normal; }
+.chat-markdown th { font-weight: 600; background: #f1f2e9; }
+.chat-markdown hr { border: 0; border-top: 1px solid var(--line); margin: 1em 0; }
+.chat-markdown input[type="checkbox"] { width: auto; }
+.chat-timeline-panel .chat-composer { padding-top: 12px; }
+.chat-followup-target { display: flex; align-items: center; gap: 8px; margin: 0 0 9px; font-size: 11px; color: var(--muted); }
+.chat-followup-target select { min-width: 0; flex: 1; font-size: 12px; padding: 6px; border: 1px solid var(--line); border-radius: 5px; background: #fffdf7; }
+.chat-timeline-panel .chat-composer .stage2-field { margin-bottom: 8px; font-size: 11px; }
+.chat-timeline-panel .chat-composer textarea { min-height: 75px; height: 75px; resize: vertical; max-height: 160px; font-size: 14px; }
+.chat-timeline-panel .chat-composer .button { font-size: 12px; padding: 8px 12px; }
+.chat-timeline-panel .chat-delete { margin: 10px 0 0; font-size: 11px; }
+@media (max-width: 700px) {
+  .chat-timeline-panel .chat-document-title { margin: 5px 0 7px; }
+  .chat-timeline-panel .chat-composer textarea { min-height: 56px; height: 56px; font-size: 16px; }
+  .chat-timeline-panel .chat-followup-target select { font-size: 16px; }
+}

@@ -139,7 +139,8 @@ export function attachAccountRoutes({ app, database, onFirstUser = () => {} }) {
   );
   const userCount = database.prepare("SELECT count(*) AS count FROM users");
   const getSession =
-    database.prepare(`SELECT u.* FROM sessions s JOIN users u ON u.id = s.owner_id
+    database.prepare(`SELECT u.*, s.created_at AS session_started_at, s.expires_at AS session_expires_at
+    FROM sessions s JOIN users u ON u.id = s.owner_id
     WHERE s.token_hash = ? AND s.expires_at > ?`);
   const addUser = database.prepare(`INSERT INTO users
     (id, username, username_key, password_hash, is_admin, owner_id, issuer_id, created_at)
@@ -181,10 +182,11 @@ export function attachAccountRoutes({ app, database, onFirstUser = () => {} }) {
       now = Date.now();
     database.prepare("DELETE FROM sessions WHERE expires_at <= ?").run(now);
     addSession.run(hashToken(token), userId, userId, now, now + lifetime);
-    return token;
+    return { token, loginSession: { startedAt: now, expiresAt: now + lifetime } };
   }
   function middleware(req, _res, next) {
     req.user = null;
+    req.loginSession = null;
     delete req[sessionHash];
     const token = cookieToken(req.headers.cookie);
     if (token) {
@@ -192,6 +194,7 @@ export function attachAccountRoutes({ app, database, onFirstUser = () => {} }) {
       const user = getSession.get(hash, Date.now());
       if (user) {
         req.user = safeUser(user);
+        req.loginSession = { startedAt: user.session_started_at, expiresAt: user.session_expires_at };
         req[sessionHash] = hash;
       }
     }
@@ -216,7 +219,7 @@ export function attachAccountRoutes({ app, database, onFirstUser = () => {} }) {
   // The caller installs Host/Origin checks and express.json() before attaching.
   app.use(middleware);
   app.get("/api/session", (req, res) =>
-    res.json({ user: req.user, needsSetup: userCount.get().count === 0 }),
+    res.json({ user: req.user, needsSetup: userCount.get().count === 0, loginSession: req.loginSession }),
   );
 
   app.post("/api/accounts/setup", async (req, res) => {
@@ -242,10 +245,10 @@ export function attachAccountRoutes({ app, database, onFirstUser = () => {} }) {
       const migrated = onFirstUser(id);
       if (migrated && typeof migrated.then === "function")
         throw new AccountError(500, "首次资料迁移必须在同一事务中完成。");
-      return { user: safeUser(getUser.get(id)), token: beginSession(id) };
+      return { user: safeUser(getUser.get(id)), ...beginSession(id) };
     });
     sessionCookie(req, res, result.token);
-    res.status(201).json({ user: result.user, needsSetup: false });
+    res.status(201).json({ user: result.user, needsSetup: false, loginSession: result.loginSession });
   });
 
   app.post("/api/session/login", async (req, res) => {
@@ -261,7 +264,7 @@ export function attachAccountRoutes({ app, database, onFirstUser = () => {} }) {
     const user = userByName.get(name.key);
     if (!(await passwordMatches(req.body.password, user?.password_hash)))
       throw new AccountError(401, "用户名或密码不正确。");
-    const token = transaction(() => {
+    const result = transaction(() => {
       if (req[sessionHash])
         database
           .prepare("DELETE FROM sessions WHERE token_hash = ?")
@@ -269,8 +272,8 @@ export function attachAccountRoutes({ app, database, onFirstUser = () => {} }) {
       return beginSession(user.id);
     });
     attempts.delete(key);
-    sessionCookie(req, res, token);
-    res.json({ user: safeUser(user), needsSetup: false });
+    sessionCookie(req, res, result.token);
+    res.json({ user: safeUser(user), needsSetup: false, loginSession: result.loginSession });
   });
 
   app.post("/api/session/logout", (req, res) => {
@@ -349,10 +352,10 @@ export function attachAccountRoutes({ app, database, onFirstUser = () => {} }) {
         database
           .prepare("DELETE FROM sessions WHERE token_hash = ?")
           .run(req[sessionHash]);
-      return { user: safeUser(getUser.get(id)), token: beginSession(id) };
+      return { user: safeUser(getUser.get(id)), ...beginSession(id) };
     });
     sessionCookie(req, res, result.token);
-    res.status(201).json({ user: result.user, needsSetup: false });
+    res.status(201).json({ user: result.user, needsSetup: false, loginSession: result.loginSession });
   });
 
   app.get("/api/accounts", requireAdmin, (_req, res) =>

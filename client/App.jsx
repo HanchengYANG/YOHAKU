@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import api from "./api.mjs";
-import { blocksToHtml, bodyText, bodyRanges, htmlToBlocks, appendBodyHtml } from "../shared/article-html.mjs";
+import { blocksToHtml, bodyRanges, htmlToBlocks, appendImageBodyHtml } from "../shared/article-html.mjs";
 import { parseText, serializeBlocks } from "../shared/document.mjs";
 import { kinds } from "./constants.mjs";
 import Icon from "./components/Icon.jsx";
@@ -14,6 +14,7 @@ import AccountGate from "./components/AccountGate.jsx";
 import UserMenu from "./components/UserMenu.jsx";
 import BookView from "./components/BookView.jsx";
 import BookNavigation from "./components/BookNavigation.jsx";
+import PWAManager from "./PWAManager.jsx";
 
 export default function App() {
   const [session, setSession] = useState(null);
@@ -32,8 +33,9 @@ export default function App() {
       window.removeEventListener("yohaku:session-expired", expired);
     };
   }, []);
+  let content;
   if (sessionError)
-    return (
+    content = (
       <div className="loading-page">
         <p>{sessionError}</p>
         <button
@@ -44,15 +46,15 @@ export default function App() {
         </button>
       </div>
     );
-  if (!session) return <div className="loading-page">正在读取登录状态…</div>;
-  if (!session.user)
-    return (
+  else if (!session) content = <div className="loading-page">正在读取登录状态…</div>;
+  else if (!session.user)
+    content = (
       <AccountGate
         session={session}
-        onAuthenticated={(user) => setSession({ user, needsSetup: false })}
+        onAuthenticated={(user, loginSession) => setSession({ user, needsSetup: false, loginSession })}
       />
     );
-  return (
+  else content = (
     <Workspace
       key={session.user.id}
       user={session.user}
@@ -62,6 +64,7 @@ export default function App() {
       }}
     />
   );
+  return <><PWAManager session={session} />{content}</>;
 }
 
 function BookCreate({ initialTitle, promoting, busy, onSave, onCancel, onDirty }) {
@@ -100,6 +103,7 @@ function Workspace({ user, onLoggedOut }) {
   const [document, setDocument] = useState(null);
   const [book, setBook] = useState(null);
   const [importBookId, setImportBookId] = useState(null);
+  const [importSession, setImportSession] = useState(0);
   const [chatRequest, setChatRequest] = useState(null);
   const [selectedGroupIds, setSelectedGroupIds] = useState(null);
   const [appendTargetId, setAppendTargetId] = useState(null);
@@ -129,6 +133,7 @@ function Workspace({ user, onLoggedOut }) {
   );
   const savedDetail = useRef(null);
   const editRequest = useRef(0);
+  const importRequest = useRef(0);
   const segmentationRequest = useRef(0);
   const pendingSegmentations = useRef(new Map());
   const automaticSegmentationAttempt = useRef(null);
@@ -339,6 +344,8 @@ function Workspace({ user, onLoggedOut }) {
   const openPanel = (name) => {
     if (name === "settings" && !user.isAdmin) return;
     if (!mayLeave()) return;
+    importRequest.current++;
+    if (name === "image") setImportSession((current) => current + 1);
     setDraft(null);
     setPanel(name);
     setDirty(false);
@@ -350,37 +357,47 @@ function Workspace({ user, onLoggedOut }) {
   };
   const closePanel = () => {
     if (!mayLeave()) return;
+    importRequest.current++;
     setPanel(null);
     setDirty(false);
   };
   const imageReady = async (value) => {
+    const request = ++importRequest.current;
+    const view = currentView.current;
+    const isCurrent = () => request === importRequest.current &&
+      currentView.current.panel === "image" &&
+      currentView.current.activeId === view.activeId &&
+      currentView.current.editorSession === view.editorSession;
     try {
-      let next = { ...value, ...(importBookId ? { bookId: importBookId, kind: "book" } : {}) };
-      const targetId = value.appendToDocumentId || appendTargetId;
+      const bookId = Object.hasOwn(value, "bookId") ? value.bookId : importBookId;
+      const images = value.sourceImages?.length ? value.sourceImages : [{
+        id: value.sourceImageId || value.sourceImage?.id,
+        recognition: value.recognition || value,
+      }];
+      const addition = value.bodyHtml || blocksToHtml(value.blocks || parseText(value.content), {
+        sourceImageId: images[0]?.id,
+      });
+      let next = { ...value, bodyHtml: addition, sourceImages: images,
+        sourceImageId: images[0]?.id, bookId: bookId || undefined,
+        ...(bookId ? { kind: "book" } : {}), initializeSentences: true,
+        appendedImageId: value.appendedImageId || images[0]?.id };
+      const targetId = Object.hasOwn(value, "appendToDocumentId") ? value.appendToDocumentId : appendTargetId;
       if (targetId) {
-        let target = await api(`/documents/${encodeURIComponent(targetId)}`);
-        if (value.appendMode === "continue" && !bodyRanges(target.bodyHtml).sentences.length) {
-          await api(`/documents/${encodeURIComponent(target.id)}/sentences`, {method:"POST",body:JSON.stringify({revision:target.revision,bodyHash:target.bodyHash,force:false})});
-          target = await api(`/documents/${encodeURIComponent(target.id)}`);
-        }
-        const source = value.sourceImageId || value.sourceImage?.id;
-        let addition = blocksToHtml(value.blocks || parseText(value.content), {sourceImageId:source});
-        const continuing = value.appendMode === "continue";
-        if (continuing) {
-          const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(bodyText(addition)));
-          const bodyHash = [...new Uint8Array(digest)].map((part) => part.toString(16).padStart(2,"0")).join("");
-          const segmented = await api(`/documents/${encodeURIComponent(target.id)}/sentences`, {
-            method:"POST", body:JSON.stringify({revision:target.revision,bodyHash,bodyHtml:addition,sourceImages:[{id:source}],force:false}),
-          });
-          addition = segmented.bodyHtml;
-        }
-        const bodyHtml = appendBodyHtml(target.bodyHtml || blocksToHtml(target.blocks, {sourceImageId:target.sourceImageId}), addition, {continueLastSentence:continuing});
+        await pendingSegmentations.current.get(targetId)?.catch(() => {});
+        if (!isCurrent()) return;
+        const target = await api(`/documents/${encodeURIComponent(targetId)}`);
+        if (!isCurrent()) return;
+        const previousImages = target.sourceImages || (target.sourceImageId ? [{id:target.sourceImageId}] : []);
+        if (previousImages.length + images.length > 100) throw new Error("每篇文章最多保存 100 张图片，请选择另一篇文章或新建文章。");
+        const bodyHtml = appendImageBodyHtml(target.bodyHtml || blocksToHtml(target.blocks, {sourceImageId:target.sourceImageId}), addition);
         next = { ...target, bodyHtml, content:serializeBlocks(htmlToBlocks(bodyHtml)),
-          sourceImages: [...(target.sourceImages || (target.sourceImageId ? [{id:target.sourceImageId}] : [])), {id:source}],
-          initializeSentences: !continuing, appendedImageId:source };
+          sourceImages: [...previousImages, ...images],
+          initializeSentences: true, appendedImageId: value.appendedImageId || images[0]?.id };
       }
+      if (!isCurrent()) return;
+      setError("");
       setPanel(null); setDraft(next); setEditorSession((n) => n + 1); setDirty(true);
-    } catch (cause) { setError(cause.message); throw cause; }
+    } catch (cause) { if (isCurrent()) setError(cause.message); throw cause; }
   };
   const refreshCurrentDocument = async () => {
     if (!document?.id) return;
@@ -438,7 +455,7 @@ function Workspace({ user, onLoggedOut }) {
       setDirty(false);
       setRefresh((n) => n + 1);
       setNotice(result.bookId ? "已保存到书籍" : "已保存到书架");
-      if (!value.id || value.initializeSentences) await segmentDocument(result, false);
+      if (!value.id || value.initializeSentences) void segmentDocument(result, false);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -723,10 +740,14 @@ function Workspace({ user, onLoggedOut }) {
           <AISettings onClose={closePanel} />
         ) : panel === "image" ? (
           <ImageImport
+            key={importSession}
             onCancel={closePanel}
             onReady={imageReady}
             onDirty={setDirty}
             articles={articleTargets}
+            books={books}
+            initialBookId={importBookId}
+            onCreateBook={createBook}
             initialTargetId={appendTargetId}
           />
         ) : draft ? (
@@ -736,6 +757,7 @@ function Workspace({ user, onLoggedOut }) {
             onSave={save}
             onCancel={cancelEdit}
             onDirty={(next = true) => setDirty(next)}
+            onDocumentChanged={(latest) => setDocument((current) => current?.id === latest.id ? latest : current)}
             saving={saving}
             books={books}
             onCreateBook={createBook}
@@ -762,10 +784,13 @@ function Workspace({ user, onLoggedOut }) {
                 document={document}
                 onEdit={beginEdit}
                 onDelete={remove}
-                onDiscuss={() => (panel === "chat" ? closePanel() : openPanel("chat"))}
+                onDiscuss={() => {
+                  if (panel === "chat") closePanel();
+                  else { setSelectedGroupIds(null); setChatRequest(null); openPanel("chat"); }
+                }}
                 onAsk={(request) => { setChatRequest({...request,key:crypto.randomUUID()}); setSelectedGroupIds(null); setPanel("chat"); }}
                 onGroup={(ids) => { setSelectedGroupIds(ids); setChatRequest(null); setPanel("chat"); }}
-                onAppendImage={() => { openPanel("image"); setAppendTargetId(document.id); }}
+                onAppendImage={() => { openPanel("image"); setAppendTargetId(document.id); setImportBookId(document.bookId || null); }}
                 onSegment={() => segmentDocument(document, true)}
                 segmentationBusy={segmentation.id === document.id && segmentation.busy}
                 segmentationError={segmentation.id === document.id ? segmentation.error : ""}

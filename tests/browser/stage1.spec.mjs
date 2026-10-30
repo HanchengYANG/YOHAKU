@@ -14,16 +14,18 @@ async function deleteDocument(page, id) {
 }
 
 async function selectWord(page, from, to) {
-  await page.getByRole("textbox", { name: "日语正文" }).evaluate(
+  await page.getByRole("tab", { name: /^注音校正/ }).click();
+  await page.getByRole("textbox", { name: "选择要标注的字词", exact: true }).evaluate(
     (el, { from, to }) => {
       el.focus();
-      el.setSelectionRange(from, to - 1);
+      el.setSelectionRange(from, to);
+      el.dispatchEvent(new Event("select", { bubbles: true }));
     },
     { from, to },
   );
   await page
-    .getByRole("textbox", { name: "日语正文" })
-    .press("Shift+ArrowRight");
+    .getByRole("textbox", { name: "选择要标注的字词", exact: true })
+    .press("Shift");
 }
 
 test("导入、选区注音、校对、保存重开、导出及手机布局", async ({
@@ -51,6 +53,7 @@ test("导入、选区注音、校对、保存重开、导出及手机布局", as
   await page
     .getByRole("textbox", { name: "日语正文" })
     .fill("はーい口開けてー\n汚い言葉の歯石が取れないね〜\n\n背中を見た");
+  await expect(page.getByRole("textbox", { name: "假名读音", exact: true })).toHaveCount(0);
   await selectWord(page, 3, 4);
   await page
     .getByRole("textbox", { name: "假名读音", exact: true })
@@ -139,6 +142,7 @@ test("导入、选区注音、校对、保存重开、导出及手机布局", as
     .fill(
       "はーい口開けてー\n汚い言葉の歯石が取れないね〜\n\n背中を見た\n追加の行",
     );
+  await page.getByRole("tab", { name: /^注音校正/ }).click();
   await expect(
     page.getByRole("region", { name: "阅读预览" }).locator("rt"),
   ).toHaveText(["くち", "あ"]);
@@ -261,6 +265,7 @@ test("原词示例与完整词注音统一横排，注音在上方并能保存�
   await page.goto(`/#${initial.id}`);
   await page.getByRole("button", { name: "校对文字与注音", exact: true }).click();
   await expect(page.getByRole("combobox", { name: "阅读方向" })).toHaveCount(0);
+  await page.getByRole("tab", { name: /^注音校正/ }).click();
   const preview = page.getByRole("region", { name: "阅读预览", exact: true });
   await expect(preview.locator(".japanese-text")).toHaveCSS(
     "writing-mode",
@@ -271,6 +276,7 @@ test("原词示例与完整词注音统一横排，注音在上方并能保存�
     "ひ", "そら", "せなか", "な", "こえ", "き", "ひ",
   ];
   await expect(preview.locator("rt")).toHaveText(originalReadings);
+  await page.getByRole("tab", { name: "正文编辑", exact: true }).click();
   const body = page.getByRole("textbox", { name: "日语正文" });
   const originalText = await body.inputValue();
   await body.fill(`${originalText}\n食べる`);
@@ -279,6 +285,7 @@ test("原词示例与完整词注音统一横排，注音在上方并能保存�
     .getByRole("textbox", { name: "假名读音", exact: true })
     .fill("たべる");
   await page.getByRole("button", { name: "添加注音" }).click();
+  await page.getByRole("tab", { name: /^注音校正/ }).click();
   await expect(preview.locator("rt")).toHaveText([...originalReadings, "た"]);
   await page.getByRole("button", { name: "保存并阅读" }).click();
   const article = page.getByRole("article", { name: "日语原文" });

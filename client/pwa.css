@@ -74,3 +74,15 @@
 .pwa-banner .button.subtle:hover:not(:disabled) {
   background: #ffffff12;
 }
+.pwa-certificate-link {
+  position: fixed;
+  right: 16px;
+  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  z-index: 60;
+  color: var(--muted);
+  background: var(--paper);
+  padding: 4px 8px;
+  border-radius: 5px;
+  font-size: 11px;
+  text-decoration: underline;
+}

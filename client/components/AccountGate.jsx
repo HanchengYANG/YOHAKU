@@ -51,7 +51,7 @@ export default function AccountGate({ session, onAuthenticated }) {
       if (!result?.user || typeof result.user.username !== "string")
         throw new Error("登录结果无效，请重新尝试。");
       setPassword("");
-      onAuthenticated(result.user);
+      onAuthenticated(result.user, result.loginSession);
     } catch (cause) {
       setError(
         cause instanceof TypeError

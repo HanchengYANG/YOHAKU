@@ -34,13 +34,14 @@ export default function ImportProgress({
     ? Math.max(0, Math.min(100, Math.floor(uploadPercent))) : null;
   const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, now - startedAt) : 0;
   const phaseElapsedMs = Math.max(0, now - phaseStartedAt);
+  const waitingForModel = phase === "recognize" || phase === "annotate";
   let copy = current.copy;
   if (failed) copy = "本步尚未完成。已完成的步骤保留，重试会从这里继续。";
   else if (phase === "upload" && percentage === 100)
     copy = "图片数据已发送，正在等待本机服务确认。";
-  else if (phase !== "upload" && phaseElapsedMs >= 30000)
+  else if (waitingForModel && phaseElapsedMs >= 30000)
     copy = "仍在等待模型结果，目前无法获知完成比例。返回结果后会自动继续。";
-  else if (phase !== "upload" && phaseElapsedMs >= 15000)
+  else if (waitingForModel && phaseElapsedMs >= 15000)
     copy = "仍在等待模型结果，请保持当前页面。";
 
   return (
@@ -60,7 +61,8 @@ export default function ImportProgress({
         aria-valuenow={percentage ?? undefined}
         aria-valuetext={failed ? "本步未完成，可重试" : percentage !== null
           ? `已发送 ${percentage}%` : phase === "upload"
-            ? "图片正在上传，发送比例未知" : "正在等待模型结果，完成比例未知"}>
+            ? "图片正在上传，发送比例未知" : phase === "rotate"
+              ? "正在保存图片方向，完成比例未知" : "正在等待模型结果，完成比例未知"}>
         {steps.map((step) => {
           const complete = completedSteps.includes(step.id);
           const active = step.id === phase;

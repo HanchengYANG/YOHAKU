@@ -108,7 +108,7 @@ test("首次管理员设置只执行一次，旧资料归属与管理员创建�
     },
   });
   const initial = await f.request("/api/session");
-  assert.deepEqual(initial.data, { user: null, needsSetup: true });
+  assert.deepEqual(initial.data, { user: null, needsSetup: true, loginSession: null });
   assert.equal((await f.request("/api/protected")).status, 401);
   const admin = await f.setup();
   assert.equal(admin.status, 201);
@@ -123,7 +123,7 @@ test("首次管理员设置只执行一次，旧资料归属与管理员创建�
   assert.match(admin.setCookie, /Path=\//);
   assert.match(admin.setCookie, /Max-Age=604800/);
   const session = await f.request("/api/session", { cookie: admin.cookie });
-  assert.deepEqual(session.data, { user: admin.data.user, needsSetup: false });
+  assert.deepEqual(session.data, { user: admin.data.user, needsSetup: false, loginSession: admin.data.loginSession });
   const again = await f.setup();
   assert.equal(again.status, 409);
   assert.equal(migrations, 1);
@@ -136,10 +136,27 @@ test("首次管理员设置只执行一次，旧资料归属与管理员创建�
   assert.match(stored.password_hash, /^scrypt\$32768\$8\$3\$/);
   const rawSession = admin.cookie.slice(admin.cookie.indexOf("=") + 1);
   const storedSession = f.database.prepare("SELECT * FROM sessions").get();
+  assert.deepEqual(admin.data.loginSession, { startedAt: storedSession.created_at, expiresAt: storedSession.expires_at });
   assert.equal(storedSession.token_hash === rawSession, false);
   assert.equal(storedSession.token_hash === hash(rawSession), true);
   assert.equal(stored.owner_id, stored.id);
   assert.equal(stored.issuer_id, stored.id);
+});
+
+test("安装选择可读取真实登录期限，刷新不续期且不暴露会话令牌", async (t) => {
+  const f = await fixture(t);
+  const admin = await f.setup();
+  const deadline = Date.now() + 12_345;
+  f.database.prepare("UPDATE sessions SET expires_at = ?").run(deadline);
+  const session = await f.request("/api/session", { cookie: admin.cookie });
+  assert.equal(session.data.loginSession.expiresAt, deadline);
+  assert.equal(session.data.loginSession.startedAt, admin.data.loginSession.startedAt);
+  assert.equal(session.setCookie, null);
+  assert.deepEqual(Object.keys(session.data.loginSession).sort(), ["expiresAt", "startedAt"]);
+  assert.equal(JSON.stringify(session.data).includes(admin.cookie.split("=")[1]), false);
+  assert.match(admin.setCookie, /HttpOnly/);
+  f.database.prepare("UPDATE sessions SET expires_at = ?").run(Date.now() - 1);
+  assert.equal((await f.request("/api/session", { cookie: admin.cookie })).data.loginSession, null);
 });
 
 test("首次迁移失败完整回滚，不留下管理员或会话，之后可以重新建立", async (t) => {

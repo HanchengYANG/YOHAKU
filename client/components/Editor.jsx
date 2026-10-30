@@ -10,47 +10,54 @@ import {
   findTextOccurrences,
   annotateOccurrences,
 } from "../../shared/document.mjs";
-import { blocksToHtml, htmlToBlocks, bodyText, bodyRanges, editBodyText, syncBodyReadings, removeQaMarks } from "../../shared/article-html.mjs";
+import { blocksToHtml, htmlToBlocks, bodyText, bodyRanges, editBodyText, syncBodyReadings, sourceBodyHtml, replaceSourceBodyHtml, reorderSourceBodyHtml, removeSourceBodyHtml, sourceBodySelection } from "../../shared/article-html.mjs";
+import { reconcileEditorQaMarks } from "../editor-decorations.mjs";
 import DocumentChat from "./DocumentChat.jsx";
 import ArticleBody from "./ArticleBody.jsx";
+import BodyEditor from "./BodyEditor.jsx";
 import { kinds } from "../constants.mjs";
 import api from "../api.mjs";
 import Icon from "./Icon.jsx";
 import RubyText from "./RubyText.jsx";
 import ImportProgress from "./ImportProgress.jsx";
+import SourceImageSorter from "./SourceImageSorter.jsx";
 
 const annotationSteps = [{ id: "annotate", label: "生成注音", copy: "正在参考原图补全缺失读音，正文和已有读音保持不变。" }];
 
-export default function Editor({ initial, onSave, onCancel, onDirty, saving, books = [], onCreateBook }) {
+export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentChanged, saving, books = [], onCreateBook }) {
   const [value, setValue] = useState(() => ({
     ...initial,
     orientation: "horizontal",
   }));
   const [contentDirty, setContentDirty] = useState(
     () =>
-      !initial.id &&
+      !!initial.appendedImageId || !!initial.initializeSentences || (!initial.id &&
       !!(
         initial.content?.trim() ||
         initial.sourceImageId ||
         initial.recognition?.sourceImage?.id
-      ),
+      )),
   );
   const [bodyHtml, setBodyHtml] = useState(() => initial.bodyHtml || blocksToHtml(parseText(initial.content, initial.blocks || []), {sourceImageId:initial.sourceImageId || initial.recognition?.sourceImage?.id}));
   const [blocks, setBlocks] = useState(() => initial.bodyHtml ? htmlToBlocks(initial.bodyHtml) : parseText(initial.content, initial.blocks || []));
   const [viewGroupIds, setViewGroupIds] = useState(null);
+  const [chatRequest, setChatRequest] = useState(null);
+  const [chatBusy, setChatBusy] = useState(false);
+  const [customQuestion, setCustomQuestion] = useState("");
+  const [customQuestionOpen, setCustomQuestionOpen] = useState(false);
+  const compositionActive = useRef(false);
   const beforeInput = useRef(null);
   const htmlRef = useRef(bodyHtml);
   htmlRef.current = bodyHtml;
   const undoHistory = useRef([]);
   const redoHistory = useRef([]);
-  const [insertionSource, setInsertionSource] = useState("inherit");
-  const [boundarySide, setBoundarySide] = useState("previous");
-  const [boundaryAt, setBoundaryAt] = useState(null);
   const [segmenting, setSegmenting] = useState(false);
+  const [fullPreview, setFullPreview] = useState(false);
   const initialQaIds = useRef([...new Set(bodyRanges(bodyHtml).qa.map((range) => range.id))]);
+  const knownQaIds = useRef(new Set(initialQaIds.current));
   const currentQaIds = new Set(bodyRanges(bodyHtml).qa.map((range) => range.id));
   const orphanedIds = initialQaIds.current.filter((id) => !currentQaIds.has(id));
-  const imageSources = initial.sourceImages?.length ? initial.sourceImages : (initial.sourceImageId || initial.recognition?.sourceImage?.id) ? [{id:initial.sourceImageId || initial.recognition?.sourceImage?.id, recognition:initial.recognition}] : [];
+  const [imageSources, setImageSources] = useState(() => initial.sourceImages?.length ? initial.sourceImages : (initial.sourceImageId || initial.recognition?.sourceImage?.id) ? [{id:initial.sourceImageId || initial.recognition?.sourceImage?.id, recognition:initial.recognition}] : []);
   const [activeSourceId, setActiveSourceId] = useState(initial.appendedImageId || imageSources[0]?.id || null);
   const [selection, setSelection] = useState(null);
   const [reading, setReading] = useState("");
@@ -97,9 +104,10 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
   const [submitting, setSubmitting] = useState(false);
   const metadataRequest = useRef(0);
   const rotationRequest = useRef(null);
+  const restoredRotation = useRef(null);
   const submitLock = useRef(false);
   const annotationRequest = useRef(null);
-  const busy = saving || imageSaving || submitting || annotating || creatingBook || segmenting;
+  const busy = saving || imageSaving || submitting || annotating || creatingBook || segmenting || chatBusy;
   const imageSideways = imageRotation % 2 === 1;
   const imageUrl = sourceImageId
     ? `/api/images/${encodeURIComponent(sourceImageId)}/raw${imageMetadata ? `?revision=${imageMetadata.revision}` : ""}`
@@ -166,6 +174,13 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
       if (request !== metadataRequest.current) return;
       setImageMetadata(metadata);
       setImageError(false);
+      if (restoredRotation.current?.id === sourceImageId) {
+        if (restoredRotation.current.revision !== metadata.revision) {
+          setImageRotation(0);
+          setImageSaveError("图片版本已变化，旧旋转未恢复；图片与正文已恢复，请重新确认方向。");
+        }
+        restoredRotation.current = null;
+      }
       if (resetRotation) {
         setImageRotation(0);
         setImageSize({
@@ -242,17 +257,26 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
     return request;
   };
   const textarea = useRef(null);
-  const readingInput = useRef(null);
   const body = plainText(blocks);
+  const editingHtml = useMemo(() => sourceImageId ? sourceBodyHtml(bodyHtml, sourceImageId) : bodyHtml, [bodyHtml, sourceImageId]);
+  const editingText = bodyText(editingHtml);
+  const editingBlocks = useMemo(() => htmlToBlocks(editingHtml), [editingHtml]);
+  const editorViews = useRef(new Map());
+  useEffect(() => {
+    const input = textarea.current, view = editorViews.current.get(activeSourceId);
+    if (input && view) { input.scrollTop = view.top; input.setSelectionRange(Math.min(view.start, input.value.length), Math.min(view.end, input.value.length)); }
+  }, [activeSourceId, tab]);
   useEffect(() => {
     const element = textarea.current;
     if (!element) return;
-    const capture = (event) => { beforeInput.current = {start:element.selectionStart,end:element.selectionEnd,inputType:event.inputType}; };
+    const capture = (event) => {
+      if (!compositionActive.current) beforeInput.current = {start:element.selectionStart,end:element.selectionEnd,inputType:event.inputType};
+    };
     element.addEventListener("beforeinput", capture);
     return () => element.removeEventListener("beforeinput", capture);
-  }, [tab, body]);
+  }, [tab, editingText, activeSourceId]);
   const counts = stats(blocks);
-  const hasMissingReadings = blocks.some((block) => block.segments.some(
+  const hasMissingReadings = editingBlocks.some((block) => block.segments.some(
     (segment) => !segment.reading && /\p{Script=Han}/u.test(segment.text),
   ));
   const batchResults = useMemo(
@@ -276,12 +300,16 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
     setValue((old) => ({ ...old, ...patch }));
     setContentDirty(true);
   };
+  const snapshot = () => ({ blocks:structuredClone(blocks), html:bodyHtml, sourceImages:imageSources, activeSourceId,
+    imageRotation, rotationRevision:imageMetadata?.revision ?? (restoredRotation.current?.id === activeSourceId ? restoredRotation.current.revision : undefined) });
   const updateBlocks = (next, preserveActive = false, nextHtml = null) => {
-    undoHistory.current.push({ blocks: structuredClone(blocks), html: bodyHtml });
+    undoHistory.current.push(snapshot());
     if (undoHistory.current.length > 100) undoHistory.current.shift();
     redoHistory.current = [];
-    const structured = nextHtml || (bodyText(bodyHtml) === plainText(next) ? bodyHtml : editBodyText(bodyHtml, plainText(next), {boundarySide}));
-    setBodyHtml(syncBodyReadings(structured, next));
+    const structured = nextHtml || (bodyText(bodyHtml) === plainText(next) ? bodyHtml : editBodyText(bodyHtml, plainText(next)));
+    const nextBody = syncBodyReadings(structured, next);
+    htmlRef.current = nextBody;
+    setBodyHtml(nextBody);
     setBlocks(next);
     setSelection(null);
     setBatchSelected([]);
@@ -290,12 +318,12 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
     setContentDirty(true);
   };
   const generateMissingReadings = async () => {
-    if (busy || submitLock.current || annotationRequest.current || !sourceImageId || initial.id || !body.trim()) return;
+    if (busy || submitLock.current || annotationRequest.current || !sourceImageId || initial.id || !editingText.trim()) return;
     const controller = new AbortController();
     annotationRequest.current = controller;
-    const currentContent = serializeBlocks(blocks);
-    const currentBody = plainText(blocks);
-    const manualReadings = blocks.flatMap((block, blockIndex) =>
+    const currentContent = serializeBlocks(editingBlocks);
+    const currentBody = plainText(editingBlocks);
+    const manualReadings = editingBlocks.flatMap((block, blockIndex) =>
       block.segments.filter((segment) => segment.reading).flatMap((segment, rubyIndex) =>
         segment.origin === "manual"
           ? [{ blockIndex, rubyIndex, text: segment.text, reading: segment.reading }]
@@ -317,12 +345,13 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
       if (controller.signal.aborted) return;
       if (!Array.isArray(result?.blocks) || plainText(result.blocks) !== currentBody)
         throw new Error("注音结果改变了正文，已拒绝应用；当前正文保留，可重试。");
-      const content = serializeBlocks(result.blocks);
-      updateBlocks(result.blocks);
+      const nextHtml = replaceSourceBodyHtml(htmlRef.current, sourceImageId, syncBodyReadings(editingHtml, result.blocks));
+      const nextBlocks = htmlToBlocks(nextHtml), content = serializeBlocks(nextBlocks);
+      updateBlocks(nextBlocks, false, nextHtml);
       setValue((old) => ({
         ...old,
         content,
-        blocks: result.blocks,
+        blocks: nextBlocks,
         annotationModel: result.annotationModel,
         annotationReasoningEffort: result.annotationReasoningEffort,
         annotationElapsedMs: result.annotationElapsedMs,
@@ -374,54 +403,42 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
     }
   };
   const editBody = (text) => {
-    const result = editPlainText(blocks, text);
+    const currentHtml = sourceImageId ? sourceBodyHtml(htmlRef.current, sourceImageId) : htmlRef.current;
+    const currentText = bodyText(currentHtml);
+    if (text === currentText) { beforeInput.current = null; return; }
+    const result = editPlainText(htmlToBlocks(currentHtml), text);
     let precise = beforeInput.current;
     beforeInput.current = null;
     if (precise && precise.start === precise.end && precise.inputType?.startsWith("delete")) {
-      const length = body.length - text.length;
+      const length = currentText.length - text.length;
       precise = precise.inputType.includes("Backward") ? {...precise,start:Math.max(0,precise.start-length)} : {...precise,end:precise.end+length};
     }
-    const edited = editBodyText(bodyHtml, text, {boundarySide,...(insertionSource === "inherit" ? {} : {sourceImageId:insertionSource || null}),...(precise ? {editStart:precise.start,editEnd:precise.end}: {})});
-    updateBlocks(result.blocks, false, edited);
+    const edited = syncBodyReadings(editBodyText(currentHtml, text, {...(sourceImageId ? {sourceImageId} : {}),...(precise ? {editStart:precise.start,editEnd:precise.end}: {})}), result.blocks);
+    const nextHtml = sourceImageId ? reorderSourceBodyHtml(replaceSourceBodyHtml(htmlRef.current, sourceImageId, edited), imageSources.map((image) => image.id)) : edited;
+    updateBlocks(htmlToBlocks(nextHtml), false, nextHtml);
+    if (sourceImageId) setValue((old) => ({...old, initializeSentences:true}));
     if (result.removed)
       setMessage(
         `正文变化影响了 ${result.removed} 处注音，已移除对应读音，请重新校正。`,
       );
   };
   const getSelection = () => {
+    if (compositionActive.current) return;
     const el = textarea.current;
     if (el && el.selectionEnd > el.selectionStart) {
-      setSelection({
+      setSelection(sourceImageId ? sourceBodySelection(bodyHtml, sourceImageId, el.selectionStart, el.selectionEnd) : {
         start: el.selectionStart,
         end: el.selectionEnd,
         text: el.value.slice(el.selectionStart, el.selectionEnd),
       });
     } else setSelection(null);
-    if (el) {
-      const at = el.selectionStart;
-      const ranges = bodyRanges(bodyHtml);
-      const preceding = ranges.sentences.find((item) => item.end === at);
-      const following = ranges.sentences.find((item) => item.start === at);
-      setBoundaryAt(preceding && following && preceding.id !== following.id ? {at, preceding, following} : null);
-      const source = ranges.sources.find((item) => item.start <= at && item.end > at);
-      if (source && source.id !== activeSourceId) {
-        if (imageRotation) setMessage("先保存当前图片方向，再定位另一张来源图；正文选区已保留。");
-        else { setActiveSourceId(source.id); setImageMetadata(null); setImageSize(null); setPreviewMode("image"); }
-      } else if (source) setPreviewMode("image");
-    }
   };
   const applyReading = () => {
     try {
-      if (!selection) throw new Error("先在正文中选中要标注的字词。");
-      if (!reading.trim()) throw new Error("请输入假名读音。");
-      updateBlocks(
-        annotateBlocks(blocks, selection.start, selection.end, reading),
-      );
-      setReading("");
-      setMessage("已添加注音，可在右侧预览。");
-    } catch (e) {
-      setMessage(e.message);
-    }
+      if (!selection || !reading.trim()) return;
+      updateBlocks(annotateBlocks(blocks, selection.start, selection.end, reading));
+      setReading(""); setMessage("已添加注音，可在下方核对。");
+    } catch (error) { setMessage(error.message); }
   };
   const changeReading = (blockIndex, segmentIndex, text) => {
     const next = structuredClone(blocks);
@@ -443,17 +460,33 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
     return entries;
   });
   const locateRuby = (ruby) => {
+    const source = bodyRanges(bodyHtml).sources.find((range) => range.start < ruby.end && range.end > ruby.start);
+    if (source && source.id !== activeSourceId) chooseSource(source.id);
     setActiveRange({ start: ruby.start, end: ruby.end });
     setPreviewMode("reading");
   };
   const incompleteRuby = rubies.some((r) => !r.reading.trim());
   const undo = (redo = false) => {
+    if (busy || compositionActive.current) return;
     const from = redo ? redoHistory : undoHistory;
     const to = redo ? undoHistory : redoHistory;
-    const restored = from.current.pop();
+    const restored = from.current.at(-1);
     if (!restored) return;
-    to.current.push({blocks:structuredClone(blocks),html:bodyHtml});
-    setBlocks(restored.blocks); setBodyHtml(restored.html); setSelection(null); setContentDirty(true);
+    const sources = restored.sourceImages || imageSources;
+    const restoredId = sources.some((image) => image.id === restored.activeSourceId) ? restored.activeSourceId : sources[0]?.id || null;
+    if (!confirmSourceChange(restoredId)) return;
+    from.current.pop();
+    to.current.push(snapshot());
+    htmlRef.current = restored.html;
+    setBlocks(restored.blocks); setBodyHtml(restored.html);
+    setImageSources(sources);
+    resetSourceTools();
+    if (restoredId !== activeSourceId) {
+      resetSourceImage(restoredId);
+      restoredRotation.current = restored.imageRotation ? {id:restoredId, revision:restored.rotationRevision} : null;
+      setImageRotation(restored.imageRotation || 0);
+    }
+    setContentDirty(true);
   };
   const resegment = async () => {
     const snapshot = bodyHtml;
@@ -462,7 +495,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
       const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(bodyText(snapshot)));
       const bodyHash = [...new Uint8Array(digest)].map((part) => part.toString(16).padStart(2,"0")).join("");
       const result = await api(`/documents/${encodeURIComponent(initial.id)}/sentences`, {
-        method:"POST", body:JSON.stringify({revision:value.revision,bodyHash,bodyHtml:snapshot,force:true}),
+        method:"POST", body:JSON.stringify({revision:value.revision,bodyHash,bodyHtml:snapshot,sourceImages:imageSources.map((image) => ({id:image.id})),force:true}),
       });
       if (htmlRef.current !== snapshot) { setMessage("正文已变化，未应用旧分句结果。请重新分句。"); return; }
       updateBlocks(htmlToBlocks(result.bodyHtml), false, result.bodyHtml);
@@ -471,84 +504,92 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
     finally { setSegmenting(false); }
   };
   const chooseSource = (id) => {
-    if (id !== activeSourceId && imageRotation && !window.confirm("当前图片方向尚未保存，切换图片会取消这次旋转。")) return;
-    setActiveSourceId(id); setImageMetadata(null); setImageRotation(0); setImageSize(null); setPreviewMode("image");
-    const range = bodyRanges(bodyHtml).sources.find((item) => item.id === id);
-    if (range) { textarea.current?.focus(); textarea.current?.setSelectionRange(range.start, range.end); setSelection({start:range.start,end:range.end,text:body.slice(range.start,range.end)}); }
+    if (compositionActive.current) return;
+    if (id === activeSourceId) { setPreviewMode("image"); return; }
+    if (!confirmSourceChange(id)) return;
+    const input = textarea.current;
+    if (input) editorViews.current.set(activeSourceId, {top:input.scrollTop,start:input.selectionStart,end:input.selectionEnd});
+    beforeInput.current = null; setSelection(null); setActiveRange(null);
+    resetSourceImage(id);
+  };
+  const confirmSourceChange = (id) => id === activeSourceId || !imageRotation || window.confirm("当前图片方向尚未保存，切换图片会取消这次旋转。");
+  const resetSourceTools = () => {
+    beforeInput.current = null;
+    setSelection(null); setReading(""); setActiveRange(null);
+    setBatchTerm(""); setBatchSearch(null); setBatchSelected([]); setBatchReading("");
+    setViewGroupIds(null); setChatRequest(null); setCustomQuestion(""); setCustomQuestionOpen(false); setFullPreview(false);
+    setAnnotationError(""); setAnnotationStartedAt(null); setAnnotationElapsedMs(null);
+    setMessage("");
+  };
+  const resetSourceImage = (id) => {
+    metadataRequest.current++;
+    restoredRotation.current = null;
+    setActiveSourceId(id); setImageMetadata(null); setImageMetadataLoading(!!id); setImageMetadataError("");
+    setImageRotation(0); setImageSize(null); setImageError(false); setLoadedImageUrl(null);
+    setImageSaveError(""); setImageConflict(false); setPreviewMode("image");
+  };
+  const removeSource = (id) => {
+    if (busy || compositionActive.current || imageSources.length <= 1) return;
+    const index = imageSources.findIndex((image) => image.id === id);
+    if (index < 0) return;
+    const nextSources = imageSources.filter((image) => image.id !== id);
+    const nextHtml = removeSourceBodyHtml(bodyHtml, id);
+    updateBlocks(htmlToBlocks(nextHtml), false, nextHtml);
+    setImageSources(nextSources);
+    resetSourceTools();
+    if (id === activeSourceId) resetSourceImage(nextSources[Math.min(index, nextSources.length - 1)].id);
+    editorViews.current.delete(id);
+    setValue((old) => ({...old, initializeSentences:true}));
+    setContentDirty(true);
+    setMessage("图片及对应正文已从草稿移除，可撤销；保存后生效。");
+  };
+  const reorderSources = (ids) => {
+    if (busy || compositionActive.current || ids.length !== imageSources.length) return;
+    const nextHtml = reorderSourceBodyHtml(bodyHtml, ids);
+    const nextBlocks = htmlToBlocks(nextHtml), removed = stats(blocks).rubyCount - stats(nextBlocks).rubyCount;
+    updateBlocks(nextBlocks, false, nextHtml);
+    if (removed > 0) setMessage(`排序改变了 ${removed} 处跨图词语，已移除这些词语的旧读音，请在“注音校正”中重新标注。`);
+    setImageSources(ids.map((id) => imageSources.find((image) => image.id === id)));
+    setValue((old) => ({...old, initializeSentences:true}));
+  };
+  const refreshEditorHistory = async () => {
+    try {
+      const [latest, history] = await Promise.all([
+        api(`/documents/${encodeURIComponent(initial.id)}`),
+        api(`/documents/${encodeURIComponent(initial.id)}/conversations`),
+      ]);
+      setValue((old) => ({...old, revision:latest.revision}));
+      const liveIds = new Set((history.conversations || []).flatMap((conversation) => (conversation.groups || []).map((group) => group.id)));
+      const deletedIds = [...knownQaIds.current].filter((id) => !liveIds.has(id));
+      const newIds = [...liveIds].filter((id) => !knownQaIds.current.has(id));
+      const reconcile = (html) => reconcileEditorQaMarks(html, latest.bodyHtml, {newIds, deletedIds});
+      const next = reconcile(htmlRef.current);
+      htmlRef.current = next; setBodyHtml(next);
+      for (const snapshots of [undoHistory, redoHistory])
+        snapshots.current = snapshots.current.map((snapshot) => ({...snapshot, html:reconcile(snapshot.html)}));
+      initialQaIds.current = [...new Set([...initialQaIds.current.filter((id) => liveIds.has(id)), ...newIds])];
+      knownQaIds.current = liveIds;
+      await onDocumentChanged?.(latest);
+    } finally { setChatBusy(false); }
+  };
+  const askEditor = async (operation) => {
+    if (!selection || !initial.id || busy || compositionActive.current) return;
+    setChatBusy(true); setMessage("");
+    try {
+      const latest = await api(`/documents/${encodeURIComponent(initial.id)}`);
+      const currentHtml = htmlRef.current;
+      const currentSentences = bodyRanges(currentHtml).sentences.filter((range) => range.start < selection.end && range.end > selection.start).map((range) => range.id);
+      const savedSentences = bodyRanges(latest.bodyHtml).sentences.filter((range) => range.start < selection.end && range.end > selection.start).map((range) => range.id);
+      if (bodyText(currentHtml) !== bodyText(latest.bodyHtml) || JSON.stringify(currentSentences) !== JSON.stringify(savedSentences))
+        throw new Error("正文或句子结构尚未保存，请先保存并阅读，再划选这处文字发起新问题。已有记录仍可查看和追问。");
+      if (!currentSentences.length) throw new Error("这处正文尚未分句，请先保存并完成分句，再选择文字提问。");
+      setChatRequest({key:crypto.randomUUID(), selection:{...selection, bodyHash:latest.bodyHash, sentenceIds:savedSentences}, operation,
+        ...(operation === "custom" ? {question:customQuestion.trim()} : {})});
+      setViewGroupIds([]); setCustomQuestionOpen(false); setCustomQuestion("");
+    } catch (error) { setMessage(error.message); setChatBusy(false); }
   };
 
-  return (
-    <form
-      className="editor-page"
-      aria-busy={busy}
-      onSubmit={async (e) => {
-        e.preventDefault();
-        if (incompleteRuby || busy || submitLock.current || annotationRequest.current) return;
-        submitLock.current = true;
-        setSubmitting(true);
-        try {
-          await saveImageDirection();
-          await onSave({
-            ...value,
-            orientation: "horizontal",
-            blocks,
-            bodyHtml,
-            sourceImages:imageSources.map((image) => ({id:image.id})),
-            content: serializeBlocks(blocks),
-            manualReadings: blocks.flatMap((b) =>
-              b.segments
-                .filter((s) => s.reading)
-                .flatMap((s, rubyIndex) =>
-                  s.origin === "manual"
-                    ? [
-                        {
-                          blockId: b.id,
-                          rubyIndex,
-                          text: s.text,
-                          reading: s.reading,
-                        },
-                      ]
-                    : [],
-                ),
-            ),
-          });
-        } catch (error) {
-          setMessage(error.message);
-        } finally {
-          submitLock.current = false;
-          setSubmitting(false);
-        }
-      }}
-    >
-      <fieldset className="editor-controls" disabled={busy}>
-        <div className="editor-heading">
-          <div>
-            <span className="eyebrow">
-              {initial.id ? "校对材料" : value.bookId ? "加入书籍" : "放进书架"}
-            </span>
-            <h1>{initial.id ? "留住准确的每一行" : value.bookId ? "添加一篇阅读文章" : "导入一篇新材料"}</h1>
-          </div>
-          <div className="editor-actions">
-            <button
-              type="button"
-              className="button subtle"
-              onClick={() => { if (!annotationRequest.current) onCancel(); }}
-              disabled={busy}
-            >
-              取消
-            </button>
-            <button
-              type="submit"
-              className="button primary"
-              disabled={
-                busy || !value.title.trim() || !body.trim() || incompleteRuby
-              }
-            >
-              <Icon name="check" size={17} />
-              {annotating ? "正在生成注音…" : busy ? "正在保存…" : "保存并阅读"}
-            </button>
-          </div>
-        </div>
+  const metadataFields = <>
         {(!initial.id || !initial.bookId) && (
           <div className="book-target">
             <label>
@@ -619,23 +660,8 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
             </select>
           </label>
         </div>
-        {sourceImageId && (
-          <div className="ocr-review-overview">
-            <strong>
-              {initial.id ? "对照原图继续校对" : "这是识别草稿，请对照原图确认"}
-            </strong>
-            <p>
-              检查正文、分行、阅读顺序和读音后再保存。右侧可以切换原图与阅读预览。
-            </p>
-            {importElapsedMs !== null && (
-              <p role="status"
-                data-import-elapsed-ms={initial.autoAnnotationCompleted ? importElapsedMs : undefined}
-                data-ocr-elapsed-ms={!initial.autoAnnotationCompleted ? importElapsedMs : undefined}>
-                {initial.autoAnnotationCompleted ? "上传后识别与注音完成用时" : "上传后正文完成用时"}{" "}
-                {(importElapsedMs / 1000).toFixed(2)} 秒
-              </p>
-            )}
-            {!initial.id && (
+  </>;
+  const annotationTask = sourceImageId && (!initial.id && (
               <div className="ocr-annotation-task">
                 <p>{annotationCompleted
                   ? "正文与注音已完成，请一起校对正文和读音后保存。"
@@ -653,13 +679,107 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
                   <ImportProgress phase="annotate" startedAt={annotationStartedAt}
                     steps={annotationSteps} failed={!annotating && !!annotationError} />
                 )}
-                {annotationError && <p role="alert">{annotationError}</p>}
                 {annotationElapsedMs !== null && (
                   <p role="status" data-annotation-elapsed-ms={annotationElapsedMs}>
                     注音完成用时 {(annotationElapsedMs / 1000).toFixed(2)} 秒
                   </p>
                 )}
               </div>
+            ));
+
+  return (
+    <form
+      className={`editor-page ${initial.id ? "editor-persisted" : ""} ${sourceImageId ? "editor-has-source" : ""}`}
+      aria-busy={busy}
+      onSubmit={async (e) => {
+        e.preventDefault();
+        if (compositionActive.current) return;
+        if (incompleteRuby || busy || submitLock.current || annotationRequest.current) return;
+        submitLock.current = true;
+        setSubmitting(true);
+        try {
+          await saveImageDirection();
+          await onSave({
+            ...value,
+            orientation: "horizontal",
+            blocks,
+            bodyHtml,
+            sourceImageId:imageSources[0]?.id || null,
+            sourceImages:imageSources.map((image) => ({id:image.id})),
+            content: serializeBlocks(blocks),
+            manualReadings: blocks.flatMap((b) =>
+              b.segments
+                .filter((s) => s.reading)
+                .flatMap((s, rubyIndex) =>
+                  s.origin === "manual"
+                    ? [
+                        {
+                          blockId: b.id,
+                          rubyIndex,
+                          text: s.text,
+                          reading: s.reading,
+                        },
+                      ]
+                    : [],
+                ),
+            ),
+          });
+        } catch (error) {
+          setMessage(error.message);
+        } finally {
+          submitLock.current = false;
+          setSubmitting(false);
+        }
+      }}
+    >
+      <fieldset className="editor-controls" disabled={busy}>
+        <div className="editor-heading">
+          <div>
+            <span className="eyebrow">
+              {initial.id ? "校对材料" : value.bookId ? "加入书籍" : "放进书架"}
+            </span>
+            <h1>{sourceImageId ? "逐图校对正文" : initial.id ? "留住准确的每一行" : value.bookId ? "添加一篇阅读文章" : "导入一篇新材料"}</h1>
+          </div>
+          <div className="editor-actions">
+            <button type="button" className="button secondary" disabled={busy} onClick={() => { setViewGroupIds(null); setFullPreview(true); }}>
+              全文检查
+            </button>
+            <button
+              type="button"
+              className="button subtle"
+              onClick={() => { if (!annotationRequest.current) onCancel(); }}
+              disabled={busy}
+            >
+              取消
+            </button>
+            <button
+              type="submit"
+              className="button primary"
+              disabled={
+                busy || !value.title.trim() || !body.trim() || incompleteRuby
+              }
+            >
+              <Icon name="check" size={17} />
+              {annotating ? "正在生成注音…" : chatBusy ? "正在整理问答…" : busy ? "正在保存…" : "保存并阅读"}
+            </button>
+          </div>
+        </div>
+        {sourceImageId ? <details className="editor-meta-details"><summary>{value.title || "文章信息"} · {books.find((item) => item.id === value.bookId)?.title || "独立材料"}<span>修改文章信息</span></summary>{metadataFields}</details> : metadataFields}
+        {sourceImageId && (
+          <details className="ocr-review-overview"><summary>识别记录 · {warnings.length ? `${warnings.length} 条待核对提示` : "无待核对提示"}{nonBody.length ? ` · ${nonBody.length} 条非正文` : ""}</summary>
+            <strong>
+              {initial.id ? "对照原图继续校对" : "这是识别草稿，请对照原图确认"}
+            </strong>
+            <p>
+              检查正文、分行、阅读顺序和读音后再保存。右侧可以切换原图与阅读预览。
+            </p>
+            {importElapsedMs !== null && (
+              <p role="status"
+                data-import-elapsed-ms={initial.autoAnnotationCompleted ? importElapsedMs : undefined}
+                data-ocr-elapsed-ms={!initial.autoAnnotationCompleted ? importElapsedMs : undefined}>
+                {initial.autoAnnotationCompleted ? "上传后识别与注音完成用时" : "上传后正文完成用时"}{" "}
+                {(importElapsedMs / 1000).toFixed(2)} 秒
+              </p>
             )}
             <details className="ocr-review-details" open={warnings.length > 0}>
               <summary>
@@ -723,8 +843,9 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
                 </p>
               )}
             </details>
-          </div>
+          </details>
         )}
+        {annotationError && <p className="editor-annotation-error" role="alert">{annotationError}</p>}
         {sourceImageId &&
           (imageMetadataError || imageSaveError || imageRotation !== 0) && (
             <div className="image-direction-status">
@@ -762,7 +883,12 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
               )}
             </div>
           )}
-        <div className="editor-workspace">
+        {imageSources.length > 0 && <SourceImageSorter
+          items={imageSources.map((image, index) => ({id:image.id,
+            name:image.id === activeSourceId && imageMetadata?.originalName || image.originalName || image.name || image.recognition?.sourceImage?.originalName || `来源图 ${index + 1}`,
+            src:image.id === activeSourceId ? imageUrl : undefined}))}
+          activeId={activeSourceId} onSelect={chooseSource} onReorder={reorderSources} onRemove={removeSource} minItems={1} disabled={busy} />}
+        <div className={`editor-workspace ${!sourceImageId && tab === "text" ? "editor-text-only" : ""}`}>
           <section className="source-panel" aria-label="编辑区域">
             <div className="panel-tabs" role="tablist" aria-label="校对方式">
               <button
@@ -771,7 +897,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
                 aria-selected={tab === "text"}
                 aria-controls="text-editor-panel"
                 id="text-editor-tab"
-                onClick={() => setTab("text")}
+                onClick={() => { setSelection(null); setTab("text"); }}
               >
                 正文编辑
               </button>
@@ -781,7 +907,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
                 aria-selected={tab === "ruby"}
                 aria-controls="ruby-editor-panel"
                 id="ruby-editor-tab"
-                onClick={() => setTab("ruby")}
+                onClick={() => { setSelection(null); setTab("ruby"); }}
               >
                 注音校正 <span>{counts.rubyCount}</span>
               </button>
@@ -806,23 +932,28 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
                 aria-labelledby="text-editor-tab"
               >
                 <p className="panel-hint">
-                  粘贴日语原文，保留段落和歌词分行。选中字词后可添加注音。
+                  {sourceImageId ? "仅编辑当前图片对应的正文，文字与图片一起排序。" : "粘贴日语原文，保留段落和歌词分行。"}
                 </p>
-                <textarea
-                  ref={textarea}
-                  className="source-textarea"
+                <BodyEditor
+                  key={activeSourceId || "text"}
+                  html={editingHtml}
+                  textareaRef={textarea}
                   aria-label="日语正文"
                   lang="ja"
                   placeholder={
                     "把想读的日语放在这里。\n\n可以是一段歌词、一篇文章，\n或教材中还没读懂的那一页。"
                   }
-                  value={body}
-                  onChange={(e) => editBody(e.target.value)}
-                  onSelect={getSelection}
-                  onBlur={getSelection}
-                  onKeyUp={getSelection}
-                  onMouseUp={getSelection}
+                  value={editingText}
+                  onChange={editBody}
+                  onSelection={getSelection}
+                  onGroup={setViewGroupIds}
+                  onCompositionStart={(event) => {
+                    compositionActive.current = true;
+                    beforeInput.current = {start:event.currentTarget.selectionStart,end:event.currentTarget.selectionEnd,inputType:"insertCompositionText"};
+                  }}
+                  onCompositionEnd={() => { compositionActive.current = false; }}
                   onKeyDown={(event) => {
+                    if (compositionActive.current || event.nativeEvent.isComposing) return;
                     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); undo(event.shiftKey); }
                     else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") { event.preventDefault(); undo(true); }
                   }}
@@ -834,72 +965,23 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
                   <button type="button" className="text-button" disabled={!redoHistory.current.length} onClick={() => undo(true)}>重做</button>
                   {initial.id ? <button type="button" className="text-button" disabled={busy || incompleteRuby} onClick={resegment}>{segmenting ? "正在重新分句…" : "重新分句"}</button> : <small>首次保存后初始化分句；普通校对保留现有句子。</small>}
                 </div>
-                {boundaryAt && <fieldset className="sentence-boundary"><legend>句子交界：新增文字插入</legend>
-                  <label><input type="radio" name="boundarySide" checked={boundarySide === "previous"} onChange={() => setBoundarySide("previous")} />前句「{boundaryAt.preceding.text.slice(-12)}」</label>
-                  <label><input type="radio" name="boundarySide" checked={boundarySide === "next"} onChange={() => setBoundarySide("next")} />后句「{boundaryAt.following.text.slice(0,12)}」</label>
-                  <label>新增文字来源<select aria-label="新增文字来源" value={insertionSource} onChange={(event) => setInsertionSource(event.target.value)}>
-                    <option value="inherit">沿用所选句子当前位置的来源</option><option value="">无图片来源</option>
-                    {imageSources.map((image,index) => <option key={image.id} value={image.id}>来源图 {index+1}</option>)}
-                  </select></label>
-                  <small>前句来源：{(() => {const source=bodyRanges(bodyHtml).sources.find((item) => item.start < boundaryAt.at && item.end >= boundaryAt.at); return source ? `来源图 ${imageSources.findIndex((image) => image.id === source.id)+1}` : "无图片来源";})()}；后句来源：{(() => {const source=bodyRanges(bodyHtml).sources.find((item) => item.start <= boundaryAt.at && item.end > boundaryAt.at); return source ? `来源图 ${imageSources.findIndex((image) => image.id === source.id)+1}` : "无图片来源";})()}</small>
-                </fieldset>}
-                {orphanedIds.length > 0 && <p role="status" className="qa-orphan-warning">{orphanedIds.length} 个问答组的正文关联已删除：{orphanedIds.join("、")}。保存后将标为游离；撤销或取消可恢复。</p>}
-                {body.trim() && <details className="editor-structure-preview"><summary>正文中的句子、来源与问答标记</summary><ArticleBody html={bodyHtml} fontSize={21} activeSourceId={activeSourceId} onSource={chooseSource} onGroup={setViewGroupIds} /></details>}
-                <div className="annotation-tools">
-                  <div className="selection-label">
-                    {selection ? (
-                      <>
-                        已选中{" "}
-                        <strong lang="ja">
-                          {selection.text.length > 18
-                            ? `${selection.text.slice(0, 18)}…`
-                            : selection.text}
-                        </strong>
-                      </>
-                    ) : (
-                      <span>在上方选中字词，为它标注读音</span>
-                    )}
-                    {selection &&
-                      !selection.text.includes("\n") &&
-                      selection.text.length <= 100 && (
-                        <button
-                          type="button"
-                          className="text-button"
-                          onClick={() => {
-                            findBatch(selection.text);
-                            setTab("batch");
-                          }}
-                        >
-                          批量标注这个词
-                        </button>
-                      )}
-                  </div>
-                  <div className="annotation-input-row">
-                    <input
-                      ref={readingInput}
-                      aria-label="假名读音"
-                      lang="ja"
-                      value={reading}
-                      onChange={(e) => setReading(e.target.value)}
-                      placeholder="例如：せなか"
-                      maxLength={120}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.nativeEvent.isComposing) {
-                          e.preventDefault();
-                          applyReading();
-                        }
-                      }}
-                    />
-                    <button
-                      type="button"
-                      className="button secondary"
-                      onClick={applyReading}
-                      disabled={!selection || !reading.trim()}
-                    >
-                      添加注音
-                    </button>
-                  </div>
-                </div>
+                {orphanedIds.length > 0 && <p role="status" className="qa-orphan-warning">{orphanedIds.length} 组讨论对应的文字已移除。记录会保留，保存后解除正文关联；撤销或取消校对可恢复。</p>}
+                {selection && initial.id && <div className="editor-selection-questions" role="group" aria-label="选区提问">
+                  <button type="button" className="text-button" onClick={() => askEditor("translation")}>翻译</button>
+                  <button type="button" className="text-button" onClick={() => askEditor("grammar")}>解释语法</button>
+                  <button type="button" className="text-button" onClick={() => setCustomQuestionOpen((open) => !open)}>自定义问题</button>
+                  {customQuestionOpen && <div className="editor-custom-question">
+                    <input aria-label="选区自定义问题" value={customQuestion} maxLength={4000} onChange={(event) => setCustomQuestion(event.target.value)}
+                      onCompositionStart={() => { compositionActive.current = true; }}
+                      onCompositionEnd={() => { compositionActive.current = false; }}
+                      onKeyDown={(event) => {
+                        if (event.nativeEvent.isComposing || compositionActive.current || event.keyCode === 229) return;
+                        if (event.key === "Enter") {event.preventDefault(); if (customQuestion.trim()) askEditor("custom");}
+                      }} />
+                    <button type="button" className="text-button" disabled={!customQuestion.trim()} onClick={() => askEditor("custom")}>发送问题</button>
+                  </div>}
+                </div>}
+
               </div>
             ) : tab === "ruby" ? (
               <div
@@ -911,6 +993,20 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
                 <p className="panel-hint">
                   按完整词校正，例如「食べる」标注「たべる」。同词不同位置可有不同读音。
                 </p>
+                {annotationTask}
+                <label className="annotation-source">选择要标注的字词
+                  <textarea ref={textarea} aria-label="选择要标注的字词" lang="ja" readOnly value={editingText}
+                    onSelect={getSelection} onKeyUp={getSelection} onMouseUp={getSelection} />
+                </label>
+                <div className="annotation-tools">
+                  <div className="selection-label">{selection ? <span>已选中 <strong lang="ja">{selection.text}</strong></span> : <span>在上方选中字词，为它标注读音</span>}
+                    {selection && !selection.text.includes("\n") && selection.text.length <= 100 && <button type="button" className="text-button" onClick={() => { findBatch(selection.text); setTab("batch"); }}>批量标注这个词</button>}
+                  </div>
+                  <div className="annotation-input-row"><input aria-label="假名读音" lang="ja" value={reading} maxLength={120} placeholder="例如：せなか" onChange={(event) => setReading(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); applyReading(); } }} />
+                    <button type="button" className="button secondary" disabled={!selection || !reading.trim()} onClick={applyReading}>添加注音</button>
+                  </div>
+                </div>
                 {incompleteRuby && (
                   <p className="panel-hint">
                     请补齐空白读音，或点击右侧 × 移除注音后再保存。
@@ -920,7 +1016,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
                   <div className="empty-rubies">
                     <Icon name="type" size={28} />
                     <p>还没有注音</p>
-                    <small>回到正文编辑，选中字词后添加。</small>
+                    <small>在上方选中字词添加读音，或切换“批量注音”查找。</small>
                   </div>
                 )}
                 {rubies.map((r) => (
@@ -1094,10 +1190,8 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
             className="preview-panel"
             aria-label={previewMode === "image" ? "原图对照" : "阅读预览"}
           >
-            {imageSources.length > 1 && <div className="source-image-picker" aria-label="来源图片列表">
-              {imageSources.map((image,index) => <button type="button" key={image.id} className={`button ${activeSourceId === image.id ? "primary" : "subtle"}`} aria-pressed={activeSourceId === image.id} onClick={() => chooseSource(image.id)}>来源图 {index+1}</button>)}
-            </div>}
             <div className="preview-heading">
+              {sourceImageId && <small className="source-image-caption" title={imageMetadata?.originalName || ""}>照片 {imageSources.findIndex((image) => image.id === sourceImageId) + 1} / {imageSources.length}{imageMetadata?.originalName ? ` · ${imageMetadata.originalName}` : ""}</small>}
               {sourceImageId ? (
                 <div
                   className="ocr-preview-switch"
@@ -1259,7 +1353,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
                     {batchSelected.length} 处。
                   </p>
                 )}
-                {body.trim() && tab === "text" ? <ArticleBody html={bodyHtml} fontSize={23} activeSourceId={activeSourceId} onSource={chooseSource} onGroup={setViewGroupIds} /> : body.trim() ? (
+                {body.trim() && tab === "text" ? <ArticleBody html={editingHtml} fontSize={23} onSource={chooseSource} onGroup={setViewGroupIds} /> : body.trim() ? (
                   <RubyText
                     blocks={blocks}
                     fontSize={23}
@@ -1284,27 +1378,15 @@ export default function Editor({ initial, onSave, onCancel, onDirty, saving, boo
           <span>保存后可在书架中重新打开</span>
         </div>
       </fieldset>
+      {fullPreview && createPortal(<aside className="editor-full-overlay" role="dialog" aria-label="全文检查">
+        <header><h2>全文检查</h2><button type="button" className="text-button" onClick={() => setFullPreview(false)}>关闭全文检查</button></header>
+        <div className="editor-full-content"><ArticleBody html={bodyHtml} fontSize={23} onGroup={(ids) => { setFullPreview(false); setViewGroupIds(ids); }} /></div>
+      </aside>, window.document.body)}
       {viewGroupIds && initial.id && createPortal(<div className="editor-chat-overlay">
         <DocumentChat document={{...initial,revision:value.revision}} selectedGroupIds={viewGroupIds}
-          onClose={() => setViewGroupIds(null)}
-          onDocumentChanged={async () => {
-            const [latest,history] = await Promise.all([api(`/documents/${encodeURIComponent(initial.id)}`),api(`/documents/${encodeURIComponent(initial.id)}/conversations`)]);
-            setValue((old) => ({...old,revision:latest.revision}));
-            if (!history.conversations?.length) {
-              const clean = removeQaMarks(htmlRef.current);
-              setBodyHtml(clean);
-              htmlRef.current = clean;
-              initialQaIds.current = [];
-              // Deleting the conversation also invalidates its marks in every
-              // draft snapshot; text, readings and source history remain undoable.
-              for (const snapshots of [undoHistory, redoHistory]) {
-                snapshots.current = snapshots.current.map((snapshot) => ({
-                  ...snapshot,
-                  html: removeQaMarks(snapshot.html),
-                }));
-              }
-            }
-          }} />
+          request={chatRequest} onRequestHandled={() => setChatRequest(null)}
+          onClose={() => {setViewGroupIds(null);setChatRequest(null);setChatBusy(false);refreshEditorHistory().catch((error) => setMessage(error.message));}}
+          onDocumentChanged={refreshEditorHistory} />
       </div>, window.document.body)}
     </form>
   );

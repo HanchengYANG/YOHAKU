@@ -340,3 +340,197 @@ export function appendBodyHtml(base, addition, { continueLastSentence = false } 
   }
   return renderBody([...previous, ...added]);
 }
+
+function uniqueParagraphs(paragraphs) {
+  const seen = new Set();
+  for (const paragraph of paragraphs) {
+    if (seen.has(paragraph.id)) paragraph.id = randomUuid();
+    seen.add(paragraph.id);
+  }
+  return paragraphs.length ? paragraphs : [{ id: randomUuid(), atoms: [] }];
+}
+
+function joinParagraphs(previous, added, separate = false) {
+  if (!added.length) return previous;
+  const next = added.map((p) => ({ ...p, atoms: p.atoms.map((atom) => ({ ...atom })) }));
+  if (!previous.length || separate) previous.push(...next);
+  else {
+    const first = next.shift();
+    previous.at(-1).atoms.push(...first.atoms);
+    previous.at(-1)._end = first._end;
+    previous.push(...next);
+  }
+  return previous;
+}
+
+// An image boundary is not a paragraph boundary. Keep line breaks within each
+// image while concatenating the final paragraph of one image with the next.
+export function appendImageBodyHtml(base, addition) {
+  const previous = parseBody(base), added = parseBody(addition);
+  const sentenceIds = new Set(previous.flatMap((p) => p.atoms.map((atom) => atom.sentenceId)).filter(Boolean));
+  const renamed = new Map();
+  for (const paragraph of added) for (const atom of paragraph.atoms) {
+    if (!atom.sentenceId || !sentenceIds.has(atom.sentenceId)) continue;
+    if (!renamed.has(atom.sentenceId)) renamed.set(atom.sentenceId, randomUuid());
+    atom.sentenceId = renamed.get(atom.sentenceId);
+  }
+  return renderBody(uniqueParagraphs(joinParagraphs(previous, added)));
+}
+
+// Retain the original UTF-16 positions for projecting a per-image selection
+// back to the article. Empty physical lines belong to the preceding image (or
+// the following one at the start), since an empty span has no text metadata.
+function sourceChunks(html) {
+  let offset = 0;
+  const paragraphs = parseBody(html).map((p, index) => {
+    const atoms = p.atoms.map((atom) => { const item = { ...atom, _offset: offset }; offset += atom.text.length; return item; });
+    const result = { ...p, atoms, _index: index, _end: offset };
+    offset++;
+    return result;
+  });
+  const chunks = [];
+  for (const [index, paragraph] of paragraphs.entries()) {
+    const groups = [];
+    for (const atom of paragraph.atoms) {
+      const sourceId = atom.sourceImageId || null, last = groups.at(-1);
+      if (last?.sourceId === sourceId) last.atoms.push(atom);
+      else groups.push({ sourceId, atoms: [atom] });
+    }
+    if (!groups.length) {
+      const before = paragraphs.slice(0, index).findLast((p) => p.atoms.length);
+      const after = paragraphs.slice(index + 1).find((p) => p.atoms.length);
+      groups.push({ sourceId: (before?.atoms.at(-1) || after?.atoms[0])?.sourceImageId || null, atoms: [] });
+    }
+    for (const group of groups) {
+      const piece = { ...paragraph, atoms: group.atoms }, last = chunks.at(-1);
+      if (last?.sourceId === group.sourceId) {
+        if (last.paragraphs.at(-1)._index === index) last.paragraphs.at(-1).atoms.push(...group.atoms);
+        else last.paragraphs.push(piece);
+      } else chunks.push({ sourceId: group.sourceId, paragraphs: [piece] });
+    }
+  }
+  return chunks;
+}
+
+function combineSourcePieces(pieces) {
+  const paragraphs = [];
+  let previous = null;
+  for (const piece of pieces) {
+    const separate = previous && previous.sourceId && piece.sourceId &&
+      previous.paragraphs.at(-1)._index !== piece.paragraphs[0]._index;
+    joinParagraphs(paragraphs, piece.paragraphs, separate);
+    previous = piece;
+  }
+  return paragraphs;
+}
+
+export function sourceBodyHtml(html, sourceImageId) {
+  if (!identifier(sourceImageId)) throw error("图片来源标识无效。");
+  return renderBody(uniqueParagraphs(combineSourcePieces(sourceChunks(html).filter((chunk) => chunk.sourceId === sourceImageId))));
+}
+
+export function sourceBodySelection(html, sourceImageId, start, end) {
+  if (!identifier(sourceImageId)) throw error("图片来源标识无效。");
+  const paragraphs = combineSourcePieces(sourceChunks(html).filter((chunk) => chunk.sourceId === sourceImageId));
+  const text = paragraphs.map((p) => p.atoms.map((atom) => atom.text).join("")).join("\n");
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= end || end > text.length) return null;
+  const positions = [];
+  paragraphs.forEach((p, index) => {
+    p.atoms.forEach((atom) => { for (let i = 0; i < atom.text.length; i++) positions.push(atom._offset + i); });
+    if (index < paragraphs.length - 1) positions.push(p._end);
+  });
+  for (let i = start + 1; i < end; i++) if (positions[i] !== positions[i - 1] + 1) return null;
+  const from = positions[start], to = positions[end - 1] + 1, selected = text.slice(start, end);
+  return bodyText(html).slice(from, to) === selected ? { start: from, end: to, text: selected } : null;
+}
+
+function sourceBuckets(chunks) {
+  const buckets = new Map(), prefix = [];
+  let owner = null;
+  chunks.forEach((chunk, index) => {
+    if (chunk.sourceId) {
+      owner = chunk.sourceId;
+      if (!buckets.has(owner)) buckets.set(owner, []);
+      buckets.get(owner).push(chunk);
+      return;
+    }
+    const paragraphs = chunk.paragraphs.map((p) => ({ ...p, atoms: [...p.atoms] }));
+    // Legacy unassigned text is never an extra selectable image. Keep its
+    // original line breaks and anchor it to the preceding image when sorted.
+    if (index && chunks[index - 1].paragraphs.at(-1)._index !== paragraphs[0]._index)
+      paragraphs.unshift({ id: randomUuid(), atoms: [] });
+    if (index + 1 < chunks.length && chunk.paragraphs.at(-1)._index !== chunks[index + 1].paragraphs[0]._index)
+      paragraphs.push({ id: randomUuid(), atoms: [] });
+    (owner ? buckets.get(owner) : prefix).push({ sourceId: null, paragraphs });
+  });
+  return { buckets, prefix };
+}
+
+function renderSourceBuckets(buckets, prefix, sourceImageIds) {
+  const paragraphs = combineSourcePieces(prefix);
+  for (const id of sourceImageIds) joinParagraphs(paragraphs, combineSourcePieces(buckets.get(id) || []));
+  return renderBody(uniqueParagraphs(paragraphs));
+}
+
+export function replaceSourceBodyHtml(html, sourceImageId, replacement) {
+  if (!identifier(sourceImageId)) throw error("图片来源标识无效。");
+  const chunks = sourceChunks(html), { buckets, prefix } = sourceBuckets(chunks);
+  let paragraphs = parseBody(replacement);
+  const text = bodyText(replacement);
+  paragraphs.forEach((p) => p.atoms.forEach((atom) => { atom.sourceImageId = sourceImageId; }));
+  if (text && !paragraphs.some((p) => p.atoms.length)) paragraphs = [{ id: paragraphs[0].id, atoms: [{ text, sourceImageId }] }];
+  const legacy = (buckets.get(sourceImageId) || []).filter((piece) => !piece.sourceId);
+  buckets.set(sourceImageId, [...(text ? [{ sourceId: sourceImageId, paragraphs }] : []), ...legacy]);
+  return renderSourceBuckets(buckets, prefix, [...buckets.keys()]);
+}
+
+export function removeSourceBodyHtml(html, sourceImageId) {
+  if (!identifier(sourceImageId)) throw error("图片来源标识无效。");
+  const paragraphs = parseBody(html), removedSentences = new Set(), removedRuby = new Set();
+  let removed = false;
+  for (const paragraph of paragraphs) for (const atom of paragraph.atoms) if (atom.sourceImageId === sourceImageId) {
+    removed = true;
+    if (atom.sentenceId) removedSentences.add(atom.sentenceId);
+    if (atom.rubyId) removedRuby.add(atom.rubyId);
+  }
+  if (!removed) return renderBody(paragraphs);
+  const ownedEmpty = new Set(sourceChunks(html).filter((chunk) => chunk.sourceId === sourceImageId)
+    .flatMap((chunk) => chunk.paragraphs.filter((paragraph) => !paragraph.atoms.length).map((paragraph) => paragraph._index)));
+  const remaining = paragraphs.flatMap((paragraph, index) => {
+    const atoms = paragraph.atoms.filter((atom) => atom.sourceImageId !== sourceImageId);
+    // Delete this image's physical lines, without consuming blank lines owned
+    // by another image or legacy unassigned paragraphs.
+    if (!atoms.length && (paragraph.atoms.length || ownedEmpty.has(index))) return [];
+    for (const atom of atoms) {
+      if (removedSentences.has(atom.sentenceId)) delete atom.sentenceId;
+      if (removedRuby.has(atom.rubyId)) { delete atom.reading; delete atom.origin; delete atom.rubyId; }
+    }
+    return [{ ...paragraph, atoms }];
+  });
+  return renderBody(remaining.length ? remaining : [{ id: paragraphs[0].id, atoms: [] }]);
+}
+
+export function reorderSourceBodyHtml(html, sourceImageIds) {
+  if (!Array.isArray(sourceImageIds) || sourceImageIds.some((id) => !identifier(id)) || new Set(sourceImageIds).size !== sourceImageIds.length)
+    throw error("文章来源图片列表无效，图片标识不能重复。");
+  const chunks = sourceChunks(html), { buckets, prefix } = sourceBuckets(chunks);
+  const existing = [...buckets.keys()];
+  if (existing.some((id) => !sourceImageIds.includes(id))) throw error("排序不能丢失已有图片的正文。");
+  if (existing.join("\0") !== sourceImageIds.filter((id) => buckets.has(id)).join("\0")) {
+    const owners = new Map(), rubyOwners = new Map();
+    let owner = null;
+    for (const chunk of chunks) {
+      if (chunk.sourceId) owner = chunk.sourceId;
+      for (const p of chunk.paragraphs) for (const atom of p.atoms)
+        for (const [map, id] of [[owners, atom.sentenceId], [rubyOwners, atom.rubyId]]) if (id) {
+          if (!map.has(id)) map.set(id, new Set());
+          map.get(id).add(owner);
+        }
+    }
+    for (const chunk of chunks) for (const p of chunk.paragraphs) for (const atom of p.atoms) {
+      if (owners.get(atom.sentenceId)?.size > 1) delete atom.sentenceId;
+      if (rubyOwners.get(atom.rubyId)?.size > 1) { delete atom.reading; delete atom.origin; delete atom.rubyId; }
+    }
+  }
+  return renderSourceBuckets(buckets, prefix, sourceImageIds);
+}

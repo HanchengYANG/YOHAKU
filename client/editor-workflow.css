@@ -1,0 +1,75 @@
+.source-image-sorter { margin: 18px 0; min-width: 0; }
+.source-sort-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:9px; font-size:12px; color:var(--muted); }
+.source-sort-heading > div { display:flex; align-items:center; gap:9px; }
+.source-sort-heading small { font-size:11px; }
+.source-sort-actions .button { min-height:36px; min-width:48px; padding:5px 12px; font-size:12px; }
+.source-sort-actions .button:disabled { opacity:.45; cursor:default; }
+.source-sort-summary { margin:0 0 10px; font-size:12px; color:var(--muted); }
+.source-sort-minimum { margin:8px 0 0; color:var(--muted); font-size:12px; }
+.source-sort-list { position:relative; display:flex; flex-wrap:wrap; gap:8px; min-width:0; }
+.source-sort-item { position:relative; flex:0 0 auto; min-width:110px; max-width:178px; }
+.source-sort-item.has-remove { padding-top:8px; padding-right:8px; }
+.source-sort-item > .source-sort-card { width:100%; }
+.source-sort-card { position:relative; display:flex; align-items:center; gap:8px; max-width:170px; min-width:110px; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:var(--paper); color:var(--ink); text-align:left; touch-action:pan-y pinch-zoom; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; transition:background-color 120ms ease-out,border-color 120ms ease-out; }
+.source-sort-card[aria-pressed=true] { border-color:#788c64; background:#e2ebdb; }
+.source-sort-card > img { display:block; width:25px; height:34px; flex-shrink:0; object-fit:cover; pointer-events:none; -webkit-user-drag:none; transition:transform 120ms ease-out; }
+.source-sort-card-label { min-width:0; font-size:12px; }
+.source-sort-card-label > span { display:block; }
+.source-sort-card-label small { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; max-width:105px; font-size:11px; color:var(--muted); }
+.source-sort-number { display:none; }
+.source-sort-item-status { display:block; max-width:170px; margin-top:5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; line-height:1.5; color:var(--muted); }
+.source-sort-item[data-status-kind=done] .source-sort-item-status { color:#536b40; }
+.source-sort-item[data-status-kind=working] .source-sort-item-status { color:var(--ink); }
+.source-sort-item[data-status-kind=error] .source-sort-item-status { color:var(--rust,#b66d4c); }
+.source-sort-item[data-status-kind=error] .source-sort-card { border-color:var(--rust,#b66d4c); }
+.source-sort-remove { position:absolute; z-index:2; top:0; right:0; display:grid; place-items:center; width:28px; height:28px; padding:0; border:1px solid var(--line); border-radius:50%; background:var(--paper); color:var(--muted); font-size:19px; line-height:1; cursor:pointer; touch-action:manipulation; }
+.source-sort-remove:hover { color:var(--rust,#b66d4c); border-color:var(--rust,#b66d4c); }
+.source-sort-remove:disabled { cursor:default; opacity:.45; }
+@media(max-width:760px) {
+  .source-sort-list { gap:6px; }
+  .source-sort-item { flex:0 0 48px; min-width:48px; width:48px; max-width:48px; }
+  .source-sort-item.has-remove { flex-basis:56px; min-width:56px; width:56px; max-width:56px; padding-top:10px; }
+  .source-sort-item > .source-sort-card { width:48px; }
+  .source-sort-card { flex:0 0 48px; min-width:48px; width:48px; height:52px; padding:5px; justify-content:center; }
+  .source-sort-card > img { width:28px; height:36px; }
+  .source-sort-card-label { display:none; }
+  .source-sort-number { position:absolute; right:2px; bottom:2px; min-width:16px; height:16px; padding:0 2px; display:grid; place-items:center; border:1px solid var(--line); border-radius:3px; background:var(--paper); font-size:11px; line-height:1; }
+  .source-sort-heading { flex-wrap:wrap; }
+  .source-sort-item-status { margin-top:4px; font-size:10px; }
+}
+@media(pointer:coarse) { .source-sort-actions .button { min-height:44px; } }
+@media(prefers-reduced-motion:reduce) { .source-sort-card,.source-sort-card > img { transition:none; } }
+.editor-page.editor-has-source .preview-heading { height:auto; min-height:53px; flex-wrap:wrap; gap:8px 12px; padding-top:10px; padding-bottom:10px; }
+.editor-page .preview-heading .source-image-caption { flex-basis:100%; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:11px; }
+.editor-full-overlay { position:fixed; z-index:46; top:0; right:0; bottom:0; width:min(480px,100%); display:flex; flex-direction:column; background:var(--paper); border-left:1px solid var(--line); box-shadow:-8px 0 24px #203b3917; }
+.editor-full-overlay > header { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:18px; border-bottom:1px solid var(--line); }
+.editor-full-overlay h2 { margin:0; font-size:18px; color:var(--ink); }
+.editor-full-content { min-height:0; flex:1; overflow:auto; overscroll-behavior:contain; padding:22px; }
+.editor-page .sentence-actions { margin-left:23px; margin-right:23px; }
+.editor-page .annotation-source { display:grid; gap:8px; margin:14px 23px; color:var(--muted); font-size:12px; }
+.editor-page .annotation-source textarea { box-sizing:border-box; width:100%; min-height:120px; height:150px; resize:vertical; padding:10px; border:1px solid var(--line); border-radius:5px; background:var(--paper); color:var(--ink); font-family:"Noto Sans CJK JP","Yu Gothic",sans-serif; font-size:17px; line-height:2; }
+.editor-page .editor-meta-details { margin:8px 0 12px; padding:10px 14px; border:1px solid var(--line); border-radius:6px; background:var(--paper); }
+.editor-meta-details > summary { color:var(--ink); font-size:13px; line-height:1.8; overflow-wrap:anywhere; }
+.editor-meta-details > summary > span { float:right; margin-left:12px; color:var(--muted); font-size:11px; }
+.editor-page .ocr-review-overview { margin:0 0 14px; padding:10px 14px; }
+.editor-page .ocr-review-overview > summary { color:var(--ink); font-size:12px; line-height:1.8; }
+.editor-page .ruby-editor > .ocr-annotation-task { margin:14px 23px; }
+.editor-annotation-error { margin:0 0 14px; padding:8px 12px; border-left:2px solid #b66d4c; color:#9c542e; font-size:12px; }
+@media(min-width:1000px) {
+  .editor-page.editor-has-source .editor-workspace { grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr); }
+  .editor-page.editor-has-source .source-panel { grid-column:2; grid-row:1; border-right:0; border-left:1px solid var(--line); }
+  .editor-page.editor-has-source .preview-panel { grid-column:1; grid-row:1; }
+}
+@media(max-width:999px) {
+  .editor-page.editor-has-source .preview-panel { grid-column:1; grid-row:1; }
+  .editor-page.editor-has-source .source-panel { grid-column:1; grid-row:2; border-top:1px solid var(--line); border-bottom:0; }
+  .editor-full-overlay { top:auto; left:0; right:0; bottom:0; width:100%; height:min(65dvh,680px); max-height:calc(100dvh - 70px); border:1px solid var(--line); border-radius:16px 16px 0 0; }
+  .editor-page.editor-has-source .ocr-original-image { min-height:180px; height:230px; max-height:260px; }
+}
+@media(max-width:760px) {
+  .editor-page .sentence-actions { margin-left:18px; margin-right:18px; }
+  .editor-page .annotation-source { margin-left:18px; margin-right:18px; }
+  .editor-page .ruby-editor > .ocr-annotation-task { margin-left:18px; margin-right:18px; }
+  .editor-full-content { padding:18px; }
+  .editor-page.editor-has-source .preview-heading { padding-left:14px; padding-right:14px; }
+}

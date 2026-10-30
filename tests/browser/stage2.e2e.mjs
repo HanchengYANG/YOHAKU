@@ -7,6 +7,7 @@ import { join } from "node:path";
 import sharp from "sharp";
 import { ensureOwnerSession, testOwner } from "./session.mjs";
 import { selectArticleText, selectionFor } from "./article-selection.mjs";
+import { bodyText } from "../../shared/article-html.mjs";
 
 const accountFlowTitle = "网站账号登录、退出与邀请码注册使用真实会话和资料隔离";
 let ownerCookies = [];
@@ -71,6 +72,18 @@ async function importDraft(page, filePath = imagePath) {
   expect(response.ok()).toBe(true);
   return response.json();
 }
+
+async function openEditorDetails(page, selector) {
+  await expect(page.locator(".editor-page")).toBeVisible();
+  const details = page.locator(selector);
+  if (await details.count() && !(await details.evaluate((element) => element.open)))
+    await details.locator(":scope > summary").click();
+}
+
+const uploadQueue = (page) => page.getByRole("region", { name: "照片队列", exact: true });
+const uploadCards = (queue) => queue.locator(".source-sort-card[data-sort-image-id]");
+const uploadNames = (queue) => uploadCards(queue).locator(".source-sort-card-label small");
+const queueIds = (queue) => uploadCards(queue).evaluateAll((cards) => cards.map((card) => card.dataset.sortImageId));
 
 async function createImageDocument(page) {
   const draft = await importDraft(page);
@@ -298,70 +311,418 @@ async function checkOriginalPreview(page, projectName) {
   await expect(body).toHaveValue(originalBody);
 }
 
-test("图片入口支持截图粘贴、拖放及键盘选图，拒绝无效或多张图片", async ({
-  page,
-}, info) => {
+test("图片入口支持多张粘贴、拖放和键盘选图，拒绝无效文件并保留队列", async ({ page }, info) => {
   await openImageImport(page);
   const bytes = [...(await readFile(imagePath))];
   const clipboardImage = { name: "粘贴的截图.png", type: "image/png", bytes };
+  const queue = uploadQueue(page);
   expect(await transferImages(page, "paste", [clipboardImage])).toBe(true);
   const preview = page.getByAltText("待识别的日语原图", { exact: true });
-  await expect
-    .poll(() => preview.evaluate((el) => el.complete && el.naturalWidth > 0))
-    .toBe(true);
-  await expect(page.locator(".image-file-details > strong")).toHaveText(
-    clipboardImage.name,
-  );
+  await expect.poll(() => preview.evaluate((el) => el.complete && el.naturalWidth > 0)).toBe(true);
+  await expect(uploadCards(queue)).toHaveCount(1);
+  await expect(page.locator(".image-file-details > strong")).toHaveText(clipboardImage.name);
   const previewUrl = await preview.getAttribute("src");
 
-  await transferImages(page, "paste", [
-    { name: "不支持.gif", type: "image/gif", bytes: [71, 73, 70] },
-  ]);
+  await transferImages(page, "paste", [{ name: "不支持.gif", type: "image/gif", bytes: [71, 73, 70] }]);
   await expect(page.getByRole("alert")).toContainText("PNG、JPEG 或 WebP");
   await expect(preview).toHaveAttribute("src", previewUrl);
-  await transferImages(page, "drop", [
-    clipboardImage,
-    { ...clipboardImage, name: "第二张.png" },
-  ]);
-  await expect(page.getByRole("alert")).toContainText("一次只支持一张图片");
-  await expect(page.locator(".image-file-details > strong")).toHaveText(
-    clipboardImage.name,
-  );
-  await transferImages(page, "paste", [
-    { name: "太大.png", type: "image/png", size: 12 * 1024 * 1024 + 1 },
-  ]);
-  await expect(page.getByRole("alert")).toContainText("大小不超过 12 MB");
-  await expect(preview).toHaveAttribute("src", previewUrl);
-
-  expect(
-    await transferImages(page, "drop", [
-      { ...clipboardImage, name: "拖入的截图.png" },
-    ]),
-  ).toBe(true);
+  await expect(uploadCards(queue)).toHaveCount(1);
+  expect(await transferImages(page, "drop", [clipboardImage, { ...clipboardImage, name: "第二张.png" }])).toBe(true);
   await expect(page.getByRole("alert")).toHaveCount(0);
-  await expect(page.locator(".image-file-details > strong")).toHaveText(
-    "拖入的截图.png",
-  );
+  await expect(uploadNames(queue)).toHaveText([clipboardImage.name, clipboardImage.name, "第二张.png"]);
+  const batchPreviewUrl = await preview.getAttribute("src");
+
+  await transferImages(page, "paste", [{ name: "太大.png", type: "image/png", size: 12 * 1024 * 1024 + 1 }]);
+  await expect(page.getByRole("alert")).toContainText("大小不超过 12 MB");
+  await expect(preview).toHaveAttribute("src", batchPreviewUrl);
+  await expect(uploadCards(queue)).toHaveCount(3);
+  expect(await transferImages(page, "drop", [{ ...clipboardImage, name: "拖入的截图.png" }])).toBe(true);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.locator(".image-file-details > strong")).toHaveText("拖入的截图.png");
+
   const chooserReady = page.waitForEvent("filechooser");
-  const picker = page.getByRole("button", {
-    name: "点击选择或更换图片",
-    exact: true,
-  });
-  await picker.focus();
-  await picker.press("Enter");
+  const picker = page.getByRole("button", { name: "点击选择或更换图片", exact: true });
+  await picker.focus(); await picker.press("Enter");
   const chooser = await chooserReady;
-  await chooser.setFiles(imagePath);
-  await expect(page.locator(".image-file-details > strong")).toHaveText(
-    "first.png",
-  );
-  await expect(
-    page.getByRole("button", { name: "识别并注音", exact: true }),
-  ).toBeEnabled();
-  await page.screenshot({
-    path: `artifacts/stage2-image-input-${info.project.name}.png`,
-    fullPage: true,
-    animations: "disabled",
+  expect(chooser.isMultiple()).toBe(true);
+  await chooser.setFiles([imagePath, secondImagePath]);
+  await expect(page.getByLabel("选择日语图片", { exact: true })).toHaveAttribute("multiple", "");
+  await expect(uploadNames(queue)).toHaveText([
+    clipboardImage.name, clipboardImage.name, "第二张.png", "拖入的截图.png", "first.png", "second.png",
+  ]);
+  await expect(page.locator(".image-file-details > strong")).toHaveText("first.png");
+  await expect(page.getByRole("button", { name: "识别 6 张并校对", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "移除second.png", exact: true }).click();
+  await expect(uploadCards(queue)).toHaveCount(5);
+  await expect(page.getByRole("button", { name: "识别 5 张并校对", exact: true })).toBeEnabled();
+  await page.screenshot({ path: `artifacts/stage2-image-input-${info.project.name}.png`, fullPage: true, animations: "disabled" });
+});
+
+test("图片队列前移后移保持当前照片，右上角移除不改变其他照片", async ({ page }, info) => {
+  await openImageImport(page);
+  const bytes = await readFile(imagePath), other = await readFile(secondImagePath);
+  await page.getByLabel("选择日语图片", { exact: true }).setInputFiles([
+    { name: "排序甲.png", mimeType: "image/png", buffer: bytes },
+    { name: "排序乙.png", mimeType: "image/png", buffer: other },
+    { name: "排序丙.png", mimeType: "image/png", buffer: bytes },
+  ]);
+  const queue = uploadQueue(page), cards = uploadCards(queue);
+  await expect(cards).toHaveCount(3);
+  await expect(page.locator(".image-batch-list")).toHaveCount(0);
+  await expect(queue.locator(".source-sort-summary")).toContainText("已完成 0 / 3");
+  const summaryBox = await queue.locator(".source-sort-summary").boundingBox(), firstCardBox = await cards.first().boundingBox();
+  expect(summaryBox.y + summaryBox.height).toBeLessThanOrEqual(firstCardBox.y);
+  const initial = await queueIds(queue);
+  const image = (id) => queue.locator(`.source-sort-card[data-sort-image-id="${id}"]`);
+  const previous = queue.getByRole("button", { name: "前移当前照片", exact: true });
+  const next = queue.getByRole("button", { name: "后移当前照片", exact: true });
+  await expect(previous).toBeDisabled(); await expect(next).toBeEnabled();
+  await expect(queue.getByRole("button", { name: "允许拖动排序", exact: true })).toHaveCount(0);
+  await next.click();
+  expect(await queueIds(queue)).toEqual([initial[1], initial[0], initial[2]]);
+  await expect(image(initial[0])).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".image-file-details > strong")).toHaveText("排序甲.png");
+  await previous.click();
+  expect(await queueIds(queue)).toEqual(initial);
+  await image(initial[2]).click();
+  await expect(next).toBeDisabled(); await expect(previous).toBeEnabled();
+  await previous.click();
+  expect(await queueIds(queue)).toEqual([initial[0], initial[2], initial[1]]);
+  await expect(image(initial[2])).toHaveAttribute("aria-pressed", "true");
+  await next.click();
+  expect(await queueIds(queue)).toEqual(initial);
+
+  const currentInfo = page.locator('[aria-label="当前照片信息"]');
+  await expect(currentInfo).toContainText("排序丙.png");
+  await expect(currentInfo).toContainText(/3\s*\/\s*3/);
+  const infoBox = await currentInfo.boundingBox(), previewBox = await page.locator(".image-import-preview").boundingBox();
+  expect(infoBox).toBeTruthy(); expect(previewBox).toBeTruthy();
+  expect(infoBox.y + infoBox.height).toBeLessThanOrEqual(previewBox.y + 1);
+  await queue.getByRole("button", { name: "移除排序乙.png", exact: true }).click();
+  expect(await queueIds(queue)).toEqual([initial[0], initial[2]]);
+  await expect(image(initial[2])).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".image-file-details > strong")).toHaveText("排序丙.png");
+  await expect(currentInfo).toContainText(/2\s*\/\s*2/);
+  await queue.getByRole("button", { name: "移除排序甲.png", exact: true }).click();
+  expect(await queueIds(queue)).toEqual([initial[2]]);
+  await expect(image(initial[2])).toHaveAttribute("aria-pressed", "true");
+  await expect(currentInfo).toContainText(/1\s*\/\s*1/);
+  await expect(previous).toBeDisabled(); await expect(next).toBeDisabled();
+  await expect(page.getByRole("button", { name: "识别并注音", exact: true })).toBeEnabled();
+
+  if (info.project.name === "phone") {
+    await page.setViewportSize({ width: 320, height: 844 });
+    await expect(image(initial[2]).locator(".source-sort-card-label")).toBeHidden();
+    const compact = await image(initial[2]).boundingBox();
+    expect(compact.width).toBeGreaterThanOrEqual(44); expect(compact.width).toBeLessThanOrEqual(80);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  }
+  await queue.getByRole("button", { name: "移除排序丙.png", exact: true }).click();
+  await expect(uploadQueue(page)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "识别并注音", exact: true })).toBeDisabled();
+  await page.screenshot({ path: `artifacts/image-queue-sort-remove-${info.project.name}.png`, fullPage: true, animations: "disabled" });
+});
+
+test("图片队列缩略图与总体进度反映处理失败保留和缓存重试", async ({ page }, info) => {
+  await enableTestAccount(page); await openImageImport(page);
+  const bytes = await readFile(imagePath);
+  await page.getByLabel("选择日语图片", { exact: true }).setInputFiles([
+    { name: "进度甲.png", mimeType: "image/png", buffer: bytes },
+    { name: "进度乙.png", mimeType: "image/png", buffer: bytes },
+    { name: "进度丙.png", mimeType: "image/png", buffer: bytes },
+  ]);
+  const queue = uploadQueue(page), cards = uploadCards(queue), ids = await queueIds(queue);
+  const card = (index) => queue.locator(`.source-sort-card[data-sort-image-id="${ids[index]}"]`);
+  const status = (index) => queue.locator(`[data-sort-item-id="${ids[index]}"] .source-sort-item-status`);
+  const summary = queue.locator(".source-sort-summary");
+  await expect(summary).toContainText("已完成 0 / 3");
+  await expect(cards).toHaveCount(3);
+  for (let index = 0; index < 3; index++) await expect(card(index)).toHaveAttribute("data-status-kind", "pending");
+  let uploads = 0, recognitions = 0, annotations = 0, failSecond, releaseRetry, releaseLast;
+  const secondGate = new Promise((resolve) => { failSecond = resolve; });
+  const retryGate = new Promise((resolve) => { releaseRetry = resolve; });
+  const lastGate = new Promise((resolve) => { releaseLast = resolve; });
+  page.on("request", (request) => {
+    if (request.method() !== "POST") return;
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/images") uploads++;
+    if (/\/api\/images\/[^/]+\/recognize$/.test(path)) recognitions++;
   });
+  await page.route("**/api/images/*/annotate", async (route) => {
+    annotations++;
+    if (annotations === 2) {
+      await secondGate;
+      return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "测试：第二张注音暂时失败。" }) });
+    }
+    if (annotations === 3) await retryGate;
+    if (annotations === 4) await lastGate;
+    await route.continue();
+  });
+  try {
+    await page.getByRole("button", { name: "识别 3 张并校对", exact: true }).click();
+    await expect.poll(() => annotations).toBe(2);
+    await expect(summary).toContainText("已完成 1 / 3");
+    await expect(card(0)).toHaveAttribute("data-status-kind", "done");
+    await expect(card(1)).toHaveAttribute("data-status-kind", "working");
+    await expect(card(2)).toHaveAttribute("data-status-kind", "pending");
+    await expect(status(0)).toHaveText("已完成");
+    await expect(status(1)).toHaveText("生成注音");
+    await expect(status(2)).toHaveText("待处理");
+    await expect(queue.getByText("处理中，暂不可排序", { exact: true })).toBeVisible();
+    await expect(queue.getByRole("button", { name: "前移当前照片", exact: true })).toBeDisabled();
+    await expect(queue.getByRole("button", { name: "后移当前照片", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "向左旋转90°", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "向右旋转90°", exact: true })).toBeDisabled();
+    await expect(queue.getByRole("button", { name: "移除进度乙.png", exact: true })).toBeDisabled();
+    failSecond();
+    await expect(page.getByRole("alert")).toContainText("第二张注音暂时失败");
+    await expect(card(1)).toHaveAttribute("data-status-kind", "error");
+    await expect(status(1)).toHaveText("待重试");
+    await expect(summary).toContainText("已完成 1 / 3");
+    expect([uploads, recognitions, annotations]).toEqual([2, 2, 2]);
+
+    await page.getByLabel("选择日语图片", { exact: true }).setInputFiles({ name: "仅检查移除.png", mimeType: "image/png", buffer: bytes });
+    await expect(summary).toContainText("已完成 1 / 4");
+    await expect(card(1)).toHaveAttribute("data-status-kind", "retained");
+    await expect(status(1)).toHaveText("正文已保留");
+    await queue.getByRole("button", { name: "移除仅检查移除.png", exact: true }).click();
+    expect(await queueIds(queue)).toEqual(ids);
+    await expect(summary).toContainText("已完成 1 / 3");
+    await page.getByRole("button", { name: "识别 3 张并校对", exact: true }).click();
+    await expect.poll(() => annotations).toBe(3);
+    expect([uploads, recognitions]).toEqual([2, 2]);
+    await expect(card(0)).toHaveAttribute("data-status-kind", "done");
+    await expect(card(1)).toHaveAttribute("data-status-kind", "working");
+    releaseRetry();
+    await expect.poll(() => annotations).toBe(4);
+    await expect(summary).toContainText("已完成 2 / 3");
+    await expect(card(0)).toHaveAttribute("data-status-kind", "done");
+    await expect(card(1)).toHaveAttribute("data-status-kind", "done");
+    await expect(card(2)).toHaveAttribute("data-status-kind", "working");
+    expect([uploads, recognitions, annotations]).toEqual([3, 3, 4]);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await expect(page.locator(".image-batch-list")).toHaveCount(0);
+    await page.screenshot({ path: `artifacts/image-queue-progress-${info.project.name}.png`, fullPage: true, animations: "disabled" });
+    releaseLast();
+    await expect(page.getByRole("button", { name: "保存并阅读", exact: true })).toBeEnabled();
+    await expect(page.getByRole("region", { name: "图片导入", exact: true })).toHaveCount(0);
+    await expect(page.locator(".source-sort-card[data-sort-image-id]")).toHaveCount(3);
+    await page.getByRole("button", { name: "全文检查", exact: true }).click();
+    expect(await renderedText(page.locator(".editor-full-content"))).toBe(ocrText + ocrText + ocrText);
+    await page.getByRole("button", { name: "关闭全文检查", exact: true }).click();
+  } finally {
+    failSecond(); releaseRetry(); releaseLast(); await page.request.post("/api/ai/logout");
+  }
+});
+
+test("识别前逐图调整方向会先旋转真实像素，重试复用方向且改方向重做OCR注音", async ({ page }, info) => {
+  await enableTestAccount(page); await openImageImport(page);
+  const red = await sharp({ create: { width: 200, height: 200, channels: 3, background: "#c32c24" } }).png().toBuffer();
+  const firstBytes = await sharp(await readFile(imagePath)).composite([{ input: red, top: 0, left: 0 }]).png().toBuffer();
+  const secondBytes = await readFile(secondImagePath);
+  await page.getByLabel("选择日语图片", { exact: true }).setInputFiles([
+    { name: "方向甲.png", mimeType: "image/png", buffer: firstBytes },
+    { name: "方向乙.png", mimeType: "image/png", buffer: secondBytes },
+  ]);
+  const queue = uploadQueue(page), ids = await queueIds(queue);
+  const card = (index) => queue.locator(`.source-sort-card[data-sort-image-id="${ids[index]}"]`);
+  const left = page.getByRole("button", { name: "向左旋转90°", exact: true });
+  const right = page.getByRole("button", { name: "向右旋转90°", exact: true });
+  const preview = page.getByAltText("待识别的日语原图", { exact: true });
+  const direction = page.locator('[aria-label="识别前调整图片方向"]');
+  await left.click();
+  await expect(direction).toContainText("270°");
+  await card(1).click(); await right.click();
+  await expect(direction).toContainText("90°");
+  await card(0).click();
+  await expect(direction).toContainText("270°");
+  await queue.getByRole("button", { name: "后移当前照片", exact: true }).click();
+  expect(await queueIds(queue)).toEqual([ids[1], ids[0]]);
+  await expect(direction).toContainText("270°");
+  await expect.poll(() => preview.evaluate((image) => { const box = image.getBoundingClientRect(); return box.width / box.height; })).toBeCloseTo(600 / 800, 2);
+  const matrix = await card(0).locator("img").evaluate((image) => {
+    const m = new DOMMatrixReadOnly(getComputedStyle(image).transform);
+    return [m.a, m.b, m.c, m.d].map((value) => Math.abs(value) < 0.0001 ? 0 : Math.round(value));
+  });
+  expect(matrix).toEqual([0, -1, 1, 0]);
+  expect(await preview.evaluate((image) => {
+    const box = image.getBoundingClientRect(), stage = image.parentElement.getBoundingClientRect();
+    return box.left >= stage.left - 1 && box.right <= stage.right + 1 && box.top >= stage.top - 1 && box.bottom <= stage.bottom + 1;
+  })).toBe(true);
+
+  let uploads = 0, annotations = 0, releaseRotation;
+  const rotationGate = new Promise((resolve) => { releaseRotation = resolve; });
+  const rotations = [], seenByOCR = [], seenByAnnotation = [];
+  page.on("request", (request) => { if (request.method() === "POST" && new URL(request.url()).pathname === "/api/images") uploads++; });
+  await page.route("**/api/images/*/rotate", async (route) => {
+    rotations.push({ id: new URL(route.request().url()).pathname.split("/")[3], ...route.request().postDataJSON() });
+    if (rotations.length === 1) await rotationGate;
+    await route.continue();
+  });
+  await page.route("**/api/images/*/recognize", async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/")[3];
+    const current = await currentImage(page, id);
+    seenByOCR.push({ id, revision: current.metadata.revision, width: current.pixels.width, height: current.pixels.height });
+    await route.continue();
+  });
+  await page.route("**/api/images/*/annotate", async (route) => {
+    annotations++;
+    const id = new URL(route.request().url()).pathname.split("/")[3];
+    const current = await currentImage(page, id);
+    seenByAnnotation.push({ id, revision: current.metadata.revision, width: current.pixels.width, height: current.pixels.height });
+    if (annotations === 2 || annotations === 3) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "测试：方向验证中的注音失败。" }) });
+    await route.continue();
+  });
+  try {
+    await page.getByRole("button", { name: "识别 2 张并校对", exact: true }).click();
+    await expect.poll(() => rotations.length).toBe(1);
+    await expect(page.getByRole("region", { name: "图片处理进度", exact: true })).toHaveAttribute("data-phase", "rotate");
+    await expect(left).toBeDisabled(); await expect(right).toBeDisabled();
+    await expect(queue.getByRole("button", { name: "前移当前照片", exact: true })).toBeDisabled();
+    await expect(queue.getByRole("button", { name: "移除方向乙.png", exact: true })).toBeDisabled();
+    await expect(card(1)).toHaveAttribute("data-status-kind", "working");
+    releaseRotation();
+    await expect(page.getByRole("alert")).toContainText("方向验证中的注音失败");
+    expect([uploads, rotations.length, seenByOCR.length, annotations]).toEqual([2, 2, 2, 2]);
+    const secondId = rotations[0].id, firstId = rotations[1].id;
+    expect(rotations).toEqual([{ id: secondId, quarterTurns: 1, revision: 1 }, { id: firstId, quarterTurns: 3, revision: 1 }]);
+    expect(seenByOCR).toEqual([{ id: secondId, revision: 2, width: 480, height: 640 }, { id: firstId, revision: 2, width: 600, height: 800 }]);
+    expect(seenByAnnotation).toEqual(seenByOCR);
+    const firstRotated = await currentImage(page, firstId);
+    expect(await sharp(firstRotated.bytes).raw().toBuffer()).toEqual(await sharp(firstBytes).rotate(270).raw().toBuffer());
+    await page.getByRole("button", { name: "重试注音", exact: true }).click();
+    await expect.poll(() => annotations).toBe(3);
+    await expect(left).toBeEnabled();
+    expect([uploads, rotations.length, seenByOCR.length]).toEqual([2, 2, 2]);
+
+    // The already completed second photo has both OCR and ruby cached. Turning
+    // it back must invalidate both, while retaining the first photo's OCR.
+    await card(1).click(); await left.click();
+    await expect(direction).toContainText("原始方向");
+    await expect(queue.locator(".source-sort-summary")).toContainText("已完成 0 / 2");
+    await page.getByRole("button", { name: "识别 2 张并校对", exact: true }).click();
+    await expect(page.getByRole("button", { name: "保存并阅读", exact: true })).toBeEnabled();
+    expect([uploads, rotations.length, seenByOCR.length, annotations]).toEqual([2, 3, 3, 5]);
+    expect(rotations[2]).toEqual({ id: secondId, quarterTurns: 3, revision: 2 });
+    expect(seenByOCR[2]).toEqual({ id: secondId, revision: 3, width: 640, height: 480 });
+    const restored = await currentImage(page, secondId);
+    expect(await sharp(restored.bytes).raw().toBuffer()).toEqual(await sharp(secondBytes).raw().toBuffer());
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: `artifacts/image-import-direction-${info.project.name}.png`, fullPage: true, animations: "disabled" });
+  } finally { releaseRotation(); await page.request.post("/api/ai/logout"); }
+});
+
+test("识别前旋转响应丢失会重传本张原图，避免在未知方向上重复旋转", async ({ page }) => {
+  await enableTestAccount(page); await openImageImport(page);
+  await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(imagePath);
+  await page.getByRole("button", { name: "向左旋转90°", exact: true }).click();
+  const rotations = [], recognized = [];
+  let uploads = 0;
+  page.on("request", (request) => { if (request.method() === "POST" && new URL(request.url()).pathname === "/api/images") uploads++; });
+  await page.route("**/api/images/*/rotate", async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/")[3];
+    rotations.push({ id, ...route.request().postDataJSON() });
+    if (rotations.length === 1) {
+      // Save real pixels successfully, then deliberately lose the success reply.
+      const response = await route.fetch();
+      expect(response.status()).toBe(200);
+      return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "测试：旋转成功响应丢失。" }) });
+    }
+    await route.continue();
+  });
+  await page.route("**/api/images/*/recognize", async (route) => {
+    recognized.push(new URL(route.request().url()).pathname.split("/")[3]);
+    await route.continue();
+  });
+  try {
+    await page.getByRole("button", { name: "识别并注音", exact: true }).click();
+    await expect(page.getByRole("alert")).toContainText("图片方向未确认，重试会重新上传本张原图");
+    const progress = page.getByRole("region", { name: "图片处理进度", exact: true });
+    await expect(progress).toHaveAttribute("data-phase", "rotate");
+    await expect(progress).toHaveAttribute("data-failed", "true");
+    expect([uploads, rotations.length, recognized.length]).toEqual([1, 1, 0]);
+    const committed = await currentImage(page, rotations[0].id);
+    expect([committed.metadata.revision, committed.pixels.width, committed.pixels.height]).toEqual([2, 600, 800]);
+    await expect(page.locator('[aria-label="识别前调整图片方向"]')).toContainText("270°");
+    await page.getByRole("button", { name: "识别并注音", exact: true }).click();
+    await expect(page.getByRole("button", { name: "保存并阅读", exact: true })).toBeEnabled();
+    expect([uploads, rotations.length, recognized.length]).toEqual([2, 2, 1]);
+    expect(rotations[1].id).not.toBe(rotations[0].id);
+    expect(rotations[1]).toEqual({ id: recognized[0], quarterTurns: 3, revision: 1 });
+    const retried = await currentImage(page, recognized[0]);
+    expect([retried.metadata.revision, retried.pixels.width, retried.pixels.height]).toEqual([2, 600, 800]);
+    expect(await sharp(retried.bytes).raw().toBuffer()).toEqual(await sharp(await readFile(imagePath)).rotate(270).raw().toBuffer());
+  } finally { await page.request.post("/api/ai/logout"); }
+});
+
+test("批量导入先选书再选文章，多张图片合为同篇且保存后的新增按钮不等待分句", async ({ page }, info) => {
+  await enableTestAccount(page);
+  const createdBooks = [];
+  let releaseSegmentation;
+  const segmentationGate = new Promise((resolve) => { releaseSegmentation = resolve; });
+  let segmentationCalls = 0;
+  try {
+    for (const suffix of ["甲", "乙"]) {
+      const created = await page.request.post("/api/books", { data: { title: `图片目标${suffix}-${info.project.name}` } });
+      expect(created.status()).toBe(201);
+      const book = await created.json(); createdBooks.push(book.id);
+      const article = await page.request.post("/api/documents", { data: {
+        title: `目标文章${suffix}`, kind: "book", orientation: "horizontal", bookId: book.id, content: `既存の本文${suffix}。`,
+      } });
+      expect(article.status()).toBe(201);
+    }
+    await openImageImport(page);
+    const bookPicker = page.getByLabel("图片所属书籍", { exact: true });
+    const articlePicker = page.getByLabel("图片所属文章", { exact: true });
+    await expect(articlePicker.locator("option").filter({ hasText: /^目标文章[甲乙]$/ })).toHaveCount(0);
+    await bookPicker.selectOption(createdBooks[0]);
+    await expect(articlePicker.locator("option")).toHaveText(["新建文章", "目标文章甲"]);
+    await articlePicker.selectOption({ label: "目标文章甲" });
+    await bookPicker.selectOption(createdBooks[1]);
+    await expect(articlePicker).toHaveValue("");
+    await expect(articlePicker.locator("option")).toHaveText(["新建文章", "目标文章乙"]);
+    await bookPicker.selectOption({ label: "＋ 新建书籍" });
+    const title = `同篇多图-${info.project.name}`;
+    await page.getByLabel("新书籍名称", { exact: true }).fill(title);
+    await page.getByLabel("新文章标题", { exact: true }).fill("同一文章的两张原图");
+    await page.getByLabel("选择日语图片", { exact: true }).setInputFiles([imagePath, secondImagePath]);
+    await expect(uploadNames(uploadQueue(page))).toHaveText(["first.png", "second.png"]);
+    const newBookReply = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/books");
+    await page.getByRole("button", { name: "识别 2 张并校对", exact: true }).click();
+    const createdBookResponse = await newBookReply;
+    expect(createdBookResponse.status()).toBe(201);
+    const createdBook = await createdBookResponse.json(); createdBooks.push(createdBook.id);
+    await expect(page.getByRole("button", { name: "保存并阅读", exact: true })).toBeEnabled();
+    await expect(page.locator(".source-sort-card[data-sort-image-id]")).toHaveCount(2);
+    const savedBookId = await page.getByLabel("保存到书籍", { exact: true }).inputValue();
+    expect(savedBookId).toBe(createdBook.id);
+    await page.route("**/api/documents/*/sentences", async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      segmentationCalls++; await segmentationGate; await route.continue();
+    });
+    const segmentedReply = page.waitForResponse((response) => response.request().method() === "POST" && /\/api\/documents\/[^/]+\/sentences$/.test(new URL(response.url()).pathname));
+    await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
+    await expect(page.getByRole("article", { name: "日语原文", exact: true })).toBeVisible();
+    await expect.poll(() => segmentationCalls).toBe(1);
+    const navigation = page.getByRole("navigation", { name: "文章导航", exact: true });
+    await expect(navigation.getByRole("button", { name: "添加图片文章", exact: true })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "继续添加图片", exact: true })).toBeEnabled();
+    const document = await getDocument(page, await page.evaluate(() => location.hash.slice(1)));
+    expect(document.bookId).toBe(savedBookId);
+    expect(document.sourceImages).toHaveLength(2);
+    expect(document.sourceImages[0].id).not.toBe(document.sourceImages[1].id);
+    expect(bodyText(document.bodyHtml)).toBe(ocrText + ocrText);
+    for (const [index, path] of [imagePath, secondImagePath].entries()) {
+      const raw = await page.request.get(`/api/images/${document.sourceImages[index].id}/raw`);
+      expect(raw.ok()).toBe(true); expect(await raw.body()).toEqual(await readFile(path));
+    }
+    releaseSegmentation(); expect((await segmentedReply).ok()).toBe(true);
+    await page.unroute("**/api/documents/*/sentences");
+  } finally {
+    releaseSegmentation();
+    for (const id of createdBooks.reverse()) await removeTestBook(page, id);
+    await page.request.post("/api/ai/logout");
+  }
 });
 
 test("上传和识别失败可保留图片重试，忙时不能替换且识别重试不重复上传", async ({
@@ -428,7 +789,7 @@ test("上传和识别失败可保留图片重试，忙时不能替换且识别�
     await transferImages(page, "paste", [
       { ...original, name: "忙时不应替换.png" },
     ]);
-    await expect(page.getByRole("alert")).toContainText("完成后再更换图片");
+    await expect(page.getByRole("alert")).toContainText("完成后再添加图片");
     await expect(page.locator(".image-file-details > strong")).toHaveText(
       original.name,
     );
@@ -553,6 +914,8 @@ test("自动导入总计时等待正文注音和原图显示，不在模型返�
   } finally {
     releaseImage();
   }
+  await openEditorDetails(page, ".ocr-review-overview");
+  await page.getByRole("tab", { name: /注音校正/ }).click();
   await expect(page.locator("[data-import-elapsed-ms]")).toBeVisible();
   await expect(page.locator("[data-import-elapsed-ms]")).toContainText("上传后识别与注音完成用时");
   await expect(page.locator("[data-annotation-elapsed-ms]")).toBeVisible();
@@ -604,7 +967,7 @@ test("一次点击先识别再自动注音，全部完成后进入校对页且�
     await expect(page.getByRole("button", { name: "正在参考原图注音（2/2）…", exact: true })).toBeDisabled();
     const bytes = [...(await readFile(imagePath))];
     await transferImages(page, "paste", [{ name: "注音时不应替换.png", type: "image/png", bytes }]);
-    await expect(page.getByRole("alert")).toContainText("完成后再更换图片");
+    await expect(page.getByRole("alert")).toContainText("完成后再添加图片");
     await expect(page.locator(".image-file-details > strong")).toHaveText("first.png");
   } finally {
     releaseAnnotation();
@@ -620,6 +983,8 @@ test("一次点击先识别再自动注音，全部完成后进入校对页且�
   expect(segments.filter((segment) => segment.origin === "generated")).toHaveLength(7);
   await expect(page.getByLabel("日语正文", { exact: true })).toHaveValue(ocrText);
   await expect(page.getByRole("button", { name: "保存并阅读", exact: true })).toBeEnabled();
+  await openEditorDetails(page, ".ocr-review-overview");
+  await page.getByRole("tab", { name: /注音校正/ }).click();
   const totalClock = page.locator("[data-import-elapsed-ms]");
   await expect(totalClock).toBeVisible();
   await expect(page.locator("[data-annotation-elapsed-ms]")).toBeVisible();
@@ -678,7 +1043,9 @@ test("自动注音失败保留正文，重试只重发注音不重复上传或�
     expect(await progress.getByRole("progressbar", { name: "生成注音进度", exact: true }).getAttribute("aria-valuenow")).toBeNull();
     releaseRetry();
     await expect(page.getByLabel("日语正文", { exact: true })).toHaveValue(ocrText);
-    await expect(page.locator("[data-import-elapsed-ms]")).toBeVisible();
+    await openEditorDetails(page, ".ocr-review-overview");
+  await page.getByRole("tab", { name: /注音校正/ }).click();
+  await expect(page.locator("[data-import-elapsed-ms]")).toBeVisible();
     expect([uploads, recognitions, annotations]).toEqual([1, 1, 2]);
   } finally {
     releaseRetry();
@@ -701,6 +1068,8 @@ test("自动注音失败可先校对正文，手动重试继续保留已完成�
   await page.getByRole("button", { name: "先校对正文", exact: true }).click();
   await expect(page.getByLabel("日语正文", { exact: true })).toHaveValue(ocrText);
   await expect(page.getByRole("tab", { name: /注音校正/ })).toContainText("0");
+  await openEditorDetails(page, ".ocr-review-overview");
+  await page.getByRole("tab", { name: /注音校正/ }).click();
   await expect(page.locator("[data-ocr-elapsed-ms]")).toBeVisible();
   await expect(page.locator("[data-import-elapsed-ms]")).toHaveCount(0);
   await page.unroute("**/api/images/*/annotate");
@@ -724,7 +1093,9 @@ test("自动注音失败可先校对正文，手动重试继续保留已完成�
     releaseManual();
   }
   await expect(page.locator("[data-annotation-elapsed-ms]")).toBeVisible();
+  await page.getByRole("tab", { name: "正文编辑", exact: true }).click();
   await expect(page.getByLabel("日语正文", { exact: true })).toHaveValue(ocrText);
+  await page.getByRole("tab", { name: /注音校正/ }).click();
   await expect(page.getByText("正文与注音已完成，请一起校对正文和读音后保存。", { exact: true })).toBeVisible();
   await expect(page.getByText(/正文已完成，注音尚未完成/)).toHaveCount(0);
   await expect(page.getByRole("button", { name: "生成缺失注音", exact: true })).toHaveCount(0);
@@ -768,6 +1139,8 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
     fullPage: true,
     animations: "disabled",
   });
+  await openEditorDetails(page, ".ocr-review-overview");
+  await page.getByRole("tab", { name: /注音校正/ }).click();
   await expect(page.locator("[data-import-elapsed-ms]")).toBeVisible();
   await expect(page.locator("[data-annotation-elapsed-ms]")).toBeVisible();
   await page.getByRole("tab", { name: "阅读预览", exact: true }).click();
@@ -1561,6 +1934,7 @@ test("多页书籍逐张保存图片，翻页重开保留各页原图注音与�
     await page.getByRole("button", { name: "添加图片文章", exact: true }).click();
     await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(imagePath);
     await page.getByRole("button", { name: "识别并注音", exact: true }).click();
+    await openEditorDetails(page, ".editor-meta-details");
     await expect(page.getByLabel("保存到书籍", { exact: true })).toHaveValue(bookId);
     await page.getByRole("textbox", { name: "材料标题", exact: true }).fill("第一张图片页");
     if (info.project.name === "desktop")
@@ -1594,6 +1968,7 @@ test("多页书籍逐张保存图片，翻页重开保留各页原图注音与�
     // Append from the ordinary image importer to exercise the explicit parent
     // selector as well as the preselected book context used for the first page.
     const secondDraft = await importDraft(page, secondImagePath);
+    await openEditorDetails(page, ".editor-meta-details");
     await page.getByLabel("保存到书籍", { exact: true }).selectOption(bookId);
     await page.getByRole("textbox", { name: "材料标题", exact: true }).fill("第二张图片页");
     await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
@@ -1749,6 +2124,7 @@ test("校对既有独立材料时新建并选择书籍，书名回车不提前�
     await page.reload();
     await page.getByRole("button", { name: "校对文字与注音", exact: true }).click();
     const editor = page.locator(".editor-page");
+    await openEditorDetails(page, ".editor-meta-details");
     const target = editor.getByLabel("保存到书籍", { exact: true });
     await expect(target).toHaveValue("");
     await editor.getByRole("button", { name: "新建书籍", exact: true }).click();
@@ -1895,7 +2271,9 @@ test("图片处理进度随真实三阶段切换，模型不报虚假百分比�
     releaseAnnotation();
     await expect(page.getByLabel("日语正文", { exact: true })).toHaveValue(ocrText);
     await expect(progress).toHaveCount(0);
-    await expect(page.locator("[data-import-elapsed-ms]")).toBeVisible();
+    await openEditorDetails(page, ".ocr-review-overview");
+  await page.getByRole("tab", { name: /注音校正/ }).click();
+  await expect(page.locator("[data-import-elapsed-ms]")).toBeVisible();
     await expect(page.getByRole("button", { name: "保存并阅读", exact: true })).toBeEnabled();
   } finally {
     releaseUpload();
