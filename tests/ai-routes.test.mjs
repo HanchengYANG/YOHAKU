@@ -12,7 +12,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import sharp from "sharp";
 import { createApp } from "../server/app.mjs";
-import { CORRECTION_SCHEMA, ANNOTATION_SCHEMA } from "../shared/ocr-correction.mjs";
+import { ANNOTATION_SCHEMA } from "../shared/ocr-correction.mjs";
 import { OCR_BODY_SCHEMA, normalizeNewOcrDraft, validateOcr } from "../shared/ocr.mjs";
 import { SENTENCE_SCHEMA } from "../shared/sentences.mjs";
 import { applySentenceBoundaries, bodyRanges, bodyText, removeQaMarks, editBodyText } from "../shared/article-html.mjs";
@@ -59,15 +59,12 @@ function services() {
     activeId: "account-a",
     mode: "success",
     ocrResult: null,
-    correctionResult: null,
     annotationResult: null,
     busy: false,
     calls: [],
     authStarts: [],
     stops: 0,
     callbackFailure: false,
-    localCalls: [],
-    localFailure: false,
   };
   const accounts = [
     {
@@ -134,11 +131,7 @@ function services() {
           partialText: "这段部分输出绝不能成为答案",
         });
       const fixture = state.ocrResult || recognizedFixture();
-      const ocrOutput = input.schema === CORRECTION_SCHEMA ? state.correctionResult || {
-        texts: JSON.parse(input.prompt.split("输入文字：\n").at(-1)).map((text, index) =>
-          fixture.blocks[index]?.segments.map((segment) => segment.text).join("") ?? text),
-      } : input.schema === OCR_BODY_SCHEMA ? { text: plainText(fixture.blocks) } : fixture;
-      let output = ocrOutput;
+      let output = input.schema === OCR_BODY_SCHEMA ? { text: plainText(fixture.blocks) } : fixture;
       if (input.schema === ANNOTATION_SCHEMA) {
         const marker = "\n输入目标：\n";
         const position = input.prompt.lastIndexOf(marker);
@@ -182,20 +175,11 @@ function services() {
       };
     },
   };
-  const localOcr = (engine) => ({
-    async recognize(path) {
-      state.localCalls.push({ engine, path });
-      if (state.localFailure) throw Object.assign(new Error("本地OCR测试失败"), { status: 502, expose: true });
-      return { regions: [{ label: "test-region", text: "背中を撫でる", sourcePage: "unknown", box: [0, 0, 20, 30], vertical: false }],
-        coldStart: true, modelLoadMs: 100, elapsedMs: 150, warnings: ["本地检测测试提示"] };
-    },
-    close() {},
-  });
-  return { state, auth, runtime, mangaOcr: localOcr("manga"), ndlOcr: localOcr("ndl") };
+  return { state, auth, runtime };
 }
 
 async function start(dataDir, injected) {
-  const { app, close } = createApp({ dataDir, aiServices: injected, mangaOcr: injected.mangaOcr, ndlOcr: injected.ndlOcr });
+  const { app, close } = createApp({ dataDir, aiServices: injected });
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   let stopped = false;
@@ -363,6 +347,7 @@ test("AI替身接口集成：multipart原图保留，未授权也可上传，识
     {},
   );
   assert.equal(denied.status, 503);
+  assert.equal((await request(app.url, `/api/images/${image.id}/recognize`, "POST", { engine: "other" })).status, 400);
   assert.equal(app.state.calls.length, 0);
   const notRecognized = await request(app.url, "/api/documents", "POST", {
     title: "未识别图",
@@ -380,55 +365,6 @@ test("AI替身接口集成：multipart原图保留，未授权也可上传，识
     headers: sessionHeaders(app.url),
   });
   assert.deepEqual(Buffer.from(await reopened.arrayBuffer()), buffer);
-});
-
-test("本地OCR流程：Manga和NDL各自检测后只纠正文，不夹带注音且保留原始OCR和计时", async (t) => {
-  const app = await setup(t);
-  for (const engine of ["manga", "ndl"]) {
-    const { image } = await upload(app.url);
-    const before = app.state.calls.length;
-    const response = await request(app.url, `/api/images/${image.id}/recognize`, "POST", { engine });
-    assert.equal(response.status, 200);
-    assert.equal(app.state.localCalls.at(-1).engine, engine);
-    assert.equal(app.state.calls.length, before + 1);
-    const call = app.state.calls.at(-1);
-    assert.equal(Object.hasOwn(call, "image"), false);
-    assert.ok(call.prompt.includes("背中を撫でる"));
-    assert.equal(call.expectedAccountId, "account-a");
-    assert.equal(call.expectedSubject, "test-a");
-    const draft = response.data;
-    assert.equal(draft.engine, engine);
-    assert.equal(draft.readingPolicy, "local_ocr_correction_only");
-    assert.ok(draft.blocks.flatMap((b) => b.segments).every((s) => s.reading === null && s.origin === null));
-    assert.deepEqual(call.schema, CORRECTION_SCHEMA);
-    assert.equal(call.reasoningEffort, "low");
-    assert.match(call.prompt, /不注音/);
-    assert.equal(call.prompt.includes("test-region"), false);
-    assert.equal(call.prompt.includes("sourcePage"), false);
-    assert.equal(draft.processing.correctionFormat, "texts_only");
-    assert.deepEqual(draft.processing.correctionGroups, [[0]]);
-    assert.equal(draft.blocks.length, 1);
-    assert.equal(draft.blocks[0].sourcePage, "unknown");
-    assert.equal(draft.processing.localOcr.modelLoadMs, 100);
-    assert.ok(draft.processing.serverMs >= 0);
-    assert.ok(draft.warnings.some((w) => w.message.includes("未查看原图")));
-    assert.ok(draft.warnings.some((w) => w.message === "本地检测测试提示"));
-    assert.equal(draft.processing.localOcr.regions[0].text, "背中を撫でる");
-  }
-});
-
-test("本地纠错拒绝丢失或增加文字块，不保存无法对应原OCR的草稿", async (t) => {
-  const app = await setup(t);
-  const { image } = await upload(app.url);
-  for (const texts of [[], ["背中を撫でる", "多余文字"], [""]]) {
-    app.state.correctionResult = { texts };
-    const response = await request(app.url, `/api/images/${image.id}/recognize`, "POST", { engine: "ndl" });
-    assert.equal(response.status, 502);
-    assert.match(response.data.error, /格式不完整/);
-    const database = new DatabaseSync(join(app.dataDir, "yohaku.sqlite"), { readOnly: true });
-    try { assert.equal(database.prepare("SELECT count(*) AS count FROM image_drafts WHERE image_id=?").get(image.id).count, 0); }
-    finally { database.close(); }
-  }
 });
 
 test("独立注音接口：历史草稿保留人工与source读音，只补缺口且正文逐字不变，注音另计时并持久保存", async (t) => {
@@ -608,48 +544,28 @@ test("独立注音接口：必须有本人识别草稿及有效授权，无待�
   assert.equal(app.state.calls.length, 1);
 });
 
-test("MangaOCR流程：授权失败、非法方式或本地失败时不调用LLM、不生成草稿", async (t) => {
-  const app = await setup(t);
-  const { image } = await upload(app.url);
-  const path = `/api/images/${image.id}/recognize`;
-  assert.equal((await request(app.url, path, "POST", { engine: "other" })).status, 400);
-  app.state.connected = false;
-  assert.equal((await request(app.url, path, "POST", { engine: "manga" })).status, 503);
-  assert.equal(app.state.localCalls.length, 0);
-  app.state.connected = true;
-  app.state.localFailure = true;
-  assert.equal((await request(app.url, path, "POST", { engine: "manga" })).status, 502);
-  assert.equal(app.state.calls.length, 0);
-  const failedSave = await request(app.url, "/api/documents", "POST", {
-    title: "失败草稿", kind: "article", orientation: "horizontal", content: "正文", sourceImageId: image.id,
-  });
-  assert.equal(failedSave.status, 400);
-});
-
-test("三种OCR流程：识别期间旋转原图拒绝旧版本草稿，避免正文与原图不匹配", async (t) => {
+test("LLM识别期间旋转原图拒绝旧版本草稿，避免正文与原图不匹配", async (t) => {
   const app = await setup(t);
   const run = app.runtime.run;
-  for (const engine of ["llm", "manga", "ndl"]) {
-    const { image } = await upload(app.url);
-    const entered = Promise.withResolvers();
-    const finish = Promise.withResolvers();
-    app.runtime.run = async (input) => {
-      entered.resolve();
-      await finish.promise;
-      return run(input);
-    };
-    const pending = request(app.url, `/api/images/${image.id}/recognize`, "POST", { engine });
-    await entered.promise;
-    try {
-      const rotated = await request(app.url, `/api/images/${image.id}/rotate`, "POST", { quarterTurns: 1, revision: image.revision });
-      assert.equal(rotated.status, 200);
-    } finally {
-      finish.resolve();
-    }
-    const rejected = await pending;
-    assert.equal(rejected.status, 409);
-    assert.match(rejected.data.error, /方向已变化/);
+  const { image } = await upload(app.url);
+  const entered = Promise.withResolvers();
+  const finish = Promise.withResolvers();
+  app.runtime.run = async (input) => {
+    entered.resolve();
+    await finish.promise;
+    return run(input);
+  };
+  const pending = request(app.url, `/api/images/${image.id}/recognize`, "POST", { engine: "llm" });
+  await entered.promise;
+  try {
+    const rotated = await request(app.url, `/api/images/${image.id}/rotate`, "POST", { quarterTurns: 1, revision: image.revision });
+    assert.equal(rotated.status, 200);
+  } finally {
+    finish.resolve();
   }
+  const rejected = await pending;
+  assert.equal(rejected.status, 409);
+  assert.match(rejected.data.error, /方向已变化/);
 });
 
 test("AI替身接口集成：新识图只返回正文，历史草稿的source及独立注音保存重开后保留，手改仍为manual", async (t) => {

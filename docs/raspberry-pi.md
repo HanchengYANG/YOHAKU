@@ -37,7 +37,7 @@ ln -s deploy/instances/production.env .env.deploy
 | `TLS_MODE` | `local-ca` 创建独立 CA 和站点证书；`self-signed` 单张自签；`existing` 仅使用已有文件。未配置时兼容旧实例，使用 `self-signed` |
 | `TLS_CA_CERT`、`TLS_CA_KEY` | CA 公开证书及签发私钥路径；`local-ca` 必填且与站点文件分开，CA 私钥仅供部署脚本使用 |
 | `TLS_CERT_DAYS`、`TLS_CA_DAYS` | 新站点证书与新 CA 的有效天数，默认 365 / 3650 |
-| `DEPLOY_TEST_HTTP_TIMEOUT_MS` | 部署时账号测试请求的等待毫秒数，默认 30000，供较慢服务器配置；不影响应用超时或密码哈希参数 |
+| `DEPLOY_TEST_HTTP_TIMEOUT_MS` | 使用 `--test` 时账号测试请求的等待毫秒数，默认 30000，供较慢服务器配置；不影响应用超时或密码哈希参数 |
 
 站点来源支持 DNS 名称和 IPv4 地址，外部端口可与服务器监听端口不同。
 Node 始终仅监听本机，Nginx 保留外部请求 Host 中的端口。未配置的 Host 和提交来源仍会被拒绝。
@@ -112,8 +112,18 @@ bash scripts/pi-deploy.sh
 bash scripts/pi-deploy.sh deploy/instances/production.env
 ```
 
+从旧版部署脚本升级时，先按实例配置执行 `git pull --ff-only <remote> <branch>`，再运行脚本，以确保这次部署也使用新参数与默认行为。
+
+默认跳过完整测试，仍会备份数据、安装依赖、构建并检查部署后的健康接口。需要在服务器运行完整 Node 测试时显式添加 `--test`；参数可以放在实例路径前或后：
+
+```bash
+bash scripts/pi-deploy.sh --test
+bash scripts/pi-deploy.sh --test deploy/instances/production.env
+bash scripts/pi-deploy.sh deploy/instances/production.env --test
+```
+
 脚本要求工作区干净且当前分支与配置一致，使用实例指定的 deploy key 执行 `git pull --ff-only`。
-停服前先校验配置并准备证书；停止服务后将完整数据目录备份到应用用户的 `~/.local/state/yohaku/backups/<UTC时间>/data/`，安装依赖、串行测试和构建，再根据同一实例重新渲染系统配置、启动服务并校验证书链、主机名和健康接口。
+停服前先校验配置并准备证书；停止服务后将完整数据目录备份到应用用户的 `~/.local/state/yohaku/backups/<UTC时间>/data/`，安装依赖和构建；仅指定 `--test` 时在构建前串行运行完整 Node 测试，再根据同一实例重新渲染系统配置、启动服务并校验证书链、主机名和健康接口。
 部署期间会短暂中断服务；失败会停止并提示，不自动回滚。备份含私人资料与授权，按需安全保留和清理。
 
 只修改实例配置而不更新代码时，重新运行：

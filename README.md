@@ -57,7 +57,7 @@ npm run build
 npm start
 ```
 
-打开 [http://127.0.0.1:4317](http://127.0.0.1:4317)。默认仅允许本机访问。树莓派局域网 HTTPS 与开机启动配置见[树莓派部署](docs/raspberry-pi.md)。
+打开 [http://127.0.0.1:4317](http://127.0.0.1:4317)。默认仅允许本机访问。树莓派局域网 HTTPS 与开机启动配置见[树莓派部署](docs/raspberry-pi.md)。部署默认跳过完整测试，需要时使用 `bash scripts/pi-deploy.sh --test`。
 
 ### 添加到手机主屏幕
 
@@ -129,7 +129,7 @@ npm run verify:stage3 -- --image=/绝对路径/测试原图.png  # 可选真实�
 | `scripts/` | 开发启动、维护与验证命令 |
 | `docs/` | 开发进度与后续计划 |
 
-本地 OCR 的 MangaOCR／NDLOCR-Lite 实验代码保留供对照，当前图片导入固定使用两阶段 LLM 流程，无需安装这些 Python 依赖。
+本地 OCR 的 MangaOCR／NDLOCR-Lite 实验代码保留供对照，相关专属测试已移除；当前图片导入和回归验证使用两阶段 LLM 流程，无需安装这些 Python 依赖。
 
 ## 开发进度
 
