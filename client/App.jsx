@@ -103,8 +103,7 @@ function Workspace({ user, onLoggedOut }) {
   const [chatRequest, setChatRequest] = useState(null);
   const [selectedGroupIds, setSelectedGroupIds] = useState(null);
   const [appendTargetId, setAppendTargetId] = useState(null);
-  const [segmentationBusy, setSegmentationBusy] = useState(false);
-  const [segmentationError, setSegmentationError] = useState("");
+  const [segmentation, setSegmentation] = useState({ id: null, request: 0, busy: false, error: "" });
   const [promotion, setPromotion] = useState(null);
   const [bookBusy, setBookBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -130,6 +129,9 @@ function Workspace({ user, onLoggedOut }) {
   );
   const savedDetail = useRef(null);
   const editRequest = useRef(0);
+  const segmentationRequest = useRef(0);
+  const pendingSegmentations = useRef(new Map());
+  const automaticSegmentationAttempt = useRef(null);
   const currentView = useRef(null);
   currentView.current = {activeId, panel, editorSession};
 
@@ -263,6 +265,16 @@ function Workspace({ user, onLoggedOut }) {
     return () => clearTimeout(timer);
   }, [notice]);
 
+  useEffect(() => {
+    if (!document || activeId !== document.id || draft || saving || (panel && panel !== "chat")) return;
+    const html = document.bodyHtml || blocksToHtml(document.blocks);
+    if (bodyRanges(html).sentences.length) return;
+    const attempt = `${document.id}:${document.revision}:${detailRefresh}`;
+    if (automaticSegmentationAttempt.current === attempt) return;
+    automaticSegmentationAttempt.current = attempt;
+    void segmentDocument(document, false);
+  }, [document, activeId, draft, panel, saving, detailRefresh]);
+
   const mayLeave = () =>
     !saving && !bookBusy && (!dirty || window.confirm("当前修改还没有保存，确定离开吗？"));
   const openDocument = (id) => {
@@ -300,6 +312,15 @@ function Workspace({ user, onLoggedOut }) {
     const isCurrent = () => request === editRequest.current && currentView.current.activeId === view.activeId && currentView.current.panel === view.panel && currentView.current.editorSession === view.editorSession;
     setError("");
     try {
+      const attempt = `${document.id}:${document.revision}:${detailRefresh}`;
+      if (!bodyRanges(document.bodyHtml || blocksToHtml(document.blocks)).sentences.length && automaticSegmentationAttempt.current !== attempt) {
+        await segmentDocument(document, false);
+      } else {
+        // Initialization persists a new revision. Wait before opening a draft,
+        // but keep editing available when automatic initialization failed.
+        await pendingSegmentations.current.get(id)?.catch(() => {});
+      }
+      if (!isCurrent()) return;
       // A submitted question can already have attached marks while its answer
       // is still being generated. Start the draft from that saved revision.
       const latest = await api(`/documents/${encodeURIComponent(id)}`);
@@ -367,16 +388,31 @@ function Workspace({ user, onLoggedOut }) {
     setDocument((current) => current?.id === updated.id ? updated : current);
   };
   const segmentDocument = async (target, force = true) => {
-    setSegmentationBusy(true); setSegmentationError("");
+    automaticSegmentationAttempt.current = `${target.id}:${target.revision}:${detailRefresh}`;
+    const request = ++segmentationRequest.current;
+    setSegmentation({ id: target.id, request, busy: true, error: "" });
+    let pending = pendingSegmentations.current.get(target.id);
+    if (!pending) {
+      pending = (async () => {
+        await api(`/documents/${encodeURIComponent(target.id)}/sentences`, {
+          method: "POST", body: JSON.stringify({ revision: target.revision, bodyHash: target.bodyHash, force }),
+        });
+        return api(`/documents/${encodeURIComponent(target.id)}`);
+      })();
+      pendingSegmentations.current.set(target.id, pending);
+    }
     try {
-      const result = await api(`/documents/${encodeURIComponent(target.id)}/sentences`, {
-        method: "POST", body: JSON.stringify({ revision: target.revision, bodyHash: target.bodyHash, force }),
-      });
-      const updated = result.blocks ? result : await api(`/documents/${encodeURIComponent(target.id)}`);
-      setDocument((current) => current?.id === target.id ? updated : current);
+      const updated = await pending;
+      if (currentView.current.activeId === target.id)
+        setDocument((current) => current?.id === target.id && current.revision === target.revision ? updated : current);
       return updated;
-    } catch (cause) { setSegmentationError(`分句未完成，原文已保留：${cause.message}`); }
-    finally { setSegmentationBusy(false); }
+    } catch (cause) {
+      if (currentView.current.activeId === target.id)
+        setSegmentation((current) => current.request === request ? { ...current, error: `分句未完成，原文已保留：${cause.message}` } : current);
+    } finally {
+      if (pendingSegmentations.current.get(target.id) === pending) pendingSegmentations.current.delete(target.id);
+      setSegmentation((current) => current.request === request ? { ...current, busy: false } : current);
+    }
   };
   const save = async (value) => {
     if (saving) return;
@@ -731,7 +767,8 @@ function Workspace({ user, onLoggedOut }) {
                 onGroup={(ids) => { setSelectedGroupIds(ids); setChatRequest(null); setPanel("chat"); }}
                 onAppendImage={() => { openPanel("image"); setAppendTargetId(document.id); }}
                 onSegment={() => segmentDocument(document, true)}
-                segmentationBusy={segmentationBusy} segmentationError={segmentationError}
+                segmentationBusy={segmentation.id === document.id && segmentation.busy}
+                segmentationError={segmentation.id === document.id ? segmentation.error : ""}
                 chatOpen={panel === "chat"}
                 onPromoteBook={
                   !document.bookId

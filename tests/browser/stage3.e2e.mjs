@@ -272,3 +272,145 @@ test("编辑器删除对话后撤销和重做保留文字且不会恢复失效�
     expect((await(await page.request.get(`/api/documents/${document.id}/conversations`)).json()).conversations).toEqual([]);
   } finally {await remove(page,document.id);}
 });
+
+async function createUnsegmentedArticle(page, suffix) {
+  const response = await page.request.post("/api/documents", { data: {
+    title: `旧文章自动分句 ${suffix}`,
+    kind: "article", orientation: "horizontal",
+    content: `{古い|ふるい}資料を読む。\n\n次の句も読む。${suffix}の記録。`,
+  } });
+  expect(response.status()).toBe(201);
+  const document = await response.json();
+  expect(bodyRanges(document.bodyHtml).sentences).toHaveLength(0);
+  return document;
+}
+const sentencePath = (id) => `/api/documents/${id}/sentences`;
+const sentenceResponse = (id) => (response) => response.request().method() === "POST" && new URL(response.url()).pathname === sentencePath(id);
+
+// These records intentionally bypass the import UI, as old saved articles do.
+test("阅读旧文章立即初始化并保存分句，保留原文和注音，刷新不重复请求", async ({page}, info) => {
+  const document = await createUnsegmentedArticle(page, `首次 ${info.project.name}`);
+  const requests = [];
+  page.on("request", request => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === sentencePath(document.id)) requests.push(request.postDataJSON());
+  });
+  try {
+    const response = page.waitForResponse(sentenceResponse(document.id));
+    await page.goto(`/#${document.id}`);
+    expect((await response).ok()).toBe(true);
+    await expect(page.getByRole("button", {name:"重新分句",exact:true})).toBeEnabled();
+    const saved = await current(page, document.id);
+    expect(saved.revision).toBeGreaterThan(document.revision);
+    expect(bodyText(saved.bodyHtml)).toBe(bodyText(document.bodyHtml));
+    expect(saved.content).toBe(document.content);
+    expect(saved.blocks).toEqual(document.blocks);
+    expect(bodyRanges(saved.bodyHtml).sentences.length).toBeGreaterThan(1);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({force:false,revision:document.revision,bodyHash:document.bodyHash});
+    const modelCalls = (await calls()).filter(call => call.type === "sentences").length;
+    await page.reload();
+    await expect(page.getByRole("heading", {name:document.title,exact:true})).toBeVisible();
+    await expect(page.getByRole("button", {name:"重新分句",exact:true})).toBeEnabled();
+    await page.waitForLoadState("networkidle");
+    expect(requests).toHaveLength(1);
+    expect((await calls()).filter(call => call.type === "sentences")).toHaveLength(modelCalls);
+    const reopened = await current(page, document.id);
+    expect(reopened.bodyHtml).toBe(saved.bodyHtml);
+    expect(reopened.revision).toBe(saved.revision);
+  } finally { await remove(page, document.id); }
+});
+
+test("旧文章自动分句失败保留已存正文，阅读仍可用且能手动重试", async ({page}, info) => {
+  const document = await createUnsegmentedArticle(page, `失败 ${info.project.name}`);
+  const routePattern = `**${sentencePath(document.id)}`;
+  let attempts = 0;
+  await page.route(routePattern, route => {
+    attempts++;
+    return route.fulfill({status:502,contentType:"application/json",body:JSON.stringify({error:"测试：旧文章分句暂不可用。"})});
+  });
+  try {
+    await page.goto(`/#${document.id}`);
+    await expect(page.getByRole("article", {name:"日语原文",exact:true})).toBeVisible();
+    await expect(page.getByRole("alert")).toContainText("旧文章分句暂不可用");
+    await expect(page.getByRole("button", {name:"初始化分句",exact:true})).toBeEnabled();
+    await expect(page.getByRole("button", {name:"校对文字与注音",exact:true})).toBeEnabled();
+    await page.waitForLoadState("networkidle");
+    expect(attempts).toBe(1);
+    const unchanged = await current(page, document.id);
+    expect(unchanged.bodyHtml).toBe(document.bodyHtml);
+    expect(unchanged.revision).toBe(document.revision);
+    await page.unroute(routePattern);
+    const retry = page.waitForResponse(sentenceResponse(document.id));
+    await page.getByRole("button", {name:"初始化分句",exact:true}).click();
+    expect((await retry).ok()).toBe(true);
+    await expect(page.getByRole("button", {name:"重新分句",exact:true})).toBeEnabled();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    const saved = await current(page, document.id);
+    expect(bodyText(saved.bodyHtml)).toBe(bodyText(document.bodyHtml));
+    expect(saved.content).toBe(document.content);
+    expect(bodyRanges(saved.bodyHtml).sentences.length).toBeGreaterThan(1);
+  } finally { await page.unroute(routePattern); await remove(page, document.id); }
+});
+
+test("旧文章分句的迟到结果不覆盖其他文章，进入校对后仍能保存当前草稿", async ({page}, info) => {
+  const first = await createUnsegmentedArticle(page, `切换 ${info.project.name}`);
+  const second = await createUnsegmentedArticle(page, `目标 ${info.project.name}`);
+  const editable = await createUnsegmentedArticle(page, `校对 ${info.project.name}`);
+  let releaseFirst, releaseEdit;
+  const firstHeld = new Promise(resolve => { releaseFirst = resolve; });
+  const editHeld = new Promise(resolve => { releaseEdit = resolve; });
+  let signalFirst, signalEdit;
+  const firstStarted = new Promise(resolve => { signalFirst = resolve; });
+  let signalFirstFinished;
+  const firstFinished = new Promise(resolve => { signalFirstFinished = resolve; });
+  const editStarted = new Promise(resolve => { signalEdit = resolve; });
+  const firstPattern = `**${sentencePath(first.id)}`;
+  const editPattern = `**${sentencePath(editable.id)}`;
+  try {
+    expect((await page.request.post(sentencePath(second.id), {data:{revision:second.revision,bodyHash:second.bodyHash,force:false}})).ok()).toBe(true);
+    await page.route(firstPattern, async route => {
+      const response = await route.fetch();
+      signalFirst();
+      await firstHeld;
+      try { await route.fulfill({response}); }
+      catch (error) { if (!route.request().failure()) throw error; }
+      finally { signalFirstFinished(); }
+    });
+    await page.goto(`/#${first.id}`);
+    await firstStarted;
+    await page.evaluate(id => { location.hash = id; }, second.id);
+    await expect(page.getByRole("heading", {name:second.title,exact:true})).toBeVisible();
+    releaseFirst();
+    await firstFinished;
+    expect(bodyRanges((await current(page, first.id)).bodyHtml).sentences.length).toBeGreaterThan(1);
+    await page.waitForLoadState("networkidle");
+    await expect(page.getByRole("heading", {name:second.title,exact:true})).toBeVisible();
+    await expect(page.getByRole("heading", {name:first.title,exact:true})).toHaveCount(0);
+    await expect(page.getByRole("textbox", {name:"日语正文",exact:true})).toHaveCount(0);
+    expect(await page.evaluate(() => location.hash.slice(1))).toBe(second.id);
+    await page.route(editPattern, async route => {
+      signalEdit();
+      await editHeld;
+      const response = await route.fetch();
+      await route.fulfill({response});
+    });
+    await page.evaluate(id => { location.hash = id; }, editable.id);
+    await editStarted;
+    await page.getByRole("button", {name:"校对文字与注音",exact:true}).click();
+    releaseEdit();
+    const body = page.getByRole("textbox", {name:"日语正文",exact:true});
+    await expect(body).toBeVisible();
+    const changed = bodyText(editable.bodyHtml).replace("資料", "文章");
+    await body.fill(changed);
+    const save = page.waitForResponse(response => response.request().method() === "PUT" && new URL(response.url()).pathname === `/api/documents/${editable.id}`);
+    await page.getByRole("button", {name:"保存并阅读",exact:true}).click();
+    expect((await save).ok()).toBe(true);
+    await expect(page.getByRole("heading", {name:editable.title,exact:true})).toBeVisible();
+    await expect(page.getByRole("article", {name:"日语原文",exact:true})).toBeVisible();
+    expect(bodyText((await current(page, editable.id)).bodyHtml)).toBe(changed);
+  } finally {
+    releaseFirst(); releaseEdit();
+    await page.unroute(firstPattern); await page.unroute(editPattern);
+    for (const document of [first, second, editable]) await remove(page, document.id);
+  }
+});
