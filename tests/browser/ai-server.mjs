@@ -2,7 +2,7 @@
 // test doubles; the production server never imports this module.
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 import { createApp } from "../../server/app.mjs";
@@ -20,6 +20,27 @@ let connected = false;
 let busy = false;
 const turns = new Map();
 const runtimeCalls = [];
+let runtimeSequence = 0;
+const imageControlsPath = new URL("../../artifacts/ai-e2e-data/image-runtime-controls.json", import.meta.url);
+
+async function imageFault(phase) {
+  if (!existsSync(imageControlsPath)) return;
+  const controls = JSON.parse(readFileSync(imageControlsPath, "utf8"));
+  const key = phase === "recognize" ? "ocrFailures" : "annotationFailures";
+  const skipKey = phase === "recognize" ? "ocrSkip" : "annotationSkip";
+  const skip = controls[skipKey] > 0;
+  const fail = !skip && (controls[key] === "permanent" || controls[key] > 0);
+  if (skip) {
+    controls[skipKey]--;
+    writeFileSync(imageControlsPath, JSON.stringify(controls));
+  } else if (Number.isFinite(controls[key]) && controls[key] > 0) {
+    controls[key]--;
+    writeFileSync(imageControlsPath, JSON.stringify(controls));
+  }
+  if (controls.delayMs) await new Promise((resolve) => setTimeout(resolve, controls.delayMs));
+  if (fail) throw Object.assign(new Error(`浏览器测试故障：${phase === "recognize" ? "识别" : "注音"}暂时失败。`),
+    { status: 502, expose: true });
+}
 
 const auth = {
   async status() {
@@ -107,9 +128,11 @@ const runtime = {
     busy = true;
     try {
       const id = threadId || `ui-test-thread-${randomUUID()}`;
-      runtimeCalls.push({ type: schema === SENTENCE_SCHEMA ? "sentences" : schema ? "image" : "chat", prompt, threadId, webSearch });
+      const phase = schema === SENTENCE_SCHEMA ? "sentences" : schema === ANNOTATION_SCHEMA ? "annotate" : schema ? "recognize" : "chat";
+      runtimeCalls.push({ sequence: ++runtimeSequence, type: schema === SENTENCE_SCHEMA ? "sentences" : schema ? "image" : "chat", phase, prompt, threadId, webSearch });
       if (runtimeCalls.length > 100) runtimeCalls.shift();
       writeFileSync(new URL("../../artifacts/ai-e2e-data/runtime-calls.json", import.meta.url), JSON.stringify(runtimeCalls));
+      if (phase === "recognize" || phase === "annotate") await imageFault(phase);
       if (schema === SENTENCE_SCHEMA) {
         const text = JSON.parse(prompt.split("\n输入正文：\n").at(-1));
         return { completed: true, text: JSON.stringify({ sentences: text.match(/[^。！？\n]+(?:[。！？][」』）]*)?|\n/g) || [text] }), model: "UI-TEST-DOUBLE", threadId: id };
@@ -176,6 +199,7 @@ const { app, close } = createApp({
   dataDir,
   callbackUri,
   aiServices: { auth, runtime },
+  imageTaskOptions: { runnerOptions: { pollIntervalMs: 20, retryDelayMs: 20, blockedRetryMs: 100 } },
 });
 const server = app.listen(4319, "127.0.0.1", () => {
   console.log(

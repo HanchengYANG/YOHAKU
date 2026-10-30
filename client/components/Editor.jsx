@@ -10,7 +10,7 @@ import {
   findTextOccurrences,
   annotateOccurrences,
 } from "../../shared/document.mjs";
-import { blocksToHtml, htmlToBlocks, bodyText, bodyRanges, editBodyText, syncBodyReadings, sourceBodyHtml, replaceSourceBodyHtml, reorderSourceBodyHtml, removeSourceBodyHtml, sourceBodySelection } from "../../shared/article-html.mjs";
+import { blocksToHtml, htmlToBlocks, bodyText, bodyRanges, editBodyText, syncBodyReadings, sourceBodyHtml, replaceSourceBodyHtml, reorderSourceBodyHtml, removeSourceBodyHtml, sourceBodySelection, removeQaMarks } from "../../shared/article-html.mjs";
 import { reconcileEditorQaMarks } from "../editor-decorations.mjs";
 import DocumentChat from "./DocumentChat.jsx";
 import ArticleBody from "./ArticleBody.jsx";
@@ -24,7 +24,7 @@ import SourceImageSorter from "./SourceImageSorter.jsx";
 
 const annotationSteps = [{ id: "annotate", label: "生成注音", copy: "正在参考原图补全缺失读音，正文和已有读音保持不变。" }];
 
-export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentChanged, saving, books = [], onCreateBook }) {
+export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentChanged, saving, saveError = null, books = [], onCreateBook }) {
   const [value, setValue] = useState(() => ({
     ...initial,
     orientation: "horizontal",
@@ -72,7 +72,8 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
   const [batchReading, setBatchReading] = useState("");
   const [activeRange, setActiveRange] = useState(null);
   const sourceImageId = activeSourceId;
-  const recognition = imageSources.find((image) => image.id === activeSourceId)?.recognition || initial.recognition || initial;
+  const activeSource = imageSources.find((image) => image.id === activeSourceId);
+  const recognition = activeSource?.recognition || initial.recognition || initial;
   const warnings = Array.isArray(recognition.warnings)
     ? recognition.warnings
     : [];
@@ -261,6 +262,13 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
   const editingHtml = useMemo(() => sourceImageId ? sourceBodyHtml(bodyHtml, sourceImageId) : bodyHtml, [bodyHtml, sourceImageId]);
   const editingText = bodyText(editingHtml);
   const editingBlocks = useMemo(() => htmlToBlocks(editingHtml), [editingHtml]);
+  const canGenerateReadings = !!sourceImageId && (initial.taskId
+    ? activeSource?.taskId === initial.taskId : !initial.id);
+  const emptySourceIds = useMemo(() => {
+    const filled = new Set(bodyRanges(bodyHtml).sources.filter((source) => source.text.trim()).map((source) => source.id));
+    return new Set(imageSources.filter((image) => !filled.has(image.id)).map((image) => image.id));
+  }, [imageSources, bodyHtml]);
+  const canSaveAsNew = !!initial.taskId && [404, 409].includes(saveError?.status);
   const editorViews = useRef(new Map());
   useEffect(() => {
     const input = textarea.current, view = editorViews.current.get(activeSourceId);
@@ -318,7 +326,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
     setContentDirty(true);
   };
   const generateMissingReadings = async () => {
-    if (busy || submitLock.current || annotationRequest.current || !sourceImageId || initial.id || !editingText.trim()) return;
+    if (busy || submitLock.current || annotationRequest.current || !canGenerateReadings || !editingText.trim()) return;
     const controller = new AbortController();
     annotationRequest.current = controller;
     const currentContent = serializeBlocks(editingBlocks);
@@ -337,9 +345,14 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
     setAnnotationElapsedMs(null);
     let awaitingPaint = false;
     try {
-      const result = await api(`/images/${encodeURIComponent(sourceImageId)}/annotate`, {
+      const taskItemId = imageSources.find((image) => image.id === sourceImageId)?.taskItemId;
+      const annotationPath = initial.taskId && taskItemId
+        ? `/image-tasks/${encodeURIComponent(initial.taskId)}/items/${encodeURIComponent(taskItemId)}/annotate`
+        : `/images/${encodeURIComponent(sourceImageId)}/annotate`;
+      const result = await api(annotationPath, {
         method: "POST",
-        body: JSON.stringify({ content: currentContent, manualReadings }),
+        body: JSON.stringify({ content: currentContent, manualReadings,
+          ...(initial.taskId ? { resultVersion:initial.taskResultVersion } : {}) }),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
@@ -594,9 +607,11 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
           <div className="book-target">
             <label>
               保存到书籍
-              <select aria-label="保存到书籍" value={value.bookId || ""}
-                onChange={(event) => update({ bookId: event.target.value || null })}>
+              <select aria-label="保存到书籍" value={value.newBookTitle ? "__task_new_book__" : value.bookId || ""}
+                onChange={(event) => update(event.target.value === "__task_new_book__"
+                  ? { bookId:null } : { bookId: event.target.value || null, newBookTitle:null })}>
                 <option value="">独立材料（不放入书籍）</option>
+                {value.newBookTitle && <option value="__task_new_book__">新建书籍：{value.newBookTitle}（保存文章时创建）</option>}
                 {books.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
               </select>
             </label>
@@ -619,14 +634,17 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
                     if (creatingBook || !newBookTitle.trim()) return;
                     setCreatingBook(true);
                     try {
-                      const created = await onCreateBook(newBookTitle.trim());
-                      update({ bookId: created.id });
+                      if (initial.taskId) update({ bookId:null, newBookTitle:newBookTitle.trim() });
+                      else {
+                        const created = await onCreateBook(newBookTitle.trim());
+                        update({ bookId: created.id, newBookTitle:null });
+                      }
                       setShowNewBook(false);
                       setNewBookTitle("");
                       setMessage("");
                     } catch (cause) { setMessage(cause.message); }
                     finally { setCreatingBook(false); }
-                  }}>创建并选中</button>
+                  }}>{initial.taskId ? "使用此书名，保存时创建" : "创建并选中"}</button>
               </div>
             )}
             <small>一本书包含多篇文章。每次保存会添加为最后一篇，之后可在书籍目录调整顺序。</small>
@@ -661,14 +679,16 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
           </label>
         </div>
   </>;
-  const annotationTask = sourceImageId && (!initial.id && (
+  const annotationTask = canGenerateReadings && (
               <div className="ocr-annotation-task">
-                <p>{annotationCompleted
+                <p>{!editingText.trim() && initial.taskId
+                  ? "自动识别未完成，可对照原图逐张手动录入正文，再手动注音或直接保存。"
+                  : annotationCompleted
                   ? "正文与注音已完成，请一起校对正文和读音后保存。"
-                  : "正文已完成，注音尚未完成；可重试生成注音，正文和已有读音保持不变。"}</p>
+                  : "注音尚未完成，可手动添加读音或先保存正文，也可重试生成注音。"}</p>
                 {(!annotationCompleted || hasMissingReadings || annotating) && (
                   <button type="button" className="button secondary"
-                    disabled={busy || !body.trim() || incompleteRuby}
+                    disabled={busy || !editingText.trim() || incompleteRuby}
                     onClick={generateMissingReadings}>
                     {annotating ? "正在生成缺失注音…"
                       : annotationCompleted ? "补全缺失注音" : "生成缺失注音"}
@@ -685,7 +705,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
                   </p>
                 )}
               </div>
-            ));
+            );
 
   return (
     <form
@@ -695,19 +715,24 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
         e.preventDefault();
         if (compositionActive.current) return;
         if (incompleteRuby || busy || submitLock.current || annotationRequest.current) return;
+        const saveAsNew = e.nativeEvent.submitter?.name === "saveAsNew";
+        const savedHtml = saveAsNew ? removeQaMarks(bodyHtml) : bodyHtml;
+        const savedBlocks = saveAsNew ? htmlToBlocks(savedHtml) : blocks;
         submitLock.current = true;
         setSubmitting(true);
         try {
           await saveImageDirection();
           await onSave({
             ...value,
+            ...(saveAsNew ? { id:undefined, revision:undefined, bookId:null, newBookTitle:null,
+              appendToDocumentId:null, saveAsNew:true } : {}),
             orientation: "horizontal",
-            blocks,
-            bodyHtml,
+            blocks:savedBlocks,
+            bodyHtml:savedHtml,
             sourceImageId:imageSources[0]?.id || null,
             sourceImages:imageSources.map((image) => ({id:image.id})),
-            content: serializeBlocks(blocks),
-            manualReadings: blocks.flatMap((b) =>
+            content: serializeBlocks(savedBlocks),
+            manualReadings: savedBlocks.flatMap((b) =>
               b.segments
                 .filter((s) => s.reading)
                 .flatMap((s, rubyIndex) =>
@@ -752,6 +777,8 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
             >
               取消
             </button>
+            {canSaveAsNew && <button type="submit" name="saveAsNew" value="true" className="button secondary"
+              disabled={busy || !value.title.trim() || !body.trim() || incompleteRuby}>另存为新文章</button>}
             <button
               type="submit"
               className="button primary"
@@ -764,6 +791,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
             </button>
           </div>
         </div>
+        {canSaveAsNew && <p className="editor-message" role="status">保存未完成，当前校对内容已保留。可继续修改后另存为新文章，原文章和原问答记录保留。</p>}
         {sourceImageId ? <details className="editor-meta-details"><summary>{value.title || "文章信息"} · {books.find((item) => item.id === value.bookId)?.title || "独立材料"}<span>修改文章信息</span></summary>{metadataFields}</details> : metadataFields}
         {sourceImageId && (
           <details className="ocr-review-overview"><summary>识别记录 · {warnings.length ? `${warnings.length} 条待核对提示` : "无待核对提示"}{nonBody.length ? ` · ${nonBody.length} 条非正文` : ""}</summary>
@@ -886,8 +914,10 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
         {imageSources.length > 0 && <SourceImageSorter
           items={imageSources.map((image, index) => ({id:image.id,
             name:image.id === activeSourceId && imageMetadata?.originalName || image.originalName || image.name || image.recognition?.sourceImage?.originalName || `来源图 ${index + 1}`,
-            src:image.id === activeSourceId ? imageUrl : undefined}))}
+            src:image.id === activeSourceId ? imageUrl : undefined,
+            ...(emptySourceIds.has(image.id) ? {status:"待录入正文",statusKind:"pending"} : {})}))}
           activeId={activeSourceId} onSelect={chooseSource} onReorder={reorderSources} onRemove={removeSource} minItems={1} disabled={busy} />}
+        {emptySourceIds.size > 0 && <p className="editor-message" role="status">有 {emptySourceIds.size} 张图片尚未录入正文。保存时会保留原图并标为待录入，也可逐张补录或移除。</p>}
         <div className={`editor-workspace ${!sourceImageId && tab === "text" ? "editor-text-only" : ""}`}>
           <section className="source-panel" aria-label="编辑区域">
             <div className="panel-tabs" role="tablist" aria-label="校对方式">

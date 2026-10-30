@@ -17,7 +17,8 @@
     "test:browser:ai": "npm run build && playwright test -c playwright.ai.config.mjs",
     "verify:ai": "node scripts/verify-ai.mjs",
     "check": "npm run test && npm run build",
-    "verify:stage3": "node scripts/verify-stage3.mjs"
+    "verify:stage3": "node scripts/verify-stage3.mjs",
+    "verify:image-tasks": "node scripts/verify-image-tasks.mjs"
   },
   "dependencies": {
     "express": "^5.3.0",

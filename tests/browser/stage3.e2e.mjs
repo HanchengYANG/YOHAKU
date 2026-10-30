@@ -157,7 +157,15 @@ test("图片文字 pair 追加同篇文章、逐图编辑与按钮排序，保�
         await expect(page.getByRole("combobox",{name:"追加正文方式",exact:true})).toHaveCount(0);
       }
       await page.getByLabel("选择日语图片",{exact:true}).setInputFiles({name:`来源${index}.png`,mimeType:"image/png",buffer:bytes});
+      await expect(page.getByRole("button",{name:"识别并注音",exact:true})).toBeEnabled();
       await page.getByRole("button",{name:"识别并注音",exact:true}).click();
+      await expect(page.getByRole("region",{name:"任务状态",exact:true})).toBeVisible();
+      const taskId=await page.evaluate(()=>location.hash.slice("#tasks/".length));
+      await expect.poll(async()=>{
+        const response=await page.request.get(`/api/image-tasks/${taskId}`);
+        expect(response.ok()).toBe(true);return (await response.json()).state;
+      }).toBe("ready");
+      await page.getByRole("button",{name:"开始校对",exact:true}).click();
       await expect(page.getByRole("textbox",{name:"日语正文",exact:true})).toBeVisible();
       if(index===1) {
         const title=page.getByRole("textbox",{name:"材料标题"});

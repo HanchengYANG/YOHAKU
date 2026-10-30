@@ -1,24 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { randomUuid } from "../../shared/random-uuid.mjs";
-import { changeImageImportDirection, imageImportDraft, imageImportFiles, recognizeImageBatch } from "../image-import.mjs";
+import { imageImportFiles } from "../image-import.mjs";
 import api from "../api.mjs";
 import uploadImage from "../upload-image.mjs";
+import { newerTask, pendingLocalEntries, taskImageUrl } from "../image-tasks.mjs";
 import Icon from "./Icon.jsx";
-import ImportProgress from "./ImportProgress.jsx";
 import SourceImageSorter from "./SourceImageSorter.jsx";
 import "../image-import.css";
+import "../image-tasks.css";
 
 const newBook = "__new_book__";
-const fileName = (entry, index = 0) => entry.file.name || `粘贴的截图 ${index + 1}`;
-const progressSteps = [
-  { id: "upload", label: "上传图片", copy: "正在发送原图，上传完成后会自动识别正文。" },
-  { id: "rotate", label: "保存方向", copy: "正在保存实际图片方向，完成后再识别正文。" },
-  { id: "recognize", label: "识别正文", copy: "正在等待正文识别结果，完成后会自动开始注音。" },
-  { id: "annotate", label: "生成注音", copy: "正文已保留，正在等待注音结果，完成后打开校对草稿。" },
-];
-const processingPhases = progressSteps.map((step) => step.id);
+const blankPreview = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='120'%3E%3Crect width='160' height='120' fill='%23efeee8'/%3E%3C/svg%3E";
+const turns = (value) => ((value % 4) + 4) % 4;
+const fieldsOf = (task) => ({ title: task?.title || "", bookId: (task?.createNewBook || task?.newBookTitle) ? newBook : task?.bookId || "", newBookTitle: task?.newBookTitle || "", targetId: task?.targetId || "" });
+const bodyOf = (form) => ({ title: form.title, createNewBook: form.bookId === newBook, bookId: form.bookId === newBook ? null : form.bookId || null, newBookTitle: form.bookId === newBook ? form.newBookTitle : "", targetId: form.targetId || null });
+const signature = (form) => JSON.stringify(bodyOf(form));
 
-function LocalImagePreview({ entry }) {
+function ImagePreview({ entry }) {
   const stage = useRef(null);
   const [bounds, setBounds] = useState(null), [size, setSize] = useState(null);
   useEffect(() => {
@@ -26,269 +24,253 @@ function LocalImagePreview({ entry }) {
     observer.observe(stage.current);
     return () => observer.disconnect();
   }, []);
-  const sideways = (entry.quarterTurns || 0) % 2 === 1;
+  const sideways = turns(entry.quarterTurns || 0) % 2 === 1;
   const scale = bounds && size ? Math.min(bounds.width / (sideways ? size.height : size.width), bounds.height / (sideways ? size.width : size.height)) : null;
-  return <span ref={stage} className="image-import-image-stage"><img src={entry.preview} alt="待识别的日语原图"
+  return <span ref={stage} className="image-import-image-stage"><img src={entry.preview || taskImageUrl(entry) || blankPreview} alt="待识别的日语原图"
     onLoad={(event) => setSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
-    style={{ width: scale === null ? "100%" : size.width * scale, height: scale === null ? "100%" : size.height * scale,
-      maxWidth: "none", maxHeight: "none", transform: `translate(-50%, -50%) rotate(${(entry.quarterTurns || 0) * 90}deg)` }} /></span>;
+    style={{ width: scale === null ? "100%" : size.width * scale, height: scale === null ? "100%" : size.height * scale, maxWidth: "none", maxHeight: "none", transform: `translate(-50%, -50%) rotate(${(entry.quarterTurns || 0) * 90}deg)` }} /></span>;
 }
 
-export default function ImageImport({
-  onCancel, onReady, onDirty, articles = [], books = [], initialBookId = null,
-  initialTargetId = null, onCreateBook,
-}) {
-  const [bookId, setBookId] = useState(() => initialBookId || articles.find((article) => article.id === initialTargetId)?.bookId || "");
-  const [targetId, setTargetId] = useState(initialTargetId || "");
-  const [newBookTitle, setNewBookTitle] = useState("");
-  const [title, setTitle] = useState("");
-  const [queue, setQueue] = useState([]);
-  const [activeId, setActiveId] = useState(null);
-  const [phase, setPhase] = useState("");
-  const [failedPhase, setFailedPhase] = useState("");
-  const [failedId, setFailedId] = useState(null);
-  const [uploadPercent, setUploadPercent] = useState(null);
-  const [progressStartedAt, setProgressStartedAt] = useState(null);
-  const [directionProgress, setDirectionProgress] = useState(false);
-  const [error, setError] = useState("");
-  const [dragActive, setDragActive] = useState(false);
-  const [, updateCache] = useState(0);
-  const fileInput = useRef(null);
-  const pending = useRef(null);
-  const queueRef = useRef([]);
-  const cache = useRef(new Map());
-  const urls = useRef(new Set());
-  const currentStep = useRef({ id: null, index: 0, phase: "" });
-  const progressPanel = useRef(null);
-  const mounted = useRef(true);
-  const active = queue.find((entry) => entry.id === activeId) || queue[0];
-  const activeCache = active ? cache.current.get(active.id) : null;
-  const progressEntry = queue.find((entry) => entry.id === currentStep.current.id);
-  const progressCache = cache.current.get(currentStep.current.id);
-  const busy = !!phase;
-  const availableArticles = articles.filter((article) => (article.bookId || "") === bookId);
+export default function ImageImport({ taskId = null, initialTask = null, onTaskCreated, onSubmitted, onCancel, onDirty,
+  articles = [], books = [], initialBookId = null, initialTargetId = null }) {
+  const initial = initialTask || null;
+  const [task, setTask] = useState(initial);
+  const [form, setForm] = useState(() => initial ? fieldsOf(initial) : ({ title: "", bookId: initialBookId || articles.find((article) => article.id === initialTargetId)?.bookId || "", targetId: initialTargetId || "", newBookTitle: "" }));
+  const [activeId, setActiveId] = useState(null), [busy, setBusy] = useState(false), [loading, setLoading] = useState(!!taskId && !initial);
+  const [error, setError] = useState(""), [dragActive, setDragActive] = useState(false);
+  const [, repaint] = useState(0);
+  const taskRef = useRef(initial), formRef = useRef(form), loadedId = useRef(initial?.id || null);
+  const locals = useRef(new Map()), creationKey = useRef(randomUuid()), mounted = useRef(true);
+  const operations = useRef(Promise.resolve()), pendingCount = useRef(0), controllers = useRef(new Set());
+  const fileInput = useRef(null), replacementInput = useRef(null), replacementId = useRef(null), saveTimer = useRef(null);
+  formRef.current = form;
+  const accept = useCallback((value, syncForm = false) => {
+    if (!mounted.current) return value;
+    const next = newerTask(taskRef.current, value);
+    taskRef.current = next; loadedId.current = next.id; setTask(next);
+    if (syncForm) { formRef.current = fieldsOf(next); setForm(fieldsOf(next)); }
+    return next;
+  }, []);
+  const refresh = useCallback(async () => {
+    const id = taskRef.current?.id || taskId;
+    if (!id) return null;
+    const value = await api(`/image-tasks/${encodeURIComponent(id)}`);
+    return accept(value, !taskRef.current);
+  }, [accept, taskId]);
+  const enqueue = useCallback((work) => {
+    pendingCount.current++; setBusy(true);
+    const run = operations.current.catch(() => {}).then(async () => {
+      if (!mounted.current) return;
+      try { await work(); }
+      catch (cause) {
+        if (!mounted.current || cause.name === "AbortError") return;
+        setError(cause instanceof TypeError ? "暂时无法连接服务器。已上传的原图保留在草稿中，请恢复连接后重试。" : cause.message);
+        try {
+          const latest = await refresh();
+          if (!mounted.current) return;
+          if (latest && latest.state !== "draft") {
+            if (pendingLocalEntries(locals.current.values(), latest).length) setError("其他设备已提交此批次，本机尚未上传的新图片仍保留。请另建导入草稿继续上传。");
+            else onSubmitted?.(latest);
+          }
+        } catch { /* Keep the original error and local files until reconnection. */ }
+      } finally { pendingCount.current--; if (mounted.current) { setBusy(pendingCount.current > 0); repaint((n) => n + 1); } }
+    });
+    operations.current = run;
+    return run;
+  }, [refresh, onSubmitted]);
 
-  useEffect(() => {
-    if (progressStartedAt !== null) progressPanel.current?.scrollIntoView({ block: "nearest", behavior: "auto" });
-  }, [progressStartedAt]);
   useEffect(() => {
     mounted.current = true;
     return () => {
-      mounted.current = false;
-      pending.current?.abort();
-      for (const url of urls.current) URL.revokeObjectURL(url);
-      urls.current.clear();
+      mounted.current = false; clearTimeout(saveTimer.current);
+      for (const controller of controllers.current) controller.abort();
+      for (const entry of locals.current.values()) URL.revokeObjectURL(entry.preview);
     };
   }, []);
+  useEffect(() => {
+    if (!taskId || loadedId.current === taskId) return;
+    const controller = new AbortController();
+    setLoading(true);
+    api(`/image-tasks/${encodeURIComponent(taskId)}`, { signal: controller.signal }).then((value) => {
+      accept(value, true); if (mounted.current && value.state !== "draft") onSubmitted?.(value);
+    }).catch((cause) => { if (cause.name !== "AbortError") setError(cause.message); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [taskId, accept, onSubmitted]);
 
-  const chooseFiles = useCallback((fileList) => {
-    if (pending.current) { setError("正在处理图片，请完成后再添加图片。"); return false; }
+  const queue = [...(task?.items || []).map((item) => ({ ...item, ...locals.current.get(item.id) })),
+    ...[...locals.current.values()].filter((entry) => !(task?.items || []).some((item) => item.id === entry.id))];
+  const active = queue.find((entry) => entry.id === activeId) || queue[0];
+  const uploadedCount = queue.filter((entry) => entry.imageId).length;
+  const localUnsent = [...locals.current.values()].some((entry) => !(task?.items || []).find((item) => item.id === entry.id)?.imageId);
+  const frozen = !!task && task.state !== "draft";
+  const metadataPending = !!task && !frozen && signature(form) !== signature(fieldsOf(task));
+  useEffect(() => { onDirty?.(localUnsent || metadataPending); }, [localUnsent, metadataPending, onDirty]);
+
+  const ensureDraft = async () => {
+    if (taskRef.current) return taskRef.current;
+    const value = await api("/image-tasks", { method: "POST", body: JSON.stringify({ idempotencyKey: creationKey.current, ...bodyOf(formRef.current) }) });
+    accept(value); if (mounted.current) onTaskCreated?.(value);
+    return value;
+  };
+  const saveMetadata = async () => {
+    if (!taskRef.current || taskRef.current.state !== "draft" || signature(formRef.current) === signature(fieldsOf(taskRef.current))) return;
+    const value = await api(`/image-tasks/${encodeURIComponent(taskRef.current.id)}`, { method: "PATCH", body: JSON.stringify({ version: taskRef.current.version, ...bodyOf(formRef.current) }) });
+    accept(value); if (mounted.current) setError("");
+  };
+  const uploadEntries = async (entries) => {
+    if (mounted.current) setError("");
+    let current = await ensureDraft();
+    if (!mounted.current) return;
+    const missing = entries.filter((entry) => !current.items.some((item) => item.id === entry.id));
+    if (missing.length) current = accept(await api(`/image-tasks/${encodeURIComponent(current.id)}/items`, {
+      method: "POST", body: JSON.stringify({ version: current.version, items: missing.map(({ id, name }) => ({ id, name })) }),
+    }));
+    for (const entry of entries) {
+      if (!mounted.current) return;
+      if (taskRef.current.items.find((item) => item.id === entry.id)?.imageId) continue;
+      const controller = new AbortController(); controllers.current.add(controller);
+      entry.uploading = true; entry.error = ""; entry.percent = 0; repaint((n) => n + 1);
+      const body = new FormData(); body.append("image", entry.file, entry.name);
+      try {
+        const value = await uploadImage(body, { signal: controller.signal, path: `/image-tasks/${encodeURIComponent(current.id)}/items/${encodeURIComponent(entry.id)}/image`, onProgress: (percent) => {
+          entry.percent = percent; if (mounted.current) repaint((n) => n + 1);
+        } });
+        accept(value);
+      } catch (cause) {
+        entry.error = cause.message;
+        if (cause.name !== "AbortError") { try { await refresh(); } catch {} }
+        // Other selected files can still upload when a single file fails.
+        if (cause.status === 409 || cause.code === "WEBSITE_AUTH_REQUIRED") throw cause;
+        if (cause.name !== "AbortError") setError(cause.message);
+      } finally { entry.uploading = false; controllers.current.delete(controller); if (mounted.current) repaint((n) => n + 1); }
+    }
+    await saveMetadata();
+  };
+  const chooseFiles = (fileList) => {
+    if (taskRef.current && taskRef.current.state !== "draft") { setError("此批次已提交。请将本机未上传图片另建草稿，或返回任务查看进度。"); return; }
     let files;
-    try { files = imageImportFiles(fileList, queueRef.current.length); }
-    catch (cause) { setError(cause.message); return false; }
-    if (!files.length) return false;
-    const added = files.map((file) => {
-      const preview = URL.createObjectURL(file); urls.current.add(preview);
-      return { id: randomUuid(), file, preview, quarterTurns: 0 };
-    });
-    const next = [...queueRef.current, ...added];
-    queueRef.current = next; setQueue(next); setActiveId(added[0].id);
-    setError(""); setFailedPhase(""); setFailedId(null); setProgressStartedAt(null);
-    onDirty?.(true);
-    return true;
-  }, [onDirty]);
-
+    try { files = imageImportFiles(fileList, queue.length); }
+    catch (cause) { setError(cause.message); return; }
+    if (!files.length) return;
+    const entries = files.map((file) => ({ id: randomUuid(), name: file.name || "粘贴的截图.png", file, preview: URL.createObjectURL(file) }));
+    entries.forEach((entry) => locals.current.set(entry.id, entry));
+    setActiveId(entries[0].id); setError(""); repaint((n) => n + 1); onDirty?.(true);
+    enqueue(() => uploadEntries(entries));
+  };
+  const chooseFilesRef = useRef(chooseFiles); chooseFilesRef.current = chooseFiles;
   useEffect(() => {
     const paste = (event) => {
       const data = event.clipboardData;
-      if (!data) return;
-      const files = data.files.length ? Array.from(data.files) : Array.from(data.items)
-        .filter((item) => item.kind === "file").map((item) => item.getAsFile()).filter(Boolean);
-      if (files.length) { event.preventDefault(); chooseFiles(files); }
+      const files = data?.files?.length ? [...data.files] : [...(data?.items || [])].filter((item) => item.kind === "file").map((item) => item.getAsFile()).filter(Boolean);
+      if (files.length) { event.preventDefault(); chooseFilesRef.current(files); }
     };
     window.addEventListener("paste", paste);
     return () => window.removeEventListener("paste", paste);
-  }, [chooseFiles]);
+  }, []);
+  const field = (changes) => {
+    setForm((current) => { const next = { ...current, ...changes }; formRef.current = next; return next; });
+    onDirty?.(!!taskRef.current || locals.current.size > 0);
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => enqueue(saveMetadata), 600);
+  };
+  const mutate = (body) => enqueue(async () => {
+    setError("");
+    const current = await ensureDraft();
+    accept(await api(`/image-tasks/${encodeURIComponent(current.id)}`, { method: "PATCH", body: JSON.stringify({ version: current.version, ...body }) }));
+  });
+  const remove = (id) => {
+    if ((taskRef.current?.items || []).some((item) => item.id === id)) enqueue(async () => {
+      const current = taskRef.current;
+      accept(await api(`/image-tasks/${encodeURIComponent(current.id)}`, { method: "PATCH", body: JSON.stringify({ version: current.version, removeItemIds: [id] }) }));
+      const local = locals.current.get(id); if (local) URL.revokeObjectURL(local.preview); locals.current.delete(id);
+      repaint((n) => n + 1);
+    });
+    else { const local = locals.current.get(id); if (local) URL.revokeObjectURL(local.preview); locals.current.delete(id); repaint((n) => n + 1); }
+  };
+  const submit = () => enqueue(async () => {
+    clearTimeout(saveTimer.current); setError("");
+    await saveMetadata();
+    const current = taskRef.current;
+    const value = accept(await api(`/image-tasks/${encodeURIComponent(current.id)}/submit`, { method: "POST", body: JSON.stringify({ version: current.version }) }));
+    if (mounted.current) { onDirty?.(false); onSubmitted?.(value); }
+  });
+  const uploadState = (entry) => entry.imageId ? { status: "已上传", statusKind: "done" }
+    : entry.uploading ? { status: entry.percent === 100 ? "正在确认保存" : `正在上传${entry.percent === null ? "" : ` ${entry.percent}%`}`, statusKind: "working" }
+      : entry.error ? { status: "上传失败，可重试", statusKind: "error" } : { status: entry.file ? "等待上传" : "需重新选择文件", statusKind: "pending" };
+  const missingEntries = queue.filter((entry) => !entry.imageId);
+  const retryEntries = pendingLocalEntries(locals.current.values(), task);
+  const startAnotherDraft = () => {
+    const pending = pendingLocalEntries(locals.current.values(), taskRef.current);
+    if (!pending.length) return;
+    clearTimeout(saveTimer.current);
+    for (const [id, entry] of locals.current) if (!pending.some((item) => item.id === id)) URL.revokeObjectURL(entry.preview);
+    locals.current = new Map(pending.map((entry) => [entry.id, entry]));
+    taskRef.current = null; loadedId.current = null; creationKey.current = randomUuid();
+    setTask(null); setError(""); setActiveId(pending[0].id); repaint((n) => n + 1);
+    enqueue(() => uploadEntries(pending));
+  };
+  const canSubmit = task?.state === "draft" && queue.length > 0 && !missingEntries.length && !busy && !loading && !(form.bookId === newBook && !form.newBookTitle.trim());
+  const replaceFile = (file) => {
+    const id = replacementId.current;
+    if (!file || !id) return;
+    try { imageImportFiles([file], 0); } catch (cause) { setError(cause.message); return; }
+    const old = locals.current.get(id); if (old) URL.revokeObjectURL(old.preview);
+    const item = taskRef.current?.items.find((item) => item.id === id);
+    const entry = { id, file, name: item?.name || file.name, preview: URL.createObjectURL(file) };
+    locals.current.set(id, entry); repaint((n) => n + 1); enqueue(() => uploadEntries([entry]));
+  };
 
-  const removeFile = (id) => {
-    if (pending.current) return;
-    const entry = queueRef.current.find((item) => item.id === id);
-    if (!entry) return;
-    URL.revokeObjectURL(entry.preview); urls.current.delete(entry.preview); cache.current.delete(id);
-    const next = queueRef.current.filter((item) => item.id !== id);
-    queueRef.current = next; setQueue(next);
-    if (activeId === id) setActiveId(next[0]?.id || null);
-    if (failedId === id) { setError(""); setFailedPhase(""); setFailedId(null); }
-    if (!next.length) setProgressStartedAt(null);
-    onDirty?.(next.length > 0);
-  };
-  const reorder = (ids) => {
-    if (pending.current) return;
-    const entries = new Map(queueRef.current.map((entry) => [entry.id, entry]));
-    const next = ids.map((id) => entries.get(id));
-    queueRef.current = next; setQueue(next); onDirty?.(true);
-  };
-  const changeDirection = (delta) => {
-    if (pending.current || !active) return;
-    const next = queueRef.current.map((entry) => entry.id === active.id ? changeImageImportDirection(entry, delta, cache.current) : entry);
-    queueRef.current = next; setQueue(next);
-    setError(""); setFailedPhase(""); setFailedId(null); setProgressStartedAt(null);
-    onDirty?.(true);
-  };
-  const dragOver = (event) => {
-    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
-    event.preventDefault(); event.dataTransfer.dropEffect = pending.current ? "none" : "copy";
-    setDragActive(!pending.current);
-  };
-  const drop = (event) => {
-    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
-    event.preventDefault(); setDragActive(false); chooseFiles(event.dataTransfer.files);
-  };
-
-  const run = async (skipAnnotation = false) => {
-    if (!queueRef.current.length || pending.current || (bookId === newBook && !newBookTitle.trim())) return;
-    const controller = new AbortController(); pending.current = controller;
-    setDirectionProgress(queueRef.current.some((entry) => entry.quarterTurns || cache.current.get(entry.id)?.appliedTurns));
-    setError(""); setFailedPhase(""); setFailedId(null); setProgressStartedAt(performance.now());
-    try {
-      const entries = await recognizeImageBatch([...queueRef.current], {
-        cache: cache.current, signal: controller.signal, skipAnnotation,
-        upload: (file, options) => {
-          const body = new FormData();
-          const extension = file.type === "image/jpeg" ? "jpg" : file.type === "image/webp" ? "webp" : "png";
-          body.append("image", file, file.name || `粘贴的图片.${extension}`);
-          return uploadImage(body, options);
-        },
-        rotate: (id, direction, options) => api(`/images/${encodeURIComponent(id)}/rotate`, {
-          method: "POST", body: JSON.stringify(direction), ...options,
-        }),
-        recognize: (id, options) => api(`/images/${encodeURIComponent(id)}/recognize`, {
-          method: "POST", body: JSON.stringify({ engine: "llm" }), ...options,
-        }),
-        annotate: (id, content, options) => api(`/images/${encodeURIComponent(id)}/annotate`, {
-          method: "POST", body: JSON.stringify({ content, manualReadings: [] }), ...options,
-        }),
-        onUpdate: (step) => {
-          currentStep.current = step;
-          if (!mounted.current || controller.signal.aborted) return;
-          setActiveId(step.id); setPhase(step.phase); setUploadPercent(step.uploadPercent);
-          updateCache((value) => value + 1);
-        },
-      });
-      if (!mounted.current || controller.signal.aborted) return;
-      let destinationBookId = bookId || null;
-      if (bookId === newBook) {
-        currentStep.current = { ...currentStep.current, phase: "destination" }; setPhase("destination");
-        const created = await onCreateBook(newBookTitle.trim());
-        if (!mounted.current || controller.signal.aborted) return;
-        destinationBookId = created.id; setBookId(created.id);
-      }
-      currentStep.current = { ...currentStep.current, phase: "finish" }; setPhase("finish");
-      const draft = imageImportDraft(entries, {
-        title, bookId: destinationBookId, targetId,
-        annotationError: skipAnnotation && entries.some((entry) => !entry.annotated) ? "部分图片尚未生成注音，可在注音校正中补全。" : "",
-      });
-      onDirty?.(false);
-      await onReady(draft);
-    } catch (cause) {
-      if (mounted.current && cause.name !== "AbortError") {
-        setFailedPhase(currentStep.current.phase); setFailedId(currentStep.current.id);
-        onDirty?.(true); updateCache((value) => value + 1);
-        setError(cause instanceof TypeError ? "无法连接本机服务，所选图片和已完成的结果已保留，请重试。" : cause.message);
-      }
-    } finally {
-      if (pending.current === controller) pending.current = null;
-      if (mounted.current) setPhase("");
-    }
-  };
-  const itemState = (entry) => {
-    const value = cache.current.get(entry.id);
-    if (failedId === entry.id && error && processingPhases.includes(failedPhase)) return { status: "待重试", statusKind: "error" };
-    if (busy && currentStep.current.id === entry.id && processingPhases.includes(phase)) return {
-      status: phase === "upload" ? "正在上传" : phase === "rotate" ? "保存方向" : phase === "recognize" ? "识别正文" : "生成注音", statusKind: "working",
-    };
-    return value?.annotated ? { status: "已完成", statusKind: "done" }
-      : value?.recognized ? { status: "正文已保留", statusKind: "retained" }
-        : { status: value?.image ? "原图已上传" : "待处理", statusKind: "pending" };
-  };
-  const completedCount = queue.filter((entry) => cache.current.get(entry.id)?.annotated).length;
-  const retryCache = cache.current.get(failedId);
-  const buttonLabel = phase === "upload" ? "正在上传原图…"
-    : phase === "rotate" ? "正在保存图片方向…"
-    : phase === "recognize" ? "正在识别正文（1/2）…"
-      : phase === "annotate" ? "正在参考原图注音（2/2）…"
-        : phase === "destination" ? "正在创建书籍…" : phase === "finish" ? "正在打开校对…"
-          : error && retryCache?.recognized && !retryCache?.annotated ? "重试注音"
-            : error && retryCache?.image && !retryCache?.recognized ? "重试识别"
-              : error && retryCache?.annotated ? "重试打开校对"
-                : queue.length > 1 ? `识别 ${queue.length} 张并校对` : "识别并注音";
-
-  return <section className="stage2-page image-import-page image-import-batch" aria-label="图片导入" aria-busy={busy}
-    onDragOver={dragOver} onDrop={drop} onDragLeave={(event) => {
-      if (!event.currentTarget.contains(event.relatedTarget)) setDragActive(false);
-    }}>
+  return <section className="stage2-page image-import-page image-import-batch" aria-label="图片导入" aria-busy={loading}
+    onDragOver={(event) => { if ([...event.dataTransfer.types].includes("Files")) { event.preventDefault(); setDragActive(true); } }}
+    onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setDragActive(false); }}
+    onDrop={(event) => { if ([...event.dataTransfer.types].includes("Files")) { event.preventDefault(); setDragActive(false); chooseFiles(event.dataTransfer.files); } }}>
     <div className="stage2-heading"><div><span className="eyebrow">从原图开始</span><h1>导入照片或截图</h1></div>
-      <button className="button subtle" type="button" disabled={busy} onClick={onCancel}>取消</button></div>
-    <p className="stage2-description">先选书籍和文章，再选择多张照片。按图片顺序追加正文，校对时可继续调整图片顺序。</p>
-    {error && <div className="stage2-error" role="alert">{error}<p>{failedPhase === "annotate"
-      ? "正文已完成并保留，重试会继续未完成的注音与后续图片，不会重新上传或识别已完成的图片。"
-      : "所选图片和已完成的步骤均已保留，重试会继续未完成的步骤。"}</p></div>}
-    {(phase || failedPhase) && processingPhases.includes(phase || failedPhase) && <div ref={progressPanel}>
-      <p className="image-batch-current" role="status">第 {currentStep.current.index + 1} / {queue.length} 张 · {progressEntry ? fileName(progressEntry) : ""}</p>
-      <ImportProgress phase={phase || failedPhase} startedAt={progressStartedAt} uploadPercent={uploadPercent} failed={!phase && !!failedPhase}
-        steps={directionProgress ? progressSteps : progressSteps.filter((step) => step.id !== "rotate")}
-        completedSteps={[
-          ...(progressCache?.image ? ["upload"] : []),
-          ...(progressCache?.image && (progressCache.appliedTurns || 0) === (progressEntry?.quarterTurns || 0) ? ["rotate"] : []),
-          ...(progressCache?.recognized ? ["recognize"] : []), ...(progressCache?.annotated ? ["annotate"] : []),
-        ]} />
-    </div>}
+      <div className="task-preparation-actions"><button className="button subtle" type="button" onClick={onCancel}>返回任务</button>
+        {task && !frozen && <button className="text-button" type="button" disabled={busy} onClick={() => {
+          if (window.confirm("放弃这份导入草稿？已上传的原图仍会保留，后续不再提交识别。")) enqueue(async () => {
+            const value = accept(await api(`/image-tasks/${encodeURIComponent(taskRef.current.id)}/cancel`, { method: "POST", body: JSON.stringify({ version: taskRef.current.version }) }));
+            if (mounted.current) { onDirty?.(false); onSubmitted?.(value); }
+          });
+        }}>放弃导入草稿</button>}</div></div>
+    <p className="stage2-description">先上传图片，再提交识别任务。草稿会保存到你的账号，可换设备继续上传。</p>
+    {loading && <p role="status">正在读取导入草稿…</p>}
+    {error && <div className="stage2-error" role="alert">{error}<button className="button subtle" type="button" disabled={busy} onClick={() => enqueue(async () => { await refresh(); await saveMetadata(); if (mounted.current) setError(""); })}>重新同步</button></div>}
     <div className="image-import-batch-layout">
       <div className="image-import-destination">
-        <h2>识别后保存到</h2>
-        <label className="book-target">书籍<select aria-label="图片所属书籍" disabled={busy} value={bookId} onChange={(event) => {
-          setBookId(event.target.value); setTargetId(""); if (queue.length) onDirty?.(true);
-        }}><option value="">独立材料</option>{books.map((book) => <option key={book.id} value={book.id}>{book.title}</option>)}
-          {onCreateBook && <option value={newBook}>＋ 新建书籍</option>}</select></label>
-        {bookId === newBook && <label className="book-target">书籍名称<input aria-label="新书籍名称" value={newBookTitle} disabled={busy} maxLength={160} placeholder="输入书名" onChange={(event) => { setNewBookTitle(event.target.value); if (queue.length) onDirty?.(true); }} /></label>}
-        <label className="book-target">文章<select aria-label="图片所属文章" disabled={busy} value={targetId} onChange={(event) => { setTargetId(event.target.value); if (queue.length) onDirty?.(true); }}>
-          <option value="">新建文章</option>{availableArticles.map((article) => <option key={article.id} value={article.id}>{article.title}</option>)}
-        </select></label>
-        {!targetId && <label className="book-target">文章标题<input aria-label="新文章标题" disabled={busy} value={title} maxLength={160} placeholder="留空则使用识别标题" onChange={(event) => { setTitle(event.target.value); if (queue.length) onDirty?.(true); }} /></label>}
-        <p className="image-destination-rule">{targetId ? "默认追加到原文章末尾" : "按照片顺序合为一篇新文章"}</p>
-        <p className="image-destination-copy">每张图片保留对应文字，全文拼接后统一分句。</p>
+        <h2>校对后保存到</h2>
+        <label className="book-target">书籍<select aria-label="图片所属书籍" disabled={loading || frozen} value={form.bookId} onChange={(event) => field({ bookId: event.target.value, targetId: "" })}>
+          <option value="">独立材料</option>{books.map((book) => <option key={book.id} value={book.id}>{book.title}</option>)}<option value={newBook}>＋ 新建书籍</option></select></label>
+        {form.bookId === newBook && <label className="book-target">书籍名称<input aria-label="新书籍名称" value={form.newBookTitle} disabled={loading || frozen} maxLength={160} placeholder="输入书名" onChange={(event) => field({ newBookTitle: event.target.value })} /></label>}
+        <label className="book-target">文章<select aria-label="图片所属文章" disabled={loading || frozen} value={form.targetId} onChange={(event) => field({ targetId: event.target.value })}>
+          <option value="">新建文章</option>{articles.filter((article) => (article.bookId || "") === form.bookId).map((article) => <option key={article.id} value={article.id}>{article.title}</option>)}</select></label>
+        {!form.targetId && <label className="book-target">文章标题<input aria-label="新文章标题" value={form.title} disabled={loading || frozen} maxLength={160} placeholder="留空则使用识别标题" onChange={(event) => field({ title: event.target.value })} /></label>}
+        <p className="image-destination-rule">{form.targetId ? "校对保存后追加到原文章末尾" : "按照片顺序合为一篇新文章"}</p>
+        <p className="image-destination-copy">识别完成后仍需校对并保存，不会自动改写文章。</p>
         <div className="image-import-submit">
-          <button className="button primary" type="button" disabled={!queue.length || busy || (bookId === newBook && !newBookTitle.trim())} onClick={() => run()}>
-            <Icon name="arrow" size={17} />{buttonLabel}</button>
-          {error && failedPhase === "annotate" && !busy && <button type="button" className="button subtle" onClick={() => run(true)}>先校对正文</button>}
-          <p className="image-recognition-state" role="status">{busy ? "正在按队列处理图片，完成后打开逐图校对。" : "识别与注音完成后进入校对草稿，不会自动保存为最终原文。"}</p>
+          <button className="button primary" type="button" disabled={!canSubmit} onClick={submit}><Icon name="arrow" size={17} />识别并注音</button>
+          {retryEntries.length > 0 && !busy && !frozen && <button className="button subtle" type="button" onClick={() => enqueue(() => uploadEntries(retryEntries))}>重试上传</button>}
+          {frozen && retryEntries.length > 0 && <button className="button primary" type="button" disabled={busy} onClick={startAnotherDraft}>将未上传图片另建草稿</button>}
+          {frozen && <p className="task-note">此批次已在其他设备提交。本机未上传的新图片会保留，另建草稿后单独处理。</p>}
+          {metadataPending && !busy && <button className="button subtle" type="button" onClick={() => enqueue(saveMetadata)}>保存准备信息</button>}
+          <p className="image-recognition-state" role="status">{busy ? "正在上传或保存准备信息…" : metadataPending ? "准备信息尚未保存，请同步后再离开。" : task ? `已上传 ${uploadedCount} / ${queue.length} 张。草稿已保存，可在其他设备继续。` : "选图后自动上传，全部上传完成后即可提交任务。"}</p>
+          {missingEntries.length > 0 && !busy && <p className="task-note">未传完的文件可重新选择或移除，全部处理后才能提交。</p>}
         </div>
       </div>
       <div className="image-import-queue">
-        <label className="stage2-field image-file-picker">从设备选择图片
-          <input aria-label="选择日语图片" ref={fileInput} type="file" multiple accept="image/png,image/jpeg,image/webp" disabled={busy}
-            onChange={(event) => { chooseFiles(event.target.files); event.target.value = ""; }} /></label>
+        <label className="stage2-field image-file-picker">从设备选择图片<input aria-label="选择日语图片" ref={fileInput} type="file" multiple accept="image/png,image/jpeg,image/webp" disabled={loading || frozen}
+          onChange={(event) => { chooseFiles(event.target.files); event.target.value = ""; }} /></label>
+        <input className="sr-only" aria-label="重新选择未上传图片" ref={replacementInput} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { replaceFile(event.target.files[0]); event.target.value = ""; }} />
         <p className="image-file-hint" id="image-input-help">可多选、拖入或粘贴；每张 PNG、JPEG 或 WebP 最大 12 MB，最多 100 张。</p>
-        {queue.length > 0 && <SourceImageSorter label="照片队列" items={queue.map((entry, index) => ({ id: entry.id, name: fileName(entry, index), src: entry.preview, quarterTurns: entry.quarterTurns, ...itemState(entry) }))}
-          activeId={active?.id} onSelect={setActiveId} onReorder={reorder} onRemove={removeFile} summary={`已完成 ${completedCount} / ${queue.length}`} disabled={busy} />}
-        {active && <div className="image-file-details" aria-label="当前照片信息">
-          <span className="image-file-position">照片 {queue.findIndex((entry) => entry.id === active.id) + 1} / {queue.length}</span>
-          <strong title={fileName(active)}>{fileName(active)}</strong>
-          <span className="image-file-status" role="status">{itemState(active).status}</span>
-          <small className="image-file-meta">{(active.file.size / 1024 / 1024).toFixed(2)} MB{activeCache?.image ? ` · ${activeCache.image.width} × ${activeCache.image.height}` : ""}</small>
-        </div>}
-        {active && <div className="image-import-direction" aria-label="识别前调整图片方向">
-          <div><button type="button" className="button subtle" aria-label="向左旋转90°" disabled={busy} onClick={() => changeDirection(-1)}>↶ 向左旋转</button>
-            <button type="button" className="button subtle" aria-label="向右旋转90°" disabled={busy} onClick={() => changeDirection(1)}>↷ 向右旋转</button></div>
-          <p role="status">{active.quarterTurns ? `当前方向：顺时针 ${active.quarterTurns * 90}°。` : "当前方向：原始方向。"}开始识别时会先保存图片方向，再提取文字。</p>
-        </div>}
-        <div className={`image-import-preview ${dragActive ? "is-dragging" : ""}`}>
-          <button className="image-preview-picker" type="button" aria-label="点击选择或更换图片" aria-describedby="image-input-help" disabled={busy}
-            onClick={() => { if (!pending.current) fileInput.current?.click(); }}>
-            {active ? <><LocalImagePreview key={active.id} entry={active} /><span className="image-preview-change">继续选择图片</span></>
-              : <span className="image-preview-empty"><Icon name="book" size={32} /><span className="image-preview-message">点击选择多张图片</span><small>也可拖入照片，或粘贴截图</small></span>}
-          </button>
-        </div>
+        {queue.length > 0 && <SourceImageSorter label="照片队列" items={queue.map((entry) => ({ id: entry.id, name: entry.name, src: entry.preview || taskImageUrl(entry) || blankPreview, quarterTurns: entry.quarterTurns, ...uploadState(entry) }))}
+          activeId={active?.id} onSelect={setActiveId} onReorder={(ids) => mutate({ itemOrder: ids })} onRemove={remove} summary={`已上传 ${uploadedCount} / ${queue.length}`} disabled={busy || loading || frozen} />}
+        {active && <div className="image-file-details" aria-label="当前照片信息"><span className="image-file-position">照片 {queue.findIndex((entry) => entry.id === active.id) + 1} / {queue.length}</span><strong title={active.name}>{active.name}</strong><span className="image-file-status" role="status">{uploadState(active).status}</span>
+          {!active.imageId && !busy && !frozen && <button type="button" className="button subtle" onClick={() => { replacementId.current = active.id; replacementInput.current?.click(); }}>重新选择这张图片</button>}</div>}
+        {active && <div className="image-import-direction" aria-label="识别前调整图片方向"><div>
+          <button type="button" className="button subtle" aria-label="向左旋转90°" disabled={busy || loading || frozen} onClick={() => mutate({ itemDirections: { [active.id]: turns((active.quarterTurns || 0) - 1) } })}>↶ 向左旋转</button>
+          <button type="button" className="button subtle" aria-label="向右旋转90°" disabled={busy || loading || frozen} onClick={() => mutate({ itemDirections: { [active.id]: turns((active.quarterTurns || 0) + 1) } })}>↷ 向右旋转</button></div>
+          <p role="status">{active.quarterTurns ? `当前方向：顺时针 ${active.quarterTurns * 90}°。` : "当前方向：原始方向。"}提交后保存实际图片方向，再进行识别。</p></div>}
+        <div className={`image-import-preview ${dragActive ? "is-dragging" : ""}`}><button className="image-preview-picker" type="button" aria-label="点击选择或更换图片" aria-describedby="image-input-help" disabled={loading || frozen} onClick={() => fileInput.current?.click()}>
+          {active ? <><ImagePreview key={active.id} entry={active} /><span className="image-preview-change">继续选择图片</span></> : <span className="image-preview-empty"><Icon name="book" size={32} /><span className="image-preview-message">点击选择多张图片</span><small>也可拖入照片，或粘贴截图</small></span>}</button></div>
       </div>
     </div>
   </section>;

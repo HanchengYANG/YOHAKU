@@ -1122,6 +1122,44 @@ async function actorRequest(url, cookie, path, method = "GET", body) {
   return { status: response.status, data };
 }
 
+test("停止服务期间迟到的OAuth身份检查不会撤销已成功保存的授权", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "yohaku-ai-close-callback-"));
+  const injected = services();
+  const { app, ai, close } = createApp({ dataDir, aiServices: injected });
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const url = `http://127.0.0.1:${server.address().port}`;
+  let releaseStatus, reachedStatus, accepted = false, disconnects = 0;
+  const reached = new Promise((resolve) => { reachedStatus = resolve; });
+  const gate = new Promise((resolve) => { releaseStatus = resolve; });
+  const callback = injected.auth.callback, disconnect = injected.auth.disconnect;
+  injected.auth.callback = async (...args) => { await callback(...args); accepted = true; };
+  injected.auth.disconnect = async (...args) => { disconnects++; return disconnect(...args); };
+  injected.state.onStatus = async () => { if (accepted) { reachedStatus(); await gate; } };
+  t.after(async () => {
+    releaseStatus(); close();
+    const ended = new Promise((resolve) => server.close(resolve));
+    server.closeAllConnections(); await ended;
+    await rm(dataDir, { recursive: true, force: true });
+  });
+  await ensureSession(url);
+  const login = await request(url, "/api/ai/login", "POST", {});
+  assert.equal(login.status, 200);
+  const state = new URL(login.data.url).searchParams.get("state");
+  const pending = fetch(`${url}/auth/callback?state=${encodeURIComponent(state)}&code=TEST-ONLY-CLOSE-CODE`, {
+    headers: sessionHeaders(url), redirect: "manual", signal: AbortSignal.timeout(5000),
+  });
+  await reached;
+  close(); releaseStatus();
+  const response = await pending;
+  assert.equal(response.status, 400);
+  assert.equal((await response.text()).includes("TEST-ONLY-CLOSE-CODE"), false);
+  await ai.whenIdle();
+  assert.equal(accepted, true);
+  assert.equal(disconnects, 0);
+  assert.equal(injected.state.connected, true);
+});
+
 test("共享AI：成员可使用拥有者授权，但不能配置AI或访问别人的材料与讨论（AI替身）", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "yohaku-owner-boundary-"));
   const connections = new Map();
@@ -1635,22 +1673,26 @@ test("共享AI全站互斥：成员读图时拥有者不能切换授权，回调
         .status,
       409,
     );
-  // The shared provider lock also covers inference from other website users.
+  // Inference from another website user waits for the same execution slot.
+  // Credential-changing requests above still fail while the slot is occupied.
   const ownerDocument = await createDocument(running.url);
-  assert.equal(
-    (
-      await request(
-        running.url,
-        `/api/documents/${ownerDocument.id}/conversations`,
-        "POST",
-        { question: "拥有者也不能并行使用共享运行时" },
-      )
-    ).status,
-    409,
-  );
+  const ownerQuestion = await prepareChatBody(running.url, ownerCookie,
+    `/api/documents/${ownerDocument.id}/conversations`, "POST",
+    { question: "拥有者的提问也等待共享运行时" });
+  let questionSettled = false;
+  const queuedQuestion = fetch(`${running.url}/api/documents/${ownerDocument.id}/conversations`, {
+    method: "POST", headers: { Cookie: ownerCookie, "Content-Type": "application/json" },
+    body: JSON.stringify(ownerQuestion), signal: AbortSignal.timeout(5000),
+  }).then(async (response) => { questionSettled = true; return { status: response.status, data: await response.json() }; });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(questionSettled, false);
+  assert.equal(connections.get(owner.id).state.calls.length, 0);
   releaseRead();
   assert.equal((await recognition).status, 200);
-  assert.equal(connections.get(owner.id).state.calls.length, 1);
+  assert.equal((await queuedQuestion).status, 201);
+  assert.equal(connections.get(owner.id).state.calls.length, 2);
+  assert.deepEqual(connections.get(owner.id).state.calls[0].schema, OCR_BODY_SCHEMA);
+  assert.equal(connections.get(owner.id).state.calls[1].webSearch, true);
   assert.equal(wrongRuns, 0);
   const pinned = connections.get(owner.id).state.calls[0];
   assert.equal(pinned.expectedAccountId, "account-a");
@@ -1670,7 +1712,7 @@ test("共享AI全站互斥：成员读图时拥有者不能切换授权，回调
   assert.equal(restored.data.connected, true);
   assert.equal(restored.data.activeAccountId, undefined);
   assert.equal(restored.data.subject, undefined);
-  assert.equal(connections.get(owner.id).state.calls.length, 1);
+  assert.equal(connections.get(owner.id).state.calls.length, 2);
   assert.equal(wrongRuns, 0);
   assert.equal(connections.size, 1);
   assert.equal(
@@ -1744,8 +1786,9 @@ test("第三阶段：严格划词引用、同一文章多组持久对话、来�
   assert.equal(unlinked.status, 200);
   const continued = await request(app.url, `/api/conversations/${first.data.id}/messages`, "POST", { groupId, question: "继续游离片段" });
   assert.equal(continued.status, 200);
-  assert.equal(continued.data.groups[0].orphaned, true);
-  assert.equal(continued.data.groups[0].selection.text, "背中");
+  const continuedGroup = continued.data.groups.find((group) => group.id === groupId);
+  assert.equal(continuedGroup.orphaned, true);
+  assert.equal(continuedGroup.selection.text, "背中");
   assert.match(app.state.calls.at(-1).prompt, /背中を撫でる/);
   assert.equal((await request(app.url, `/api/conversations/${first.data.id}`, "DELETE")).status, 204);
   current = (await request(app.url, `/api/documents/${document.id}`)).data;

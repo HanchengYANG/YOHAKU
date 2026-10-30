@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { attachAIRoutes } from "./ai/routes.mjs";
 import { attachAccountRoutes } from "./accounts.mjs";
 import { attachBookRoutes } from "./books.mjs";
+import { attachImageTaskRoutes } from "./image-tasks.mjs";
 import {
   parseText,
   serializeBlocks,
@@ -16,7 +17,7 @@ import {
 import { splitRubyDisplay } from "../shared/ruby-display.mjs";
 import {
   blocksToHtml, htmlToBlocks, normalizeBodyHtml, bodyText, bodyRanges,
-  editBodyText, syncBodyReadings,
+  editBodyText, syncBodyReadings, sourceBodyHtml,
 } from "../shared/article-html.mjs";
 const hashBody = (html) => createHash("sha256").update(bodyText(html)).digest("hex");
 
@@ -179,6 +180,7 @@ export function createApp({
   aiServices,
   mangaOcr,
   ndlOcr,
+  imageTaskOptions = {},
 } = {}) {
   const sites = [publicOrigin, ...publicOrigins.split(",")]
     .filter((value) => value?.trim())
@@ -330,7 +332,7 @@ export function createApp({
       const old = previous.find((image) => image.id === id);
       const storedDraft = database.prepare("SELECT draft_json FROM image_drafts WHERE image_id=? AND user_id=?").get(id, userId);
       if (!storedDraft && !old) throw new HttpError(400, "这张图片尚未完成识别，请先识别再保存草稿。");
-      result.push({ id, recognition: old?.recognition || JSON.parse(storedDraft.draft_json) });
+      result.push(old || { id, recognition: JSON.parse(storedDraft.draft_json) });
     }
     return result;
   }
@@ -367,6 +369,115 @@ export function createApp({
     if (refs.some((id) => !documentId || !readGroup.get(id, userId, documentId)))
       throw new HttpError(400, "正文引用了不属于当前账号或文章的问答组。");
   }
+
+  // Call inside the caller's transaction so task adoption and article changes
+  // commit together. The same validation applies to ordinary article saves.
+  function writeArticle(userId, value, sourceImages, old = null) {
+    const input = validateInput(value, !!old);
+    if (old && input.revision !== old.revision)
+      throw new HttpError(409, "这篇材料已在其他页面修改。请保留当前文字，重新打开最新版本后再保存。");
+    const requestedBookId = value.bookId;
+    if (requestedBookId !== undefined && requestedBookId !== null &&
+        (typeof requestedBookId !== "string" || !requestedBookId))
+      throw new HttpError(400, "请选择有效的书籍。");
+    if (old?.book_id && requestedBookId !== undefined && requestedBookId !== old.book_id)
+      throw new HttpError(409, "这页已经属于一本书，不能通过编辑移动或移出书籍。");
+    const bookId = old?.book_id || requestedBookId || null;
+    if (bookId) books.requireBook(userId, bookId);
+    const previous = old ? fromRow(old) : null;
+    const recognition = sourceImages[0]?.recognition || null;
+    const body = articleBody(input, previous?.blocks || recognition?.annotation?.blocks || recognition?.blocks || [],
+      value.manualReadings, sourceImages, previous?.bodyHtml);
+    const filledSources = new Set(bodyRanges(body.html).sources.filter((source) => source.text.trim()).map((source) => source.id));
+    sourceImages = sourceImages.map((image) => !image.recognition || Object.hasOwn(image, "manualRequired")
+      ? { ...image, manualRequired: !filledSources.has(image.id),
+        ...(!image.recognition && filledSources.has(image.id) ? { origin:"manual" } : {}) } : image);
+    validateQaReferences(body.html, userId, old?.id);
+    const now = new Date().toISOString(), id = old?.id || randomUUID();
+    const position = old?.book_id ? old.page_position : bookId ? database.prepare(
+      "SELECT count(*)+1 AS position FROM documents WHERE book_id=? AND owner_id=?",
+    ).get(bookId, userId).position : null;
+    const fields = [input.title, input.kind, input.orientation, JSON.stringify(body.blocks), body.text,
+      now, bookId, position, body.html, body.hash, JSON.stringify(sourceImages),
+      sourceImages[0]?.id || null, recognition ? JSON.stringify(recognition) : null];
+    if (old) {
+      const updated = database.prepare(`UPDATE documents SET title=?,kind=?,orientation=?,blocks_json=?,plain_text=?,
+        revision=revision+1,updated_at=?,book_id=?,page_position=?,body_html=?,body_hash=?,source_images_json=?,
+        source_image_id=?,recognition_json=? WHERE id=? AND owner_id=? AND revision=?`)
+        .run(...fields, id, userId, input.revision);
+      if (updated.changes !== 1) throw new HttpError(409, "文档版本已更新，请重新打开后再保存。");
+    } else database.prepare(`INSERT INTO documents
+      (title,kind,orientation,blocks_json,plain_text,updated_at,book_id,page_position,body_html,body_hash,
+       source_images_json,source_image_id,recognition_json,id,owner_id,revision,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)`).run(...fields, id, userId, now);
+    if (bookId) books.touch(userId, bookId, now);
+    return fromRow(read.get(id));
+  }
+
+  function validateTaskDestination(userId, { bookId, targetId }) {
+    if (bookId) books.requireBook(userId, bookId);
+    if (!targetId) return {};
+    const target = requireDocument(userId, targetId);
+    if ((target.book_id || null) !== (bookId || null))
+      throw new HttpError(400, "请选择该书籍中的文章。");
+    return { targetRevision: target.revision,
+      existingImageCount: fromRow(target).sourceImages.length };
+  }
+
+  function applyTaskResult({ task, document: value, userId, sourceImages }) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new HttpError(400, "请提供校对后的文章。");
+    const old = value.id ? requireDocument(userId, value.id) : null;
+    if (old && old.id !== task.targetId)
+      throw new HttpError(400, "这不是任务选择的目标文章，请将结果另存为新文章。");
+    const sourceDocument = old || (task.targetId
+      ? database.prepare("SELECT * FROM documents WHERE id=? AND owner_id=?").get(task.targetId, userId) : null);
+    const previous = sourceDocument ? fromRow(sourceDocument).sourceImages : [];
+    const allowed = new Map([...sourceImages, ...previous].map((image) => [image.id, image]));
+    const requested = value.sourceImages;
+    if (!Array.isArray(requested) || !requested.length || requested.length > 100 ||
+        requested.some((image) => !image || typeof image.id !== "string") ||
+        new Set(requested.map((image) => image.id)).size !== requested.length)
+      throw new HttpError(400, "文章来源图片无效，请保留任务中的原图。");
+    // A conflict recovery can copy the current edited article into a new one.
+    // Deleted originals still have owned image files, but their old recognition
+    // metadata is not taken from the client or invented after deletion.
+    if (!old && task.targetId && Array.isArray(requested)) {
+      for (const image of requested) if (image && !allowed.has(image.id) &&
+        database.prepare("SELECT 1 FROM image_owners WHERE image_id=? AND user_id=?").get(image.id, userId))
+        allowed.set(image.id, { id:image.id, recognition:null });
+    }
+    if (requested.some((image) => !allowed.has(image.id)))
+      throw new HttpError(400, "文章来源图片无效，请保留任务中的原图。");
+    if (!requested.some((image) => sourceImages.some((source) => source.id === image.id)))
+      throw new HttpError(400, "请选择至少一张本次任务的图片。");
+    const images = requested.map(({ id }) => {
+      const image = allowed.get(id);
+      const { reviewAnnotations, ...source } = image;
+      const content = reviewAnnotations?.length && value.bodyHtml
+        ? serializeBlocks(htmlToBlocks(sourceBodyHtml(value.bodyHtml, id))) : null;
+      const reviewed = content && reviewAnnotations?.find((result) => result.content === content);
+      const annotation = reviewed?.annotation;
+      return { ...source, recognition: source.recognition
+        ? { ...source.recognition, ...(annotation ? { annotation } : {}) } : null,
+        ...(!source.recognition && annotation ? { annotation } : {}) };
+    });
+    let next = { ...value };
+    if (!old && !next.bookId && next.newBookTitle) {
+      if (typeof next.newBookTitle !== "string" || !next.newBookTitle.trim() || next.newBookTitle.trim().length > 160)
+        throw new HttpError(400, "书名需要填写，最多 160 个字符。");
+      const bookId = randomUUID(), now = new Date().toISOString();
+      database.prepare("INSERT INTO books(id,title,owner_id,revision,created_at,updated_at) VALUES(?,?,?,1,?,?)")
+        .run(bookId, next.newBookTitle.trim(), userId, now, now);
+      next = { ...next, bookId, kind: "book" };
+    }
+    return writeArticle(userId, next, images, old);
+  }
+
+  const imageTasks = attachImageTaskRoutes({ app, database, ai,
+    applyResult: applyTaskResult, validateDestination: validateTaskDestination,
+    getAppliedDocument: (userId, id) => fromRow(requireDocument(userId, id)), ...imageTaskOptions });
+  ai.setImageMutationGuard(imageTasks.assertImageMutable);
 
   app.get("/api/health", async (req, res) => {
     const authorization = await ai.statusForUser(req.user?.id);
@@ -411,52 +522,10 @@ export function createApp({
   });
 
   app.post("/api/documents", async (req, res) => {
-    const input = validateInput(req.body);
-    const bookId = req.body.bookId ?? undefined;
-    if (bookId !== undefined && (typeof bookId !== "string" || !bookId))
-      throw new HttpError(400, "请选择有效的书籍。");
-    if (bookId !== undefined) books.requireBook(req.user.id, bookId);
+    validateInput(req.body);
     const sourceImages = await articleImages(req.user.id, req.body);
-    const sourceImageId = sourceImages[0]?.id || null;
-    const recognition = sourceImages[0]?.recognition || null;
-    const body = articleBody(input, recognition?.annotation?.blocks || recognition?.blocks || [], req.body.manualReadings, sourceImages);
-    const blocks = body.blocks;
-    validateQaReferences(body.html, req.user.id, null);
-    const id = randomUUID();
-    const now = new Date().toISOString();
-    books.transaction(() => {
-      if (bookId !== undefined) books.requireBook(req.user.id, bookId);
-      const position = bookId === undefined ? null : database.prepare(
-        "SELECT count(*)+1 AS position FROM documents WHERE book_id=? AND owner_id=?",
-      ).get(bookId, req.user.id).position;
-      database
-        .prepare(
-          `INSERT INTO documents
-        (id, title, kind, orientation, blocks_json, plain_text, revision, created_at, updated_at, owner_id,
-         source_image_id, recognition_json, book_id, page_position, body_html, body_hash, source_images_json)
-        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          id,
-          input.title,
-          input.kind,
-          input.orientation,
-          JSON.stringify(blocks),
-          plainText(blocks),
-          now,
-          now,
-          req.user.id,
-          sourceImageId,
-          recognition ? JSON.stringify(recognition) : null,
-          bookId ?? null,
-          position,
-          body.html,
-          body.hash,
-          JSON.stringify(sourceImages),
-        );
-      if (bookId !== undefined) books.touch(req.user.id, bookId, now);
-    });
-    res.status(201).json(fromRow(read.get(id)));
+    const result = books.transaction(() => writeArticle(req.user.id, req.body, sourceImages));
+    res.status(201).json(result);
   });
 
   app.get("/api/documents/:id", (req, res) =>
@@ -466,60 +535,11 @@ export function createApp({
   app.put("/api/documents/:id", async (req, res) => {
     const old = requireDocument(req.user.id, req.params.id);
     const input = validateInput(req.body, true);
-    if (input.revision !== old.revision) {
-      throw new HttpError(
-        409,
-        "这篇材料已在其他页面修改。请保留当前文字，重新打开最新版本后再保存。",
-      );
-    }
-    const requestedBookId = req.body.bookId;
-    if (requestedBookId !== undefined && requestedBookId !== null &&
-        (typeof requestedBookId !== "string" || !requestedBookId))
-      throw new HttpError(400, "请选择有效的书籍。");
-    if (old.book_id && requestedBookId !== undefined && requestedBookId !== old.book_id)
-      throw new HttpError(409, "这页已经属于一本书，不能通过编辑移动或移出书籍。");
-    const bookId = old.book_id || requestedBookId || null;
-    if (bookId) books.requireBook(req.user.id, bookId);
-    const previous = fromRow(old);
-    const sourceImages = await articleImages(req.user.id, req.body, previous.sourceImages);
-    const body = articleBody(input, previous.blocks, req.body.manualReadings, sourceImages, previous.bodyHtml);
-    const blocks = body.blocks;
-    validateQaReferences(body.html, req.user.id, old.id);
-    books.transaction(() => {
-      if (bookId) books.requireBook(req.user.id, bookId);
-      const position = old.book_id ? old.page_position : bookId ? database.prepare(
-        "SELECT count(*)+1 AS position FROM documents WHERE book_id=? AND owner_id=?",
-      ).get(bookId, req.user.id).position : null;
-      const result = database
-        .prepare(
-          `UPDATE documents SET title = ?, kind = ?, orientation = ?,
-        blocks_json = ?, plain_text = ?, revision = revision + 1, updated_at = ?,
-        book_id = ?, page_position = ?, body_html = ?, body_hash = ?, source_images_json = ?,
-        source_image_id = ?, recognition_json = ?
-        WHERE id = ? AND revision = ?`,
-        )
-        .run(
-          input.title,
-          input.kind,
-          input.orientation,
-          JSON.stringify(blocks),
-          plainText(blocks),
-          new Date().toISOString(),
-          bookId,
-          position,
-          body.html,
-          body.hash,
-          JSON.stringify(sourceImages),
-          sourceImages[0]?.id || null,
-          sourceImages[0]?.recognition ? JSON.stringify(sourceImages[0].recognition) : null,
-          old.id,
-          input.revision,
-        );
-      if (result.changes !== 1)
-        throw new HttpError(409, "文档版本已更新，请重新打开后再保存。");
-      if (bookId) books.touch(req.user.id, bookId);
-    });
-    res.json(fromRow(read.get(old.id)));
+    if (input.revision !== old.revision)
+      throw new HttpError(409, "这篇材料已在其他页面修改。请保留当前文字，重新打开最新版本后再保存。");
+    const sourceImages = await articleImages(req.user.id, req.body, fromRow(old).sourceImages);
+    const result = books.transaction(() => writeArticle(req.user.id, req.body, sourceImages, old));
+    res.json(result);
   });
 
   app.delete("/api/documents/:id", (req, res) => {
@@ -605,12 +625,28 @@ export function createApp({
     });
   });
 
+  let closed = false;
+  function close() {
+    if (closed) return;
+    closed = true;
+    imageTasks.close();
+    ai.close();
+    database.close();
+  }
+  async function shutdown({ beforeClose = Promise.resolve() } = {}) {
+    if (closed) return;
+    imageTasks.close();
+    ai.close();
+    await imageTasks.drain();
+    await ai.whenIdle?.();
+    await beforeClose;
+    close();
+  }
   return {
     app,
     ai,
-    close: () => {
-      ai.close();
-      database.close();
-    },
+    imageTasks,
+    close,
+    shutdown,
   };
 }

@@ -5,6 +5,7 @@ import { randomUUID, createHash } from "node:crypto";
 import multer from "multer";
 import { PROVIDERS, createProviderConnection } from "../providers/index.mjs";
 import { createImageStore } from "./images.mjs";
+import { createOperationQueue } from "./operation-queue.mjs";
 import { createMangaOcr } from "../ocr/manga.mjs";
 import { createNdlOcr } from "../ocr/ndl.mjs";
 import {
@@ -47,7 +48,12 @@ export function attachAIRoutes({
 } = {}) {
   const connections = new Map(),
     pendingLogins = new Map(),
-    operations = new Set();
+    operations = new Set(), queues = new Map(), imageMutations = new Map();
+  let closed = false, imageMutationGuard = () => {};
+  function assertOpen(signal) {
+    if (closed) throw Object.assign(fail(503, "AI 服务正在停止，请稍后重试。"), { code: "AI_STOPPED" });
+    signal?.throwIfAborted();
+  }
   const images = createImageStore({ storageDir: join(storageDir, "images") });
   database.exec(`
     CREATE TABLE IF NOT EXISTS image_drafts (image_id TEXT PRIMARY KEY, draft_json TEXT NOT NULL, user_id TEXT);
@@ -129,18 +135,27 @@ export function attachAIRoutes({
     }
     return connections.get(key);
   }
-  async function withProvider(userId, providerId, work) {
+  async function withProvider(userId, providerId, work, options = {}) {
+    assertOpen(options.signal);
     const key = `${siteOwner()}:${providerId}`;
-    const provider = connection(userId, providerId);
-    if (operations.has(key) || provider.runtime.status().busy)
-      throw fail(409, "AI 正在处理请求，请完成后重试。");
-    operations.add(key);
-    try {
-      return await work(provider);
-    } finally {
-      operations.delete(key);
-    }
+    if (!queues.has(key)) queues.set(key, createOperationQueue());
+    if (options.wait === false && (operations.has(key) || connection(userId, providerId).runtime.status().busy))
+      throw Object.assign(fail(409, "AI 正在处理请求，请完成后重试。"), { code: "AI_BUSY" });
+    return queues.get(key).run(async () => {
+      assertOpen(options.signal);
+      const provider = connection(userId, providerId);
+      if (provider.runtime.status().busy)
+        throw Object.assign(fail(409, "AI 正在处理请求，请完成后重试。"), { code: "AI_BUSY" });
+      operations.add(key);
+      try { return await work(provider); }
+      catch (error) {
+        if ([401, 403].includes(error.status)) error.code = "AI_AUTH_REQUIRED";
+        throw error;
+      } finally { operations.delete(key); }
+    }, options);
   }
+  const withManagementProvider = (userId, providerId, work) =>
+    withProvider(userId, providerId, work, { wait: false });
   function forgetPending(userId, providerId) {
     for (const [state, attempt] of pendingLogins) {
       if (attempt.userId === userId && attempt.providerId === providerId)
@@ -148,8 +163,9 @@ export function attachAIRoutes({
     }
   }
   function ensureBinding(userId, providerId, status) {
+    assertOpen();
     if (!status.connected)
-      throw fail(503, "网站 AI 尚未连接，请联系网站拥有者完成授权。");
+      throw Object.assign(fail(503, "网站 AI 尚未连接，请联系网站拥有者完成授权。"), { code: "AI_AUTH_REQUIRED" });
     const subject = status.subject,
       accountId = status.activeAccountId || status.id;
     if (
@@ -158,7 +174,7 @@ export function attachAIRoutes({
       typeof accountId !== "string" ||
       !accountId
     )
-      throw fail(503, "无法确认授权身份，请重新授权。");
+      throw Object.assign(fail(503, "无法确认授权身份，请重新授权。"), { code: "AI_AUTH_REQUIRED" });
     database
       .prepare(
         "INSERT INTO provider_bindings(provider_id,subject,user_id) VALUES(?,?,?) ON CONFLICT(provider_id,subject) DO UPDATE SET user_id=excluded.user_id",
@@ -168,6 +184,7 @@ export function attachAIRoutes({
   }
   async function identity(provider) {
     const account = await provider.auth.status();
+    assertOpen();
     return {
       provider,
       accountId: ensureBinding(siteOwner(), provider.id, account),
@@ -178,6 +195,7 @@ export function attachAIRoutes({
     if (!userId) return { connected: false, requiresLogin: true };
     const provider = connection(userId),
       account = await provider.auth.status();
+    assertOpen();
     let bindingError;
     if (account.connected)
       try {
@@ -200,6 +218,7 @@ export function attachAIRoutes({
         ? "网站 AI 尚未连接，请联系网站拥有者。" : null,
     };
     const accounts = await provider.auth.accounts();
+    assertOpen();
     return {
       shared: true,
       canManageAI: true,
@@ -218,6 +237,7 @@ export function attachAIRoutes({
     };
   }
   function getDocument(userId, id) {
+    assertOpen();
     const row = database
       .prepare("SELECT * FROM documents WHERE id=? AND owner_id=?")
       .get(id, userId);
@@ -225,6 +245,7 @@ export function attachAIRoutes({
     return row;
   }
   async function getImage(userId, id) {
+    assertOpen();
     const owner = database
       .prepare("SELECT user_id FROM image_owners WHERE image_id=?")
       .get(id);
@@ -234,6 +255,7 @@ export function attachAIRoutes({
     )
       throw fail(404, "找不到你账号下的这张图片。");
     const image = await images.get(id);
+    assertOpen();
     if (!owner)
       database
         .prepare(
@@ -257,6 +279,12 @@ export function attachAIRoutes({
       lastError: row.last_error, createdAt: row.created_at, updatedAt: row.updated_at };
   }
 
+  app.use((req, res, next) => {
+    const controller = new AbortController();
+    req.aiSignal = controller.signal;
+    res.once("close", () => controller.abort());
+    next();
+  });
   app.get("/api/providers", (req, res) =>
     res.json({
       providers: PROVIDERS,
@@ -267,7 +295,7 @@ export function attachAIRoutes({
     const next = req.body?.providerId;
     if (!PROVIDERS.some((p) => p.id === next && p.enabled))
       throw fail(501, "这个提供方仅预留接口，目前尚未实现。");
-    await withProvider(req.user.id, preferred(), async () => {
+    await withManagementProvider(req.user.id, preferred(), async () => {
       database
         .prepare(
           "INSERT INTO user_providers(user_id,provider_id) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET provider_id=excluded.provider_id",
@@ -280,7 +308,7 @@ export function attachAIRoutes({
     res.json(await statusForUser(req.user.id)),
   );
   app.post("/api/ai/login", requireOwner, async (req, res) => {
-    await withProvider(
+    await withManagementProvider(
       req.user.id,
       preferred(),
       async (provider) => {
@@ -310,7 +338,7 @@ export function attachAIRoutes({
     try {
       if (!attempt || attempt.userId !== siteOwner() || attempt.expiresAt < Date.now())
         throw fail(400, "授权请求已过期。");
-      await withProvider(
+      await withManagementProvider(
         attempt.userId,
         attempt.providerId,
         async (provider) => {
@@ -332,11 +360,13 @@ export function attachAIRoutes({
               await provider.auth.status(),
             );
           } catch (cause) {
+            if (closed) throw cause;
             provider.runtime.stop();
             if (accepted) {
               // A successful OAuth identity must still satisfy the website binding.
               // Revoke/clear a conflicting new grant before restoring a valid old one.
               await provider.auth.disconnect().catch(() => {});
+              assertOpen();
               const oldOwner =
                 previous.subject &&
                 database
@@ -371,7 +401,7 @@ export function attachAIRoutes({
     }
   });
   app.post("/api/ai/claim-existing", requireOwner, async (req, res) => {
-    await withProvider(req.user.id, "openai", async (provider) => {
+    await withManagementProvider(req.user.id, "openai", async (provider) => {
       const current = await provider.auth.status();
       if (
         current.connected ||
@@ -411,7 +441,7 @@ export function attachAIRoutes({
     });
   });
   app.post("/api/ai/logout", requireOwner, async (req, res) => {
-    await withProvider(
+    await withManagementProvider(
       req.user.id,
       preferred(),
       async (provider) => {
@@ -419,6 +449,7 @@ export function attachAIRoutes({
         const account = await provider.auth.status();
         provider.runtime.stop();
         const result = await provider.auth.disconnect();
+        assertOpen();
         if (account.subject)
           database
             .prepare(
@@ -430,7 +461,7 @@ export function attachAIRoutes({
     );
   });
   app.post("/api/ai/account", requireOwner, async (req, res) => {
-    await withProvider(
+    await withManagementProvider(
       req.user.id,
       preferred(),
       async (provider) => {
@@ -441,16 +472,34 @@ export function attachAIRoutes({
       },
     );
   });
+  async function saveImage(userId, buffer, metadata) {
+    assertOpen();
+    const image = await images.save(buffer, metadata);
+    assertOpen();
+    database.prepare("INSERT INTO image_owners(image_id,user_id) VALUES(?,?)")
+      .run(image.id, userId);
+    return publicImage(image);
+  }
+  async function rotateImage(userId, id, direction, { taskId, internal = false } = {}) {
+    assertOpen();
+    imageMutations.set(id, (imageMutations.get(id) || 0) + 1);
+    try {
+      await getImage(userId, id);
+      assertOpen();
+      if (!internal) await imageMutationGuard({ userId, imageId: id, taskId });
+      assertOpen();
+      return publicImage(await images.rotate(id, direction));
+    } finally {
+      const remaining = imageMutations.get(id) - 1;
+      if (remaining) imageMutations.set(id, remaining);
+      else imageMutations.delete(id);
+    }
+  }
   app.post("/api/images", upload.single("image"), async (req, res) => {
     if (!req.file) throw fail(400, "请选择一张 PNG、JPEG 或 WebP 图片。");
-    const image = await images.save(req.file.buffer, {
-      mimeType: req.file.mimetype,
-      originalName: req.file.originalname,
-    });
-    database
-      .prepare("INSERT INTO image_owners(image_id,user_id) VALUES(?,?)")
-      .run(image.id, req.user.id);
-    res.status(201).json(publicImage(image));
+    res.status(201).json(await saveImage(req.user.id, req.file.buffer, {
+      mimeType: req.file.mimetype, originalName: req.file.originalname,
+    }));
   });
   app.get("/api/images/:id/raw", async (req, res) => {
     const image = await getImage(req.user.id, req.params.id);
@@ -463,20 +512,22 @@ export function attachAIRoutes({
     res.json(publicImage(await getImage(req.user.id, req.params.id)));
   });
   app.post("/api/images/:id/rotate", async (req, res) => {
-    await getImage(req.user.id, req.params.id);
-    const image = await images.rotate(req.params.id, {
-      quarterTurns: req.body?.quarterTurns,
-      revision: req.body?.revision,
-    });
-    res.json(publicImage(image));
+    res.json(await rotateImage(req.user.id, req.params.id, {
+      quarterTurns: req.body?.quarterTurns, revision: req.body?.revision,
+    }));
   });
-  app.post("/api/images/:id/recognize", async (req, res) => {
-    const engine = req.body?.engine ?? "llm";
+  async function recognizeImage(userId, id, {
+    engine = "llm", priority = "interactive", persist = true, expectedRevision, signal,
+  } = {}) {
+    assertOpen(signal);
     if (!["llm", "manga", "ndl"].includes(engine))
       throw fail(400, "请选择有效的识别方式。");
-    const image = await getImage(req.user.id, req.params.id);
-    await withProvider(
-      req.user.id,
+    const image = await getImage(userId, id);
+    assertOpen(signal);
+    if (expectedRevision !== undefined && expectedRevision !== image.revision)
+      throw fail(409, "图片方向已变化，请重新打开任务后再识别。");
+    return withProvider(
+      userId,
       preferred(),
       async (provider) => {
         const { accountId, expectedSubject } = await identity(provider);
@@ -491,6 +542,7 @@ export function attachAIRoutes({
             revision: image.revision,
           });
         }
+        assertOpen(signal);
         const llmStarted = performance.now();
         const result = await provider.runtime.run({
           prompt: localResult ? buildOcrCorrectionPrompt(localResult) : OCR_TRANSCRIPTION_PROMPT,
@@ -500,10 +552,11 @@ export function attachAIRoutes({
           expectedAccountId: accountId,
           expectedSubject,
         });
+        assertOpen(signal);
         const llmMs = Math.round(performance.now() - llmStarted);
         if (result.completed !== true)
           throw fail(502, "AI 识别未完成，未保存部分输出。");
-        if ((await getImage(req.user.id, image.id)).revision !== image.revision)
+        if ((await getImage(userId, image.id)).revision !== image.revision)
           throw fail(409, "识别期间原图方向已变化，请按当前方向重新识别。");
         let draft;
         try {
@@ -544,24 +597,32 @@ export function attachAIRoutes({
           reasoningEffort: result.reasoningEffort ?? null,
           providerId: provider.id,
         };
-        database
+        assertOpen(signal);
+        if (persist) database
           .prepare(
             "INSERT INTO image_drafts(image_id,draft_json,user_id) VALUES(?,?,?) ON CONFLICT(image_id) DO UPDATE SET draft_json=excluded.draft_json,user_id=excluded.user_id",
           )
-          .run(image.id, JSON.stringify(draft), req.user.id);
-        res.json(draft);
+          .run(image.id, JSON.stringify(draft), userId);
+        return draft;
       },
+      { priority, signal },
     );
-  });
-  app.post("/api/images/:id/annotate", async (req, res) => {
-    const image = await getImage(req.user.id, req.params.id);
-    await withProvider(req.user.id, preferred(), async (provider) => {
+  }
+  async function annotateImage(userId, id, {
+    content, manualReadings = [], priority = "interactive", persist = true,
+    draft: suppliedDraft, expectedRevision, signal,
+  } = {}) {
+    assertOpen(signal);
+    const image = await getImage(userId, id);
+    assertOpen(signal);
+    if (expectedRevision !== undefined && expectedRevision !== image.revision)
+      throw fail(409, "图片方向已变化，请重新打开任务后再注音。");
+    return withProvider(userId, preferred(), async (provider) => {
       const { accountId, expectedSubject } = await identity(provider);
       const row = database.prepare("SELECT draft_json FROM image_drafts WHERE image_id=? AND user_id=?")
-        .get(req.params.id, req.user.id);
-      if (!row) throw fail(400, "请先完成正文识别与校对，再单独生成注音。");
-      const draft = JSON.parse(row.draft_json);
-      const { content, manualReadings = [] } = req.body || {};
+        .get(id, userId);
+      if (!suppliedDraft && !row) throw fail(400, "请先完成正文识别与校对，再单独生成注音。");
+      const draft = suppliedDraft || JSON.parse(row.draft_json);
       if (typeof content !== "string" || !content.trim() || content.length > 600000)
         throw fail(400, "请提供有效的待注音正文。");
       let blocks;
@@ -602,14 +663,16 @@ export function attachAIRoutes({
           normalizeOrientation: true,
           revision: image.revision,
         });
+        assertOpen(signal);
         result = await provider.runtime.run({
           prompt: buildOcrAnnotationPrompt(blocks), schema: ANNOTATION_SCHEMA,
           image: `data:${image.mimeType};base64,${pixels.toString("base64")}`,
           reasoningEffort: OCR_REASONING_EFFORT,
           expectedAccountId: accountId, expectedSubject,
         });
+        assertOpen(signal);
         if (result.completed !== true) throw fail(502, "注音未完成，正文和已有读音保持原样。");
-        if ((await getImage(req.user.id, image.id)).revision !== image.revision)
+        if ((await getImage(userId, image.id)).revision !== image.revision)
           throw fail(409, "注音期间原图方向已变化，请按当前图片重试；正文和已有读音保持原样。");
         try {
           blocks = applyOcrAnnotations(JSON.parse(result.text), blocks);
@@ -627,14 +690,28 @@ export function attachAIRoutes({
       const annotated = { ...draft, annotation,
         processing: { ...draft.processing, annotationMs: elapsedMs },
       };
-      const changed = database.prepare("UPDATE image_drafts SET draft_json=? WHERE image_id=? AND user_id=? AND draft_json=?")
-        .run(JSON.stringify(annotated), req.params.id, req.user.id, row.draft_json);
-      if (changed.changes !== 1) throw fail(409, "正文草稿已变化，请重新打开当前草稿后再注音。");
-      res.json({ ...annotated, blocks, content: annotation.content,
+      assertOpen(signal);
+      if (persist) {
+        const changed = database.prepare("UPDATE image_drafts SET draft_json=? WHERE image_id=? AND user_id=? AND draft_json=?")
+          .run(JSON.stringify(annotated), id, userId, row?.draft_json);
+        if (changed.changes !== 1) throw fail(409, "正文草稿已变化，请重新打开当前草稿后再注音。");
+      }
+      return { ...annotated, blocks, content: annotation.content,
         annotationElapsedMs: elapsedMs, annotationModel: annotation.model,
         annotationReasoningEffort: annotation.reasoningEffort,
-      });
-    });
+      };
+    }, { priority, signal });
+  }
+  app.post("/api/images/:id/recognize", async (req, res) => {
+    res.json(await recognizeImage(req.user.id, req.params.id, {
+      engine: req.body?.engine, signal: req.aiSignal,
+    }));
+  });
+  app.post("/api/images/:id/annotate", async (req, res) => {
+    res.json(await annotateImage(req.user.id, req.params.id, {
+      content: req.body?.content, manualReadings: req.body?.manualReadings,
+      signal: req.aiSignal,
+    }));
   });
   function questionInput(body) {
     const operation = body?.operation || "custom";
@@ -696,6 +773,7 @@ export function attachAIRoutes({
         const suppliedSources = Array.isArray(req.body.sourceImages) ? req.body.sourceImages : [];
         if (!suppliedSources.some((image) => image.id === source.id)) throw fail(400, "草稿引用了不属于本文的来源图片。");
         await getImage(req.user.id, source.id);
+        assertOpen(req.aiSignal);
         const draft = database.prepare("SELECT image_id FROM image_drafts WHERE image_id=? AND user_id=?").get(source.id, req.user.id);
         if (!draft) throw fail(400, "请先识别追加的来源图片。");
       }
@@ -713,6 +791,7 @@ export function attachAIRoutes({
         const split = async (part) => {
           if (!part.trim()) return [part];
           const result = await provider.runtime.run({ prompt: sentencePrompt(part), schema: SENTENCE_SCHEMA, expectedAccountId: accountId, expectedSubject, webSearch: false });
+          assertOpen(req.aiSignal);
           if (result.completed !== true) throw fail(502, "分句未完成，现有正文已保留。");
           try { return validateSentences(JSON.parse(result.text), part); } catch (error) { throw fail(502, error.expose ? error.message : "分句返回格式无效，现有正文已保留，请重试。"); }
         };
@@ -725,8 +804,9 @@ export function attachAIRoutes({
           }
           if (offset < text.length) fragments.push(...await split(text.slice(offset)));
         }
+        assertOpen(req.aiSignal);
         database.prepare("INSERT INTO sentence_cache VALUES(?,?) ON CONFLICT(body_hash) DO UPDATE SET fragments_json=excluded.fragments_json").run(hash, JSON.stringify(fragments));
-      });
+      }, { signal: req.aiSignal });
       next = force ? applySentenceBoundaries(html, fragments) : initializeSentenceBoundaries(html, fragments);
 
     }
@@ -754,6 +834,7 @@ export function attachAIRoutes({
     const activeRecord = record.account_id === expected.expectedAccountId && record.provider_id === provider.id ? record : { ...record, thread_id: null };
     try {
       const result = await provider.runtime.run({ prompt: promptFor(row, selection, input.question, activeRecord), threadId: activeRecord.thread_id, webSearch: true, ...expected });
+      assertOpen(req.aiSignal);
       if (result.completed !== true) throw fail(502, "AI 回答未完成，未把部分输出存成答案。");
       const current = database.prepare("SELECT * FROM conversations WHERE id=? AND user_id=?").get(record.id, req.user.id);
       if (!current || !database.prepare("SELECT id FROM qa_groups WHERE id=? AND conversation_id=? AND user_id=?").get(group.id, record.id, req.user.id)) throw fail(409, "对话已删除，本次迟到结果未恢复对话。");
@@ -763,7 +844,7 @@ export function attachAIRoutes({
       database.prepare("UPDATE conversations SET thread_id=?,messages_json=?,last_error=NULL,document_revision=?,updated_at=?,account_id=?,provider_id=? WHERE id=? AND user_id=?").run(result.threadId, JSON.stringify(messages), row.revision, at, expected.expectedAccountId, provider.id, record.id, req.user.id);
       return presentConversation(database.prepare("SELECT * FROM conversations WHERE id=? AND user_id=?").get(record.id, req.user.id));
     } catch (cause) {
-      database.prepare("UPDATE conversations SET last_error=?,updated_at=? WHERE id=? AND user_id=?").run(cause.message, new Date().toISOString(), record.id, req.user.id);
+      if (!closed) database.prepare("UPDATE conversations SET last_error=?,updated_at=? WHERE id=? AND user_id=?").run(cause.message, new Date().toISOString(), record.id, req.user.id);
       throw cause;
     }
   }
@@ -789,7 +870,7 @@ export function attachAIRoutes({
       record = database.prepare("SELECT * FROM conversations WHERE id=? AND user_id=?").get(id, req.user.id);
       const group = database.prepare("SELECT * FROM qa_groups WHERE id=?").get(groupId);
       res.status(created ? 201 : 200).json(await answer(req, row, record, group, input, provider, { expectedAccountId: accountId, expectedSubject }));
-    });
+    }, { signal: req.aiSignal });
   });
   app.post("/api/conversations/:id/messages", async (req, res) => {
     await withProvider(req.user.id, preferred(), async (provider) => {
@@ -799,7 +880,7 @@ export function attachAIRoutes({
       if (!group) throw fail(400, "请选择要继续追问的问答组。");
       const { accountId, expectedSubject } = await identity(provider), input = questionInput({ ...req.body, operation: req.body?.operation || "followup" });
       res.json(await answer(req, getDocument(req.user.id, record.document_id), record, group, input, provider, { expectedAccountId: accountId, expectedSubject }));
-    });
+    }, { signal: req.aiSignal });
   });
   app.delete("/api/conversations/:id", (req, res) => {
     const record = database.prepare("SELECT * FROM conversations WHERE id=? AND user_id=?").get(req.params.id, req.user.id);
@@ -816,9 +897,15 @@ export function attachAIRoutes({
     res.status(204).end();
   });
   return {
-    getImage,
+    getImage, saveImage, rotateImage, recognizeImage, annotateImage,
+    setImageMutationGuard: (guard) => { imageMutationGuard = guard; },
+    isImageMutating: (id) => imageMutations.has(id),
     statusForUser,
+    whenIdle: () => Promise.all([...queues.values()].map((queue) => queue.whenIdle())),
     close: () => {
+      if (closed) return;
+      closed = true;
+      for (const queue of queues.values()) queue.close();
       pendingLogins.clear();
       operations.clear();
       for (const provider of connections.values()) provider.close();

@@ -1,5 +1,5 @@
 // XMLHttpRequest exposes actual upload bytes; model requests still use fetch.
-export default function uploadImage(body, { signal, onProgress } = {}) {
+export default function uploadImage(body, { signal, onProgress, path = "/images" } = {}) {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
     let settled = false;
@@ -20,7 +20,7 @@ export default function uploadImage(body, { signal, onProgress } = {}) {
       finish(new DOMException("图片上传已取消。", "AbortError"));
       return;
     }
-    request.open("POST", "/api/images");
+    request.open("POST", `/api${path}`);
     request.timeout = 120000;
     request.upload.onprogress = (event) => {
       onProgress?.(event.lengthComputable && event.total > 0
@@ -34,7 +34,7 @@ export default function uploadImage(body, { signal, onProgress } = {}) {
       if (result?.code === "WEBSITE_AUTH_REQUIRED")
         window.dispatchEvent(new Event("yohaku:session-expired"));
       if (request.status < 200 || request.status >= 300) {
-        finish(new Error(result?.error || "图片上传未完成，请重试。"));
+        finish(Object.assign(new Error(result?.error || "图片上传未完成，请重试。"), { status: request.status, code: result?.code }));
       } else if (typeof result?.id !== "string") {
         finish(new Error("图片上传结果无效，请重试。"));
       } else finish(null, result);

@@ -9,6 +9,7 @@ import Reader from "./components/Reader.jsx";
 import Editor from "./components/Editor.jsx";
 import AISettings from "./components/AISettings.jsx";
 import ImageImport from "./components/ImageImport.jsx";
+import { TaskList, TaskDetail } from "./components/ImageTasks.jsx";
 import DocumentChat from "./components/DocumentChat.jsx";
 import AccountGate from "./components/AccountGate.jsx";
 import UserMenu from "./components/UserMenu.jsx";
@@ -104,6 +105,7 @@ function Workspace({ user, onLoggedOut }) {
   const [book, setBook] = useState(null);
   const [importBookId, setImportBookId] = useState(null);
   const [importSession, setImportSession] = useState(0);
+  const [importTask, setImportTask] = useState(null);
   const [chatRequest, setChatRequest] = useState(null);
   const [selectedGroupIds, setSelectedGroupIds] = useState(null);
   const [appendTargetId, setAppendTargetId] = useState(null);
@@ -122,7 +124,9 @@ function Workspace({ user, onLoggedOut }) {
   const [editorSession, setEditorSession] = useState(0);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [saveFailure, setSaveFailure] = useState(null);
   const [notice, setNotice] = useState("");
+  const [taskCounts, setTaskCounts] = useState({});
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showRuby, setShowRuby] = useState(true);
   const [fontSize, setFontSize] = useState(26);
@@ -138,7 +142,34 @@ function Workspace({ user, onLoggedOut }) {
   const pendingSegmentations = useRef(new Map());
   const automaticSegmentationAttempt = useRef(null);
   const currentView = useRef(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; importRequest.current++; editRequest.current++; };
+  }, []);
   currentView.current = {activeId, panel, editorSession};
+
+  useEffect(() => {
+    let stopped = false, timer, controller, sequence = 0;
+    const poll = async () => {
+      clearTimeout(timer);
+      if (stopped || window.document.visibilityState === "hidden") return;
+      const current = ++sequence;
+      controller?.abort(); controller = new AbortController();
+      try {
+        const result = await api("/image-tasks?limit=1", { signal:controller.signal });
+        if (!stopped && current === sequence) setTaskCounts(result.counts || {});
+      } catch { /* Task views display connection errors without interrupting reading. */ }
+      finally { if (!stopped && current === sequence) timer = setTimeout(poll, 5000); }
+    };
+    const visible = () => {
+      if (window.document.visibilityState === "hidden") { sequence++; clearTimeout(timer); controller?.abort(); }
+      else void poll();
+    };
+    void poll(); window.document.addEventListener("visibilitychange", visible); window.addEventListener("online", poll);
+    return () => { stopped = true; clearTimeout(timer); controller?.abort();
+      window.document.removeEventListener("visibilitychange", visible); window.removeEventListener("online", poll); };
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -175,7 +206,7 @@ function Workspace({ user, onLoggedOut }) {
   }, [query, refresh]);
 
   useEffect(() => {
-    if (!activeId) {
+    if (!activeId || activeId === "tasks" || activeId.startsWith("tasks/")) {
       setDocument(null);
       setBook(null);
       setDetailLoading(false);
@@ -345,7 +376,10 @@ function Workspace({ user, onLoggedOut }) {
     if (name === "settings" && !user.isAdmin) return;
     if (!mayLeave()) return;
     importRequest.current++;
-    if (name === "image") setImportSession((current) => current + 1);
+    if (name === "image") {
+      setImportSession((current) => current + 1);
+      setImportTask(null);
+    }
     setDraft(null);
     setPanel(name);
     setDirty(false);
@@ -361,11 +395,30 @@ function Workspace({ user, onLoggedOut }) {
     setPanel(null);
     setDirty(false);
   };
+  const taskCreated = (task) => {
+    if (!mounted.current) return;
+    setImportTask(task);
+    setActiveId(`tasks/${task.id}`);
+    history.replaceState(null, "", `#tasks/${task.id}`);
+  };
+  const taskSubmitted = (task) => {
+    if (!mounted.current) return;
+    taskCreated(task);
+    setPanel(null);
+    setDirty(false);
+    setNotice("任务已提交，可以离开此页面");
+  };
+  const resumeTaskDraft = (task) => {
+    setImportTask(task);
+    setImportSession((current) => current + 1);
+    setPanel("image");
+    setDirty(false);
+  };
   const imageReady = async (value) => {
     const request = ++importRequest.current;
     const view = currentView.current;
-    const isCurrent = () => request === importRequest.current &&
-      currentView.current.panel === "image" &&
+    const isCurrent = () => mounted.current && request === importRequest.current &&
+      (currentView.current.panel === "image" || currentView.current.activeId.startsWith("tasks/")) &&
       currentView.current.activeId === view.activeId &&
       currentView.current.editorSession === view.editorSession;
     try {
@@ -385,17 +438,33 @@ function Workspace({ user, onLoggedOut }) {
       if (targetId) {
         await pendingSegmentations.current.get(targetId)?.catch(() => {});
         if (!isCurrent()) return;
-        const target = await api(`/documents/${encodeURIComponent(targetId)}`);
+        let target;
+        try { target = await api(`/documents/${encodeURIComponent(targetId)}`); }
+        catch (error) {
+          if (error.status !== 404) throw error;
+          if (!isCurrent()) return;
+          setNotice("原目标文章已删除，识别结果已保留，可另存为新文章");
+        }
         if (!isCurrent()) return;
-        const previousImages = target.sourceImages || (target.sourceImageId ? [{id:target.sourceImageId}] : []);
-        if (previousImages.length + images.length > 100) throw new Error("每篇文章最多保存 100 张图片，请选择另一篇文章或新建文章。");
-        const bodyHtml = appendImageBodyHtml(target.bodyHtml || blocksToHtml(target.blocks, {sourceImageId:target.sourceImageId}), addition);
-        next = { ...target, bodyHtml, content:serializeBlocks(htmlToBlocks(bodyHtml)),
-          sourceImages: [...previousImages, ...images],
-          initializeSentences: true, appendedImageId: value.appendedImageId || images[0]?.id };
+        if (target) {
+          const previousImages = target.sourceImages || (target.sourceImageId ? [{id:target.sourceImageId}] : []);
+          if (previousImages.length + images.length > 100) {
+            setNotice("原文章加图后会超过 100 张，已打开本次结果作为新文章校对，原文章保留。");
+            next = { ...next, appendToDocumentId:null };
+          } else {
+            const bodyHtml = appendImageBodyHtml(target.bodyHtml || blocksToHtml(target.blocks, {sourceImageId:target.sourceImageId}), addition);
+            next = { ...target, taskId:value.taskId, taskVersion:value.taskVersion,
+              taskResultVersion:value.taskResultVersion,
+              autoAnnotationCompleted:value.autoAnnotationCompleted, annotationError:value.annotationError,
+              bodyHtml, content:serializeBlocks(htmlToBlocks(bodyHtml)),
+              sourceImages: [...previousImages, ...images],
+              initializeSentences: true, appendedImageId: value.appendedImageId || images[0]?.id };
+          }
+        } else next = { ...next, bookId: undefined, newBookTitle: undefined };
       }
       if (!isCurrent()) return;
       setError("");
+      setSaveFailure(null);
       setPanel(null); setDraft(next); setEditorSession((n) => n + 1); setDirty(true);
     } catch (cause) { if (isCurrent()) setError(cause.message); throw cause; }
   };
@@ -432,20 +501,25 @@ function Workspace({ user, onLoggedOut }) {
     }
   };
   const save = async (value) => {
-    if (saving) return;
+    if (saving || !mounted.current) return;
     setSaving(true);
+    setSaveFailure(null);
     setError("");
     try {
       const result = await api(
-        value.id ? `/documents/${value.id}` : "/documents",
+        value.taskId ? `/image-tasks/${encodeURIComponent(value.taskId)}/apply`
+          : value.id ? `/documents/${value.id}` : "/documents",
         {
-          method: value.id ? "PUT" : "POST",
-          body: JSON.stringify(value),
+          method: value.taskId ? "POST" : value.id ? "PUT" : "POST",
+          body: JSON.stringify(value.taskId ? { version:value.taskVersion,
+            resultVersion:value.taskResultVersion, document:value } : value),
         },
       );
+      if (!mounted.current) return;
       const parent = result.bookId
         ? await api(`/books/${encodeURIComponent(result.bookId)}`).catch(() => null)
         : null;
+      if (!mounted.current) return;
       if (activeId !== result.id) savedDetail.current = result.id;
       setBook(parent);
       setDocument(result);
@@ -457,9 +531,12 @@ function Workspace({ user, onLoggedOut }) {
       setNotice(result.bookId ? "已保存到书籍" : "已保存到书架");
       if (!value.id || value.initializeSentences) void segmentDocument(result, false);
     } catch (e) {
-      setError(e.message);
+      if (mounted.current) {
+        setError(e.message);
+        setSaveFailure({ status:e.status, message:e.message, taskId:value.taskId, id:value.id });
+      }
     } finally {
-      setSaving(false);
+      if (mounted.current) setSaving(false);
     }
   };
   const remove = async () => {
@@ -622,6 +699,14 @@ function Workspace({ user, onLoggedOut }) {
               新建书籍
             </button>
           </div>
+          <button className="button secondary sidebar-task-link" disabled={saving || bookBusy}
+            onClick={() => openDocument("tasks")}>
+            <Icon name="menu" size={16} />任务与导入草稿
+            {!!(taskCounts.queued || taskCounts.running || taskCounts.blocked) &&
+              <span className="count">处理中 {(taskCounts.queued || 0) + (taskCounts.running || 0) + (taskCounts.blocked || 0)}</span>}
+            {!!(taskCounts.ready || taskCounts.needs_attention) &&
+              <span className="count">待处理 {(taskCounts.ready || 0) + (taskCounts.needs_attention || 0)}</span>}
+          </button>
         </div>
         <div className="shelf-heading">
           <span>
@@ -741,8 +826,11 @@ function Workspace({ user, onLoggedOut }) {
         ) : panel === "image" ? (
           <ImageImport
             key={importSession}
-            onCancel={closePanel}
-            onReady={imageReady}
+            taskId={importTask?.id || null}
+            initialTask={importTask}
+            onTaskCreated={taskCreated}
+            onSubmitted={taskSubmitted}
+            onCancel={() => openDocument("tasks")}
             onDirty={setDirty}
             articles={articleTargets}
             books={books}
@@ -759,9 +847,17 @@ function Workspace({ user, onLoggedOut }) {
             onDirty={(next = true) => setDirty(next)}
             onDocumentChanged={(latest) => setDocument((current) => current?.id === latest.id ? latest : current)}
             saving={saving}
+            saveError={saveFailure?.taskId === draft.taskId && saveFailure?.id === draft.id ? saveFailure : null}
             books={books}
             onCreateBook={createBook}
           />
+        ) : activeId === "tasks" ? (
+          <TaskList onOpen={(task) => openDocument(`tasks/${typeof task === "string" ? task : task.id}`)}
+            onNew={() => openPanel("image")} onDocumentOpen={openDocument} />
+        ) : activeId.startsWith("tasks/") ? (
+          <TaskDetail key={activeId} taskId={activeId.slice(6)}
+            onOpenDraft={resumeTaskDraft} onReady={imageReady}
+            onBack={() => openDocument("tasks")} onDocumentOpen={openDocument} />
         ) : document ? (
           <div className={`reader-workspace ${panel === "chat" ? "has-chat" : ""}`}>
             <div className="reader-main-column">
