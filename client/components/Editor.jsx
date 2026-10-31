@@ -48,6 +48,7 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
   };
   const [chatRequest, setChatRequest] = useState(null);
   const [chatBusy, setChatBusy] = useState(false);
+  const [answering, setAnswering] = useState(false);
   const [customQuestion, setCustomQuestion] = useState("");
   const [customQuestionOpen, setCustomQuestionOpen] = useState(false);
   const compositionActive = useRef(false);
@@ -605,7 +606,7 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
     } finally { setChatBusy(false); }
   };
   const askEditor = async (operation) => {
-    if (!selection || !initial.id || busy || compositionActive.current) return;
+    if (!selection || !initial.id || busy || answering || compositionActive.current) return;
     setChatBusy(true); setMessage("");
     try {
       const latest = await api(`/documents/${encodeURIComponent(initial.id)}`);
@@ -1020,18 +1021,18 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
                 </div>
                 {orphanedIds.length > 0 && <p role="status" className="qa-orphan-warning">{orphanedIds.length} 组讨论对应的文字已移除。记录会保留，保存后解除正文关联；撤销或取消校对可恢复。</p>}
                 {selection && initial.id && <div className="editor-selection-questions" role="group" aria-label="选区提问">
-                  <button type="button" className="text-button" onClick={() => askEditor("translation")}>翻译</button>
-                  <button type="button" className="text-button" onClick={() => askEditor("grammar")}>解释语法</button>
-                  <button type="button" className="text-button" onClick={() => setCustomQuestionOpen((open) => !open)}>自定义问题</button>
+                  <button type="button" className="text-button" disabled={answering} onClick={() => askEditor("translation")}>翻译</button>
+                  <button type="button" className="text-button" disabled={answering} onClick={() => askEditor("grammar")}>解释语法</button>
+                  <button type="button" className="text-button" disabled={answering} onClick={() => setCustomQuestionOpen((open) => !open)}>自定义问题</button>
                   {customQuestionOpen && <div className="editor-custom-question">
-                    <input aria-label="选区自定义问题" value={customQuestion} maxLength={4000} onChange={(event) => setCustomQuestion(event.target.value)}
+                    <input aria-label="选区自定义问题" value={customQuestion} disabled={answering} maxLength={4000} onChange={(event) => setCustomQuestion(event.target.value)}
                       onCompositionStart={() => { compositionActive.current = true; }}
                       onCompositionEnd={() => { compositionActive.current = false; }}
                       onKeyDown={(event) => {
                         if (event.nativeEvent.isComposing || compositionActive.current || event.keyCode === 229) return;
                         if (event.key === "Enter") {event.preventDefault(); if (customQuestion.trim()) askEditor("custom");}
                       }} />
-                    <button type="button" className="text-button" disabled={!customQuestion.trim()} onClick={() => askEditor("custom")}>发送问题</button>
+                    <button type="button" className="text-button" disabled={answering || !customQuestion.trim()} onClick={() => askEditor("custom")}>发送问题</button>
                   </div>}
                 </div>}
 
@@ -1437,6 +1438,7 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
       </aside>, window.document.body)}
       {initial.id && createPortal(<div className={`editor-chat-overlay ${viewGroupIds !== null ? "is-open" : ""}`}>
         <DocumentChat document={{...initial,revision:value.revision}} session={chatSession}
+          onBusyChange={setAnswering}
           open={viewGroupIds !== null} onOpen={() => setViewGroupIds([])} navigation={chatNavigation}
           request={chatRequest} onRequestHandled={() => setChatRequest(null)}
           onClose={() => {setViewGroupIds(null);setChatBusy(false);refreshEditorHistory().catch((error) => setMessage(error.message));}}

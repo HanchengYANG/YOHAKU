@@ -21,10 +21,10 @@ async function fixture(page, title) {
   const decorate=item=>({...item,messages:item.messages.map((message,index)=>index===1?{...message,content:Array.from({length:24},(_,i)=>`段落 ${i+1}。这是一段较长的语法解释，用来检查消息滚动位置和引用展开状态。`).join("\n\n")}:message)});
   await page.route(`**/api/documents/${document.id}/conversations`,async route=>{
     if(route.request().method()==="GET") return route.fulfill({json:{conversations:[decorate(history)]}});
-    const result=await route.fetch();history=await result.json();await route.fulfill({response:result,json:decorate(history)});
+    const result=await route.fetch({headers:{...route.request().headers(),accept:"application/json"}});history=await result.json();await route.fulfill({response:result,json:decorate(history)});
   });
   await page.route(`**/api/conversations/${history.id}/messages`,async route=>{
-    const result=await route.fetch();history=await result.json();
+    const result=await route.fetch({headers:{...route.request().headers(),accept:"application/json"}});history=await result.json();
     const held=gate;gate=null;if(held){notify?.();await held;}
     await route.fulfill({response:result,json:decorate(history)});
   });

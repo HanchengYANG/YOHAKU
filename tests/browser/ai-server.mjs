@@ -9,6 +9,8 @@ import { createApp } from "../../server/app.mjs";
 import { ANNOTATION_SCHEMA } from "../../shared/ocr-correction.mjs";
 import { OCR_BODY_SCHEMA } from "../../shared/ocr.mjs";
 import { SENTENCE_SCHEMA } from "../../shared/sentences.mjs";
+import { setTimeout as delay } from "node:timers/promises";
+import express from "express";
 
 const dataDir = fileURLToPath(
   new URL("../../artifacts/ai-e2e-data/", import.meta.url),
@@ -21,6 +23,8 @@ let busy = false;
 const turns = new Map();
 const runtimeCalls = [];
 let runtimeSequence = 0;
+let chatStreamControl = null;
+const chatStreamWaiters = new Set();
 const imageControlsPath = new URL("../../artifacts/ai-e2e-data/image-runtime-controls.json", import.meta.url);
 
 async function imageFault(phase) {
@@ -135,7 +139,7 @@ const runtime = {
   stop() {
     busy = false;
   },
-  async run({ schema, image, prompt, threadId, reasoningEffort, webSearch }) {
+  async run({ schema, image, prompt, threadId, reasoningEffort, webSearch, onEvent, signal }) {
     if (!connected) throw new Error("测试账户尚未连接。");
     busy = true;
     try {
@@ -195,11 +199,29 @@ const runtime = {
       const context = JSON.parse(prompt.slice(prompt.indexOf("\n") + 1));
       const count = (turns.get(id) || 0) + 1;
       turns.set(id, count);
+      const control = chatStreamControl;
+      const text = control?.text || `【浏览器测试替身，不是真实 AI 回答】\n测试回合 ${count}。收到问题：${context.question}\n引用：${context.selectedText || context.quote || "无选区"}`;
+      if (onEvent && control) {
+        await onEvent({type:"status",phase:"searching"});
+        const characters=Array.from(text), prefix=characters.slice(0,control.prefixLength || 45).join("");
+        await onEvent({type:"delta",delta:prefix});
+        if (control.hold) await new Promise((resolve,reject)=>{
+          const release=()=>{chatStreamWaiters.delete(release);signal?.removeEventListener("abort",abort);resolve();};
+          const abort=()=>{chatStreamWaiters.delete(release);reject(signal.reason);};
+          chatStreamWaiters.add(release); signal?.addEventListener("abort",abort,{once:true});
+          if(signal?.aborted) abort();
+        });
+        if (control.fail) throw Object.assign(new Error("测试：流式回答中途中断"),{status:502,expose:true});
+        for(let i=Array.from(prefix).length;i<characters.length;i+=5) {
+          await delay(8,undefined,{signal});
+          await onEvent({type:"delta",delta:characters.slice(i,i+5).join("")});
+        }
+      }
       return {
         completed: true,
         threadId: id,
         model: "UI-TEST-DOUBLE",
-        text: `【浏览器测试替身，不是真实 AI 回答】\n测试回合 ${count}。收到问题：${context.question}\n引用：${context.selectedText || context.quote || "无选区"}`,
+        text,
         sources: webSearch ? [{ title: "日语学习测试来源", url: "https://www.jpf.go.jp/" }] : [],
         webSearch: { enabled: !!webSearch, performed: !!webSearch, queries: webSearch ? ["日语学习"] : [] },
       };
@@ -215,7 +237,14 @@ const { app, close } = createApp({
   aiServices: { auth, runtime },
   imageTaskOptions: { runnerOptions: { pollIntervalMs: 20, retryDelayMs: 20, blockedRetryMs: 100 } },
 });
-const server = app.listen(4319, "127.0.0.1", () => {
+const harness=express();
+harness.post("/__test/chat-stream",express.json(),(req,res)=>{
+  for (const release of [...chatStreamWaiters]) release();
+  if (req.body.action !== "release") chatStreamControl=req.body.action === "reset" ? null : {...req.body};
+  res.json({ok:true});
+});
+harness.use(app);
+const server = harness.listen(4319, "127.0.0.1", () => {
   console.log(
     "余白 UI 集成测试服务：http://127.0.0.1:4319（OAuth / AI 为明确测试替身）",
   );

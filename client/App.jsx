@@ -111,6 +111,7 @@ function Workspace({ user, onLoggedOut }) {
   const [importTask, setImportTask] = useState(null);
   const [chatRequest, setChatRequest] = useState(null);
   const [chatNavigation, setChatNavigation] = useState(null);
+  const [answering, setAnswering] = useState(false);
   const [appendTargetId, setAppendTargetId] = useState(null);
   const [segmentation, setSegmentation] = useState({ id: null, request: 0, busy: false, error: "" });
   const [promotion, setPromotion] = useState(null);
@@ -978,7 +979,8 @@ function Workspace({ user, onLoggedOut }) {
                   if (panel === "chat") closePanel();
                   else { setChatRequest(null); openPanel("chat"); }
                 }}
-                onAsk={(request) => { if (panel !== "chat") rememberReadingPosition(); setChatRequest({...request,key:crypto.randomUUID()}); setPanel("chat"); }}
+                onAsk={(request) => { if (answering) return; if (panel !== "chat") rememberReadingPosition(); setChatRequest({...request,key:crypto.randomUUID()}); setPanel("chat"); }}
+                answering={answering}
                 onGroup={(ids) => { if (panel !== "chat") rememberReadingPosition(); setChatNavigation({key:crypto.randomUUID(),documentId:document.id,groupIds:ids}); setChatRequest(null); setPanel("chat"); }}
                 onAppendImage={() => { openPanel("image"); setAppendTargetId(document.id); setImportBookId(document.bookId || null); }}
                 onSegment={() => segmentDocument(document, true)}
@@ -1012,6 +1014,7 @@ function Workspace({ user, onLoggedOut }) {
                 document={document}
                 open={panel === "chat"} session={chatSessionFor(document.id)}
                 request={chatRequest} navigation={chatNavigation}
+                onBusyChange={setAnswering}
                 onOpen={() => { rememberReadingPosition(); setPanel("chat"); }}
                 onDocumentChanged={refreshCurrentDocument}
                 onRequestHandled={() => setChatRequest(null)}

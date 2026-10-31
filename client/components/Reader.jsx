@@ -15,6 +15,7 @@ export default function Reader({
   setFontSize,
   onDiscuss,
   chatOpen = false,
+  answering = false,
   onPromoteBook = null,
   onAsk, onGroup, onAppendImage, onSegment, segmentationBusy, segmentationError,
 }) {
@@ -26,7 +27,7 @@ export default function Reader({
   useEffect(() => { setSelection(null); setCustom(false); }, [document.id, document.bodyHtml]);
   if (!hasCompleteSentenceBoundaries(html)) return null;
   const ask = (operation) => {
-    if (!selection) return;
+    if (!selection || answering) return;
     const { rect, ...reference } = selection;
     reference.bodyHash = document.bodyHash;
     reference.sentenceIds = bodyRanges(html).sentences.filter((item) => item.start < selection.end && item.end > selection.start).map((item) => item.id);
@@ -103,16 +104,16 @@ export default function Reader({
       </article>
       {selection && <div className="selection-questions" role="dialog" aria-label="划词提问"
         style={{ left: Math.max(12, Math.min(selection.rect.left, window.innerWidth - 310)), top: Math.max(12, Math.min(selection.rect.bottom + 8, window.innerHeight - (custom ? 190 : 100))) }}>
-        <strong lang="ja">{selection.text.length > 36 ? `${selection.text.slice(0, 36)}…` : selection.text}</strong>
+        <strong lang={answering ? undefined : "ja"}>{answering ? "正在回答上一问…" : selection.text.length > 36 ? `${selection.text.slice(0, 36)}…` : selection.text}</strong>
         <div className="selection-actions">
-          <button className="button subtle" type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => ask("translation")}>翻译</button>
-          <button className="button subtle" type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => ask("grammar")}>解释语法</button>
-          <button className="button subtle" type="button" onClick={() => setCustom(true)}>自定义问题</button>
+          <button className="button subtle" type="button" disabled={answering} onMouseDown={(e) => e.preventDefault()} onClick={() => ask("translation")}>翻译</button>
+          <button className="button subtle" type="button" disabled={answering} onMouseDown={(e) => e.preventDefault()} onClick={() => ask("grammar")}>解释语法</button>
+          <button className="button subtle" type="button" disabled={answering} onClick={() => setCustom(true)}>自定义问题</button>
           <button className="icon-button" type="button" aria-label="关闭划词提问" onClick={() => setSelection(null)}>×</button>
         </div>
         {custom && <form onSubmit={(e) => { e.preventDefault(); if(customQuestion.trim()) ask("custom"); }}>
-          <input aria-label="选区自定义问题" autoFocus value={customQuestion} maxLength={4000} onChange={(e) => setCustomQuestion(e.target.value)} />
-          <button className="button primary" disabled={!customQuestion.trim()}>发送</button>
+          <input aria-label="选区自定义问题" autoFocus disabled={answering} value={customQuestion} maxLength={4000} onChange={(e) => setCustomQuestion(e.target.value)} />
+          <button className="button primary" disabled={answering || !customQuestion.trim()}>发送</button>
         </form>}
       </div>}
       <footer className="reader-footer">

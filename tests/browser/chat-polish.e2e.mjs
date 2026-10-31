@@ -66,7 +66,7 @@ test("关联历史保留A/B/A顺序，筛选与追问独立，旧新Markdown安�
     let answerGate = null;
     let answerHeld = null;
     await page.route(`**/api/conversations/${a.id}/messages`, async (route) => {
-      const response = await route.fetch();
+      const response = await route.fetch({headers:{...route.request().headers(),accept:"application/json"}});
       discussion = await response.json();
       const gate = answerGate; answerGate = null;
       if (gate) { answerHeld?.(); await gate; }

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { CHAT_INSTRUCTIONS } from "./runtime.mjs";
+import { readEventStream } from "../../../shared/event-stream.mjs";
 
 const failure = (message, status = 502) => Object.assign(new Error(message), { status, expose: true });
 function publicUrl(value) {
@@ -52,13 +53,16 @@ export function createWebRuntime({ auth, fetchImpl = fetch, turnTimeoutMs = 1800
     if (!account.connected) throw failure("请先连接网站共享 ChatGPT 订阅授权。", 401);
     if ((expected.expectedAccountId && accountId(account) !== expected.expectedAccountId) || (expected.expectedSubject && account.subject !== expected.expectedSubject)) throw failure("AI 授权身份已变化，请重新发起请求。", 409);
   }
-  async function run({ prompt, model, threadId, expectedAccountId, expectedSubject } = {}) {
+  async function run({ prompt, model, threadId, expectedAccountId, expectedSubject, signal, onEvent } = {}) {
     if (controller) throw failure("AI 正在处理请求，请稍后重试。", 409);
     if (typeof prompt !== "string" || !prompt.trim() || typeof model !== "string" || !model.trim()) throw failure("联网问答缺少问题或有效模型。", 400);
     const active = new AbortController(); controller = active;
+    const abort = () => active.abort(signal.reason);
+    if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, {once:true});
     const timer = setTimeout(() => active.abort(), turnTimeoutMs);
     let token;
     try {
+      active.signal.throwIfAborted();
       const expected = { expectedAccountId, expectedSubject }, first = await auth.status(); check(first, expected);
       token = await auth.accessToken();
       const confirmed = await auth.status(); check(confirmed, expected);
@@ -73,20 +77,39 @@ export function createWebRuntime({ auth, fetchImpl = fetch, turnTimeoutMs = 1800
       });
       if (!response.ok) throw failure(response.status === 401 ? "联网问答授权失败，请重新连接共享订阅后重试。" : `联网问答服务返回 ${response.status}，请重试。`, response.status === 429 ? 429 : 502);
       if (!response.body) throw failure("联网问答没有返回事件流，请重试。");
-      const decoder = new TextDecoder(), items = new Map(); let buffer = "", bytes = 0, completed = null;
-      for await (const chunk of response.body) {
-        bytes += chunk.length;
-        if (bytes > 16_000_000) { active.abort(); throw failure("联网回答过长，未保存部分输出，请缩小问题后重试。"); }
-        buffer += decoder.decode(chunk, { stream: true });
-        let end;
-        while ((end = buffer.indexOf("\n")) >= 0) {
-          const line = buffer.slice(0, end).trimEnd(); buffer = buffer.slice(end + 1);
-          if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
-          let event; try { event = JSON.parse(line.slice(6)); } catch { throw failure("联网回答事件格式无效，未保存部分输出，请重试。"); }
-          if (["response.failed", "response.incomplete", "error"].includes(event.type)) throw failure("联网问答失败或中断，未保存部分输出，请重试。");
-          if (event.type === "response.output_item.done" && event.item?.id) items.set(event.item.id, event.item);
-          if (event.type === "response.completed") completed = event.response;
+      const items = new Map(), previews = new Map(); let completed = null, visible = "";
+      const publish = async () => {
+        const all = [...previews.values()].sort((a,b) => a.index-b.index);
+        const final = all.some((item) => item.phase === "final_answer");
+        const text = all.filter((item) => item.role === "assistant" && item.type === "message" &&
+          (final ? item.phase === "final_answer" : !item.phase))
+          .map((item) => [...item.parts.entries()].sort((a,b) => a[0]-b[0]).map(([,text]) => text).join(""))
+          .join("\n").replace(/[^]*/g, "").replace(/[^]*$/, "");
+        if (text === visible) return;
+        const event = text.startsWith(visible) ? {type:"delta",delta:text.slice(visible.length)} : {type:"text",text};
+        visible = text; await onEvent?.(event);
+      };
+      for await (const frame of readEventStream(response.body)) {
+        if (frame.data === "[DONE]") continue;
+        let event; try { event = JSON.parse(frame.data); } catch { throw failure("联网回答事件格式无效，未保存部分输出，请重试。"); }
+        if (["response.failed", "response.incomplete", "error"].includes(event.type)) throw failure("联网问答失败或中断，未保存部分输出，请重试。");
+        if (event.type?.startsWith("response.web_search_call.")) await onEvent?.({type:"status",phase:"searching"});
+        if (["response.output_item.added","response.output_item.done"].includes(event.type) && event.item?.id) {
+          const previous = previews.get(event.item.id);
+          const item = {...previous,...event.item,index:event.output_index ?? previous?.index ?? previews.size,parts:previous?.parts || new Map()};
+          (event.item.content || []).forEach((part,index) => { if (part.type === "output_text") item.parts.set(index,part.text || ""); });
+          previews.set(event.item.id,item);
+          if (event.type === "response.output_item.done") items.set(event.item.id,event.item);
+          await publish();
         }
+        if (event.type === "response.output_text.delta" || event.type === "response.output_text.done") {
+          let item = previews.get(event.item_id);
+          if (!item) { item = {index:event.output_index ?? previews.size,parts:new Map()}; previews.set(event.item_id,item); }
+          const index = event.content_index ?? 0;
+          item.parts.set(index,event.type.endsWith(".delta") ? (item.parts.get(index) || "") + event.delta : event.text || "");
+          await publish();
+        }
+        if (event.type === "response.completed") completed = event.response;
       }
       if (active.signal.aborted) throw failure("联网问答已停止或超时，未保存部分输出，请重试。");
       const checked = await auth.status(); check(checked, expected);
@@ -101,7 +124,7 @@ export function createWebRuntime({ auth, fetchImpl = fetch, turnTimeoutMs = 1800
       const safe = String(cause.message || "联网问答失败").replaceAll(token || "\u0000", "[已隐藏]").replace(/Bearer\s+\S+/gi, "Bearer [已隐藏]").slice(0, 700);
       lastError = active.signal.aborted ? "联网问答已停止或超时，未保存部分输出，请重试。" : safe;
       throw failure(lastError, cause.status || 502);
-    } finally { clearTimeout(timer); if (controller === active) controller = null; }
+    } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); if (controller === active) controller = null; }
   }
   return { run, stop: () => controller?.abort(), status: () => ({ busy: !!controller, lastError, lastSuccessfulAt }) };
 }

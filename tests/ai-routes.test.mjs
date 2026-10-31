@@ -12,6 +12,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import sharp from "sharp";
 import { createApp } from "../server/app.mjs";
+import { readEventStream } from "../shared/event-stream.mjs";
 import { ANNOTATION_SCHEMA } from "../shared/ocr-correction.mjs";
 import { OCR_BODY_SCHEMA, normalizeNewOcrDraft, validateOcr } from "../shared/ocr.mjs";
 import { SENTENCE_SCHEMA } from "../shared/sentences.mjs";
@@ -122,7 +123,8 @@ function services() {
       state.stops++;
     },
     run: async (input) => {
-      state.calls.push(structuredClone(input));
+      const {onEvent: _eventCallback, signal: _signal, ...recorded} = input;
+      state.calls.push(structuredClone(recorded));
       if (state.onRun) await state.onRun(input);
       if (state.mode === "failure")
         throw Object.assign(new Error("接口测试：上游失败，部分输出已丢弃。"), {
@@ -324,6 +326,77 @@ async function createDocument(url) {
   assert.equal(response.status, 201);
   return response.data;
 }
+
+test("流式聊天在完成前发送文本但不保存部分问答，完成后兼容 JSON 追问", async (t) => {
+  const app = await setup(t), document = await createDocument(app.url);
+  const path = `/api/documents/${document.id}/conversations`;
+  const body = await prepareChatBody(app.url,sessionHeaders(app.url).Cookie,path,"POST",{quote:"背中",question:"逐字输出"});
+  let release;
+  const gate = new Promise((resolve) => {release=resolve;});
+  app.state.onRun = async ({onEvent}) => { await onEvent({type:"delta",delta:"刚收到的部分文字🙂"}); await gate; };
+  const response = await fetch(app.url+path,{method:"POST",headers:{...sessionHeaders(app.url),"Content-Type":"application/json",Accept:"text/event-stream"},body:JSON.stringify(body)});
+  const frames = readEventStream(response.body);
+  try {
+    assert.equal(response.status,200); assert.match(response.headers.get("content-type"),/text\/event-stream/);
+    assert.equal(response.headers.get("x-accel-buffering"),"no");
+    let start, delta;
+    while (!delta) {
+      const next = await frames.next(); assert.equal(next.done,false);
+      const event = JSON.parse(next.value.data);
+      if (event.type === "start") start=event;
+      if (event.type === "delta") delta=event;
+    }
+    assert.equal(delta.delta,"刚收到的部分文字🙂");
+    const saved = (await request(app.url,path)).data.conversations[0];
+    assert.equal(saved.messages.length,0); assert.equal(saved.groups[0].id,start.groupId);
+    const fresh=await request(app.url,path,"POST",{quote:"空",question:"上一问未完成时的新选区"});
+    const follow=await request(app.url,`/api/conversations/${saved.id}/messages`,"POST",{groupId:start.groupId,question:"上一问未完成时的追问"});
+    assert.equal(fresh.status,409); assert.equal(follow.status,409);
+    assert.match(fresh.data.error,/正在回答上一问/);
+    assert.equal(app.state.calls.length,1);
+    assert.equal((await request(app.url,path)).data.conversations[0].groups.length,1);
+    release(); const tail = await Array.fromAsync(frames); const done=JSON.parse(tail.at(-1).data);
+    assert.equal(done.type,"done"); assert.equal(done.conversation.messages.length,2);
+    assert.doesNotMatch(done.conversation.messages[1].content,/部分文字/);
+    app.state.onRun = null;
+    const followup = await request(app.url,`/api/conversations/${saved.id}/messages`,"POST",{groupId:start.groupId,question:"JSON 仍能继续"});
+    assert.equal(followup.status,200); assert.equal(followup.data.messages.length,4);
+  } finally {release();await frames.return();}
+});
+
+test("流式上游失败只返回错误，已有问答与顺序保持不变", async (t) => {
+  const app = await setup(t), document = await createDocument(app.url);
+  const saved = (await request(app.url,`/api/documents/${document.id}/conversations`,"POST",{quote:"背中",question:"已完成的问题"})).data;
+  app.state.mode="failure";
+  app.state.onRun = async ({onEvent}) => {await onEvent({type:"delta",delta:"不能存成正式答案"});};
+  const response=await fetch(`${app.url}/api/conversations/${saved.id}/messages`,{method:"POST",headers:{...sessionHeaders(app.url),"Content-Type":"application/json",Accept:"text/event-stream"},body:JSON.stringify({groupId:saved.groups[0].id,question:"会中断的追问"})});
+  const events=(await Array.fromAsync(readEventStream(response.body))).map((frame)=>JSON.parse(frame.data));
+  assert.equal(events.some((event)=>event.type==="delta"),true);
+  assert.equal(events.some((event)=>event.type==="done"),false);
+  assert.equal(events.at(-1).type,"error"); assert.equal(events.at(-1).status,502);
+  const restored=(await request(app.url,`/api/documents/${document.id}/conversations`)).data.conversations[0];
+  assert.deepEqual(restored.messages,saved.messages); assert.match(restored.lastError,/上游失败/);
+});
+
+test("客户端断开会取消流式请求，不把迟到输出保存为完成答案", async (t) => {
+  const app = await setup(t), document = await createDocument(app.url);
+  const path=`/api/documents/${document.id}/conversations`;
+  const body=await prepareChatBody(app.url,sessionHeaders(app.url).Cookie,path,"POST",{quote:"背中",question:"取消本次传输"});
+  let cancelled;
+  const cancellation=new Promise((resolve)=>{cancelled=resolve;});
+  app.state.onRun = async ({onEvent,signal}) => {
+    await onEvent({type:"delta",delta:"断开前的内容"});
+    await new Promise((resolve)=>signal.addEventListener("abort",()=>{cancelled();resolve();},{once:true}));
+  };
+  const controller=new AbortController();
+  const response=await fetch(app.url+path,{method:"POST",headers:{...sessionHeaders(app.url),"Content-Type":"application/json",Accept:"text/event-stream"},body:JSON.stringify(body),signal:controller.signal});
+  const frames=readEventStream(response.body);
+  while (JSON.parse((await frames.next()).value.data).type!=="delta") {}
+  controller.abort();
+  await cancellation; await frames.return().catch(()=>{});
+  const saved=(await request(app.url,path)).data.conversations[0];
+  assert.equal(saved.messages.length,0);
+});
 
 test("AI替身接口集成：multipart原图保留，未授权也可上传，识别必须先授权", async (t) => {
   const app = await setup(t);

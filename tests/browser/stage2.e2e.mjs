@@ -1083,7 +1083,7 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
   try {
     await popup.getByRole("button", { name: "发送", exact: true }).click();
     const progress = chat.getByRole("status", { name: "AI回答进度", exact: true });
-    await expect(progress).toHaveText("正在回答…");
+    await expect(progress).toHaveText("正在等待回答…");
     await expect(progress.getByRole("progressbar")).toHaveCount(0);
     await expect(chat.getByRole("textbox", { name: "向 AI 提问", exact: true })).toBeDisabled();
     await page.screenshot({ path: `artifacts/design-2026-10-28/answer-progress-${info.project.name}.png`, fullPage: true, animations: "disabled" });

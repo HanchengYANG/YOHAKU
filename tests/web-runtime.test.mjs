@@ -83,3 +83,41 @@ test("顶层完成但搜索或助手消息明确未完成时不接受部分输�
   const response = completed(); response.output.find((item) => item.type === "message").status = "incomplete";
   assert.throws(() => presentWebResponse(response), /未完整完成/);
 });
+
+test("完成前转发正式回答的增量，忽略推理与中间消息，隐藏跨事件的原生引用标记", async () => {
+  let controller, release;
+  const waiting = new Promise((resolve) => {release=resolve;});
+  const encoder = new TextEncoder(), events = [];
+  const body = new ReadableStream({start(value) {controller=value;}});
+  const push = (event) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\r\n\r\n`));
+  const f = fixture({response:new Response(body,{headers:{"content-type":"text/event-stream"}})});
+  let finished=false;
+  const answer = f.runtime.run({prompt:"问题",model:"verified-model",onEvent:(event)=>{events.push(event);if(event.type==="delta") release();}}).then((result)=>{finished=true;return result;});
+  push({type:"response.reasoning_text.delta",delta:"不得显示的推理"});
+  push({type:"response.output_item.added",item:{id:"comment",type:"message",role:"assistant",phase:"commentary"},output_index:0});
+  push({type:"response.output_text.delta",item_id:"comment",delta:"搜索前的中间说明"});
+  push({type:"response.output_item.added",item:{id:"answer",type:"message",role:"assistant",phase:"final_answer"},output_index:1});
+  push({type:"response.output_text.delta",item_id:"answer",content_index:0,delta:"原文解释"});
+  await waiting; assert.equal(finished,false);
+  push({type:"response.output_text.delta",item_id:"answer",content_index:0,delta:"cite"});
+  push({type:"response.output_text.delta",item_id:"answer",content_index:0,delta:"source与背景。"});
+  push({type:"response.completed",response:completed()}); controller.close();
+  const result = await answer;
+  assert.equal(events.filter((event)=>event.type==="delta").map((event)=>event.delta).join(""),"原文解释与背景。");
+  assert.doesNotMatch(JSON.stringify(events),/推理|中间说明|/);
+  assert.match(result.text,/\[来源\]\(https:\/\/example.test\/official\)/);
+});
+
+test("流式连接中断或调用方取消后仍拒绝部分答案，并释放运行状态", async () => {
+  const f = fixture({response:stream([
+    {type:"response.output_item.added",item:{id:"answer",type:"message",role:"assistant"}},
+    {type:"response.output_text.delta",item_id:"answer",delta:"只收到一部分"},
+  ])});
+  const chunks=[];
+  await assert.rejects(f.runtime.run({prompt:"问题",model:"verified-model",onEvent:(event)=>chunks.push(event)}),/未完整/);
+  assert.equal(chunks[0].delta,"只收到一部分"); assert.equal(f.runtime.status().busy,false);
+  const controller=new AbortController();controller.abort();
+  const g=fixture();
+  await assert.rejects(g.runtime.run({prompt:"问题",model:"verified-model",signal:controller.signal}),/停止或超时/);
+  assert.equal(g.calls.length,0);
+});

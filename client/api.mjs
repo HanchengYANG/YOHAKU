@@ -3,6 +3,10 @@ export default async function api(path, options) {
     ...options,
     headers: { "Content-Type": "application/json", ...options?.headers },
   });
+  return readApiResult(response);
+}
+
+export async function readApiResult(response) {
   if (response.status === 204) return null;
   const result = await response
     .json()
