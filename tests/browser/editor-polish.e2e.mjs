@@ -1,8 +1,10 @@
 import { test, expect } from "@playwright/test";
 import sharp from "sharp";
+import { randomUUID } from "node:crypto";
 import { parseText } from "../../shared/document.mjs";
 import { applySentenceBoundaries, blocksToHtml, bodyRanges, bodyText, appendImageBodyHtml, sourceBodyHtml } from "../../shared/article-html.mjs";
 import { ensureOwnerSession } from "./session.mjs";
+import { discardFixtureTasks } from "./image-task-fixture.mjs";
 
 let cookies = [];
 test.beforeEach(async ({ page }) => {
@@ -474,4 +476,122 @@ test("唯一图片可移除并撤销重做或取消，补正文保存后保持�
     await expect(page.getByRole("img",{name:"用于校对正文和注音的日语原图",exact:true})).toHaveCount(0);
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   } finally {await remove(page,original.id);}
+});
+
+test("校对页删空唯一图片及标题后可直接删除整篇文章，取消确认仍保留草稿",async({page},info)=>{
+  const created=await imagePairFixture(page,`整篇删除 ${info.project.name}`,1);
+  const original=created.document;
+  const deletes=[];
+  page.on("request",request=>{
+    if(request.method()==="DELETE"&&new URL(request.url()).pathname===`/api/documents/${original.id}`)deletes.push(request.postDataJSON());
+  });
+  try {
+    await page.goto(`/#${original.id}`);
+    await page.getByRole("button",{name:"校对文字与注音",exact:true}).click();
+    const editor=page.locator(".editor-page"), input=inputFor(page);
+    await editor.locator(".source-image-sorter").getByRole("button",{name:/^移除/}).click();
+    await expect(input).toHaveValue("");
+    await expect(editor.locator(".source-image-sorter")).toHaveCount(0);
+    await page.getByRole("textbox",{name:"材料标题",exact:true}).fill("");
+    const deleteArticle=editor.getByRole("button",{name:"删除整篇文章",exact:true});
+    await expect(deleteArticle).toBeEnabled();
+    await expect(editor).toContainText(/正文已清空.*删除整篇文章/);
+    page.once("dialog",dialog=>{expect(dialog.message()).toContain(original.title);return dialog.dismiss();});
+    await deleteArticle.click();
+    expect(deletes).toEqual([]);
+    await expect(editor).toBeVisible();
+    await expect(input).toHaveValue("");
+    const retained=await(await page.request.get(`/api/documents/${original.id}`)).json();
+    expect(retained.bodyHtml).toBe(original.bodyHtml);
+    expect(retained.sourceImages.map(image=>image.id)).toEqual(created.imageIds);
+    const deleted=page.waitForResponse(response=>response.request().method()==="DELETE"&&new URL(response.url()).pathname===`/api/documents/${original.id}`);
+    page.once("dialog",dialog=>dialog.accept());
+    await deleteArticle.click();
+    expect((await deleted).status()).toBe(204);
+    await expect(editor).toHaveCount(0);
+    await expect(page.getByRole("region",{name:"阅读首页",exact:true})).toBeVisible();
+    expect(deletes).toEqual([{revision:original.revision}]);
+    expect((await page.request.get(`/api/documents/${original.id}`)).status()).toBe(404);
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  } finally {await remove(page,original.id);}
+});
+
+test("校对页删除遇到其他设备的新版本时只请求一次并保留全部编辑",async({page},info)=>{
+  const original=await fixture(page,`删除冲突 ${info.project.name}`,false);
+  const input=inputFor(page), text=`尚未保存的人工校对 ${info.project.name}。`;
+  const deletes=[];
+  page.on("request",request=>{
+    if(request.method()==="DELETE"&&new URL(request.url()).pathname===`/api/documents/${original.id}`)deletes.push(request.postDataJSON());
+  });
+  try {
+    await input.fill(text);
+    const latest=await(await page.request.get(`/api/documents/${original.id}`)).json();
+    const updated=await page.request.put(`/api/documents/${original.id}`,{data:{...latest,title:`另一设备的新标题 ${info.project.name}`}});
+    expect(updated.ok()).toBe(true);
+    const other=await updated.json();
+    const failed=page.waitForResponse(response=>response.request().method()==="DELETE"&&new URL(response.url()).pathname===`/api/documents/${original.id}`);
+    page.once("dialog",dialog=>dialog.accept());
+    await page.getByRole("button",{name:"删除整篇文章",exact:true}).click();
+    expect((await failed).status()).toBe(409);
+    await expect(page.getByRole("alert")).toContainText("其他页面修改");
+    await expect(page.locator(".editor-page")).toBeVisible();
+    await expect(input).toHaveValue(text);
+    expect(deletes).toEqual([{revision:original.revision}]);
+    const retained=await(await page.request.get(`/api/documents/${original.id}`)).json();
+    expect(retained.revision).toBe(other.revision);
+    expect(retained.title).toBe(other.title);
+    expect(retained.bodyHtml).toBe(other.bodyHtml);
+  } finally {await remove(page,original.id);}
+});
+
+test("追加任务的校对页能删除目标整篇文章并返回书籍，其他文章保留并重新排序",async({page},info)=>{
+  const bookResponse=await page.request.post("/api/books",{data:{title:`删除文章书籍 ${info.project.name}`}});
+  expect(bookResponse.ok()).toBe(true);
+  const book=await bookResponse.json(), articles=[];
+  let taskId;
+  try {
+    for(let index=1;index<=2;index++) {
+      const html=applySentenceBoundaries(blocksToHtml(parseText(`保存的第${index}篇正文。`)),[`保存的第${index}篇正文。`]);
+      const response=await page.request.post("/api/documents",{data:{title:`保留与删除 ${index}`,kind:"book",orientation:"horizontal",bookId:book.id,bodyHtml:html}});
+      expect(response.ok()).toBe(true);articles.push(await response.json());
+    }
+    let response=await page.request.post("/api/image-tasks",{data:{idempotencyKey:randomUUID(),title:"待追加图片",bookId:book.id,targetId:articles[0].id}});
+    expect(response.ok()).toBe(true);
+    let task=await response.json();taskId=task.id;
+    const itemId=randomUUID();
+    response=await page.request.post(`/api/image-tasks/${task.id}/items`,{data:{version:task.version,items:[{id:itemId,name:"追加原图.png"}]}});
+    expect(response.ok()).toBe(true);task=await response.json();
+    const bytes=await sharp({create:{width:160,height:220,channels:3,background:"#ddd"}}).png().toBuffer();
+    response=await page.request.post(`/api/image-tasks/${task.id}/items/${itemId}/image`,{multipart:{image:{name:"追加原图.png",mimeType:"image/png",buffer:bytes}}});
+    expect(response.ok()).toBe(true);task=await response.json();
+    expect((await page.request.post(`/api/image-tasks/${task.id}/submit`,{data:{version:task.version}})).status()).toBe(202);
+    await expect.poll(async()=>{
+      const current=await page.request.get(`/api/image-tasks/${task.id}`);
+      expect(current.ok()).toBe(true);return(await current.json()).state;
+    }).toBe("ready");
+    await page.goto(`/#tasks/${task.id}`);
+    await page.getByRole("button",{name:"开始校对",exact:true}).click();
+    await expect(page.locator(".editor-page")).toBeVisible();
+    await expect(inputFor(page)).not.toHaveValue("");
+    const deleteArticle=page.getByRole("button",{name:"删除整篇文章",exact:true});
+    await expect(deleteArticle).toBeEnabled();
+    const deleted=page.waitForResponse(result=>result.request().method()==="DELETE"&&new URL(result.url()).pathname===`/api/documents/${articles[0].id}`);
+    page.once("dialog",dialog=>dialog.accept());
+    await deleteArticle.click();
+    expect((await deleted).status()).toBe(204);
+    await expect(page.locator(".editor-page")).toHaveCount(0);
+    await expect(page).toHaveURL(new RegExp(`#book/${book.id}$`));
+    expect((await page.request.get(`/api/documents/${articles[0].id}`)).status()).toBe(404);
+    const remaining=await(await page.request.get(`/api/books/${book.id}`)).json();
+    expect(remaining.pages.map(article=>article.id)).toEqual([articles[1].id]);
+    expect(remaining.pages[0].position).toBe(1);
+    const retainedTask=await page.request.get(`/api/image-tasks/${task.id}`);
+    expect(retainedTask.ok()).toBe(true);
+    expect((await retainedTask.json()).appliedDocumentId).toBeNull();
+  } finally {
+    if(taskId)discardFixtureTasks([taskId]);
+    for(const article of articles)await remove(page,article.id);
+    const current=await page.request.get(`/api/books/${book.id}`);
+    if(current.ok())await page.request.delete(`/api/books/${book.id}`,{data:{revision:(await current.json()).revision}});
+  }
 });

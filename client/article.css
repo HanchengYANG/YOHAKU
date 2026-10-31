@@ -1,4 +1,6 @@
 :root { --sentence-highlight: #eeebe2; --qa-highlight: #e2ebdb; --qa-highlight-hover: #d5e3cd; --reading-transition: 120ms; }
+.editor-page .editor-actions { flex-wrap:wrap; justify-content:flex-end; }
+.editor-actions .editor-delete-article { color:#9c542e; }
 .article-text-surface { position: relative; isolation: isolate; }
 .article-body { position: relative; }
 .article-highlight-layer { position: absolute; inset: 0; pointer-events: none; z-index: -1; }

@@ -24,7 +24,7 @@ import SourceImageSorter from "./SourceImageSorter.jsx";
 
 const annotationSteps = [{ id: "annotate", label: "生成注音", copy: "正在参考原图补全缺失读音，正文和已有读音保持不变。" }];
 
-export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentChanged, saving, saveError = null, books = [], onCreateBook }) {
+export default function Editor({ initial, onSave, onDelete, onCancel, onDirty, onDocumentChanged, saving, saveError = null, books = [], onCreateBook }) {
   const [value, setValue] = useState(() => ({
     ...initial,
     orientation: "horizontal",
@@ -271,6 +271,18 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
     return new Set(imageSources.filter((image) => !filled.has(image.id)).map((image) => image.id));
   }, [imageSources, bodyHtml]);
   const canSaveAsNew = !!initial.taskId && !taskResultStale && !taskUnavailable && [404, 409].includes(saveError?.status);
+  const canDeleteArticle = !!initial.id && !!onDelete;
+  const deleteArticle = async () => {
+    if (!canDeleteArticle || busy || submitLock.current || annotationRequest.current) return;
+    submitLock.current = true;
+    try {
+      await onDelete({ id:initial.id, revision:value.revision, title:initial.title, bookId:initial.bookId });
+    } catch (cause) {
+      setMessage(cause.message);
+    } finally {
+      submitLock.current = false;
+    }
+  };
   const editorViews = useRef(new Map());
   useEffect(() => {
     const input = textarea.current, view = editorViews.current.get(activeSourceId);
@@ -771,6 +783,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
             <button type="button" className="button secondary" disabled={busy} onClick={() => { setViewGroupIds(null); setFullPreview(true); }}>
               全文检查
             </button>
+            {canDeleteArticle && <button type="button" className="button subtle editor-delete-article" disabled={busy} onClick={deleteArticle}>删除整篇文章</button>}
             <button
               type="button"
               className="button subtle"
@@ -793,6 +806,7 @@ export default function Editor({ initial, onSave, onCancel, onDirty, onDocumentC
             </button>
           </div>
         </div>
+        {canDeleteArticle && !body.trim() && <p className="editor-message" role="status">正文已清空，可直接点击“删除整篇文章”。</p>}
         {canSaveAsNew && <p className="editor-message" role="status">保存未完成，当前校对内容已保留。可继续修改后另存为新文章，原文章和原问答记录保留。</p>}
         {taskResultStale && <p className="editor-message" role="status">当前编辑内容仍保留在本页。请先手动复制留存，再重新打开任务的最新结果；这份旧稿无法保存。</p>}
         {taskUnavailable && <p className="editor-message" role="status">任务已删除或无法访问，当前编辑内容仍保留在本页。请手动复制留存，或通过导入文字新建文章。</p>}

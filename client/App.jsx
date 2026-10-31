@@ -139,6 +139,7 @@ function Workspace({ user, onLoggedOut }) {
       : null,
   );
   const savedDetail = useRef(null);
+  const deletingArticle = useRef(false);
   const editRequest = useRef(0);
   const importRequest = useRef(0);
   const segmentationRequest = useRef(0);
@@ -565,25 +566,35 @@ function Workspace({ user, onLoggedOut }) {
       if (mounted.current) setSaving(false);
     }
   };
-  const remove = async () => {
-    if (
-      !window.confirm(`删除《${document.title}》？删除后无法撤销，建议先导出。`)
-    )
-      return;
+  const remove = async (target) => {
+    if (deletingArticle.current || saving || bookBusy || !target?.id) return false;
+    if (!window.confirm(`删除整篇文章《${target.title}》？正文和讨论将一起删除。`)) return false;
+    deletingArticle.current = true;
+    setSaving(true);
+    setError("");
     try {
-      await api(`/documents/${document.id}`, {
+      await api(`/documents/${encodeURIComponent(target.id)}`, {
         method: "DELETE",
-        body: JSON.stringify({ revision: document.revision }),
+        body: JSON.stringify({ revision: target.revision }),
       });
-      const nextId = document.bookId ? `book/${document.bookId}` : "";
+      if (!mounted.current) return true;
+      const nextId = target.bookId ? `book/${target.bookId}` : "";
+      setDraft(null);
+      setDirty(false);
+      setSaveFailure(null);
       setActiveId(nextId);
       setPanel(null);
       setDocument(null);
       history.replaceState(null, "", nextId ? `#${nextId}` : window.location.pathname);
       setRefresh((n) => n + 1);
-      setNotice(document.bookId ? "文章已删除" : "材料已删除");
+      setNotice("文章已删除");
+      return true;
     } catch (e) {
-      setError(e.message);
+      if (mounted.current) setError(e.message);
+      return false;
+    } finally {
+      deletingArticle.current = false;
+      if (mounted.current) setSaving(false);
     }
   };
 
@@ -869,6 +880,7 @@ function Workspace({ user, onLoggedOut }) {
             key={editorSession}
             initial={draft}
             onSave={save}
+            onDelete={remove}
             onCancel={cancelEdit}
             onDirty={(next = true) => setDirty(next)}
             onDocumentChanged={(latest) => setDocument((current) => current?.id === latest.id ? latest : current)}
@@ -905,7 +917,7 @@ function Workspace({ user, onLoggedOut }) {
               {readingReady ? <Reader
                 document={document}
                 onEdit={beginEdit}
-                onDelete={remove}
+                onDelete={() => remove(document)}
                 onDiscuss={() => {
                   if (panel === "chat") closePanel();
                   else { setSelectedGroupIds(null); setChatRequest(null); openPanel("chat"); }
