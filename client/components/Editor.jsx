@@ -24,7 +24,7 @@ import SourceImageSorter from "./SourceImageSorter.jsx";
 
 const annotationSteps = [{ id: "annotate", label: "生成注音", copy: "正在参考原图补全缺失读音，正文和已有读音保持不变。" }];
 
-export default function Editor({ initial, onSave, onDelete, onCancel, onDirty, onDocumentChanged, saving, saveError = null, books = [], onCreateBook }) {
+export default function Editor({ initial, chatSession, onSave, onDelete, onCancel, onDirty, onDocumentChanged, saving, saveError = null, books = [], onCreateBook }) {
   const [value, setValue] = useState(() => ({
     ...initial,
     orientation: "horizontal",
@@ -41,6 +41,11 @@ export default function Editor({ initial, onSave, onDelete, onCancel, onDirty, o
   const [bodyHtml, setBodyHtml] = useState(() => initial.bodyHtml || blocksToHtml(parseText(initial.content, initial.blocks || []), {sourceImageId:initial.sourceImageId || initial.recognition?.sourceImage?.id}));
   const [blocks, setBlocks] = useState(() => initial.bodyHtml ? htmlToBlocks(initial.bodyHtml) : parseText(initial.content, initial.blocks || []));
   const [viewGroupIds, setViewGroupIds] = useState(null);
+  const [chatNavigation, setChatNavigation] = useState(null);
+  const viewChatGroups = (ids) => {
+    setViewGroupIds(ids);
+    setChatNavigation({key:crypto.randomUUID(),documentId:initial.id,groupIds:ids});
+  };
   const [chatRequest, setChatRequest] = useState(null);
   const [chatBusy, setChatBusy] = useState(false);
   const [customQuestion, setCustomQuestion] = useState("");
@@ -723,7 +728,7 @@ export default function Editor({ initial, onSave, onDelete, onCancel, onDirty, o
 
   return (
     <form
-      className={`editor-page ${initial.id ? "editor-persisted" : ""} ${sourceImageId ? "editor-has-source" : ""}`}
+      className={`editor-page ${initial.id ? "editor-persisted" : ""} ${sourceImageId ? "editor-has-source" : ""} ${viewGroupIds !== null ? "editor-chat-open" : ""}`}
       aria-busy={busy}
       onSubmit={async (e) => {
         e.preventDefault();
@@ -994,7 +999,7 @@ export default function Editor({ initial, onSave, onDelete, onCancel, onDirty, o
                   value={editingText}
                   onChange={editBody}
                   onSelection={getSelection}
-                  onGroup={setViewGroupIds}
+                  onGroup={viewChatGroups}
                   onCompositionStart={(event) => {
                     compositionActive.current = true;
                     beforeInput.current = {start:event.currentTarget.selectionStart,end:event.currentTarget.selectionEnd,inputType:"insertCompositionText"};
@@ -1401,7 +1406,7 @@ export default function Editor({ initial, onSave, onDelete, onCancel, onDirty, o
                     {batchSelected.length} 处。
                   </p>
                 )}
-                {body.trim() && tab === "text" ? <ArticleBody html={editingHtml} fontSize={23} onSource={chooseSource} onGroup={setViewGroupIds} /> : body.trim() ? (
+                {body.trim() && tab === "text" ? <ArticleBody html={editingHtml} fontSize={23} onSource={chooseSource} onGroup={viewChatGroups} /> : body.trim() ? (
                   <RubyText
                     blocks={blocks}
                     fontSize={23}
@@ -1428,12 +1433,13 @@ export default function Editor({ initial, onSave, onDelete, onCancel, onDirty, o
       </fieldset>
       {fullPreview && createPortal(<aside className="editor-full-overlay" role="dialog" aria-label="全文检查">
         <header><h2>全文检查</h2><button type="button" className="text-button" onClick={() => setFullPreview(false)}>关闭全文检查</button></header>
-        <div className="editor-full-content"><ArticleBody html={bodyHtml} fontSize={23} onGroup={(ids) => { setFullPreview(false); setViewGroupIds(ids); }} /></div>
+        <div className="editor-full-content"><ArticleBody html={bodyHtml} fontSize={23} onGroup={(ids) => { setFullPreview(false); viewChatGroups(ids); }} /></div>
       </aside>, window.document.body)}
-      {viewGroupIds && initial.id && createPortal(<div className="editor-chat-overlay">
-        <DocumentChat document={{...initial,revision:value.revision}} selectedGroupIds={viewGroupIds}
+      {initial.id && createPortal(<div className={`editor-chat-overlay ${viewGroupIds !== null ? "is-open" : ""}`}>
+        <DocumentChat document={{...initial,revision:value.revision}} session={chatSession}
+          open={viewGroupIds !== null} onOpen={() => setViewGroupIds([])} navigation={chatNavigation}
           request={chatRequest} onRequestHandled={() => setChatRequest(null)}
-          onClose={() => {setViewGroupIds(null);setChatRequest(null);setChatBusy(false);refreshEditorHistory().catch((error) => setMessage(error.message));}}
+          onClose={() => {setViewGroupIds(null);setChatBusy(false);refreshEditorHistory().catch((error) => setMessage(error.message));}}
           onDocumentChanged={refreshEditorHistory} />
       </div>, window.document.body)}
     </form>

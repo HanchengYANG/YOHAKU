@@ -49,14 +49,14 @@ test("同句跨来源和注音整体悬停，高亮完整包注音，重复词�
       });
     }));
     expect(covered).toBe(true);
-    const chat=page.getByRole("region",{name:"原文 AI 讨论",exact:true});
+    const chat=page.getByLabel("原文 AI 讨论", {exact:true});
     await article.locator(`mark[data-qa-group-ids="${groupB}"]`).first().click();
     await expect(chat.locator(".chat-message.user")).toContainText("第二个背中");
     await expect(chat.locator(".chat-message.user")).toHaveCount(1);
     await chat.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();
     await selectArticleText(page,"背中",0);
     await expect(page.getByRole("dialog",{name:"划词提问"})).toBeVisible();
-    await expect(chat).toHaveCount(0);
+    await expect(chat).toBeHidden();
     await page.getByRole("button",{name:"关闭划词提问"}).click();
     await page.evaluate(()=>getSelection().removeAllRanges());
     if (info.project.name === "desktop") {
@@ -70,12 +70,23 @@ test("同句跨来源和注音整体悬停，高亮完整包注音，重复词�
       await expect(article.locator(".article-sentence-highlight").first()).toHaveCSS("transition-duration","0s");
     }
     await page.evaluate(()=>scrollTo(0,600));
-    const before=await page.evaluate(()=>({top:scrollY,width:document.querySelector(".article-body").clientWidth}));
-    await page.getByRole("button",{name:"对话记录",exact:true}).evaluate(button=>button.click());
+    const before=await article.evaluate(element=>{
+      const anchor=[...element.querySelectorAll('[data-sentence-id]')].find(node=>node.getBoundingClientRect().bottom>64);
+      return {top:scrollY,width:element.querySelector('.article-body').clientWidth,anchor:anchor.dataset.sentenceId,anchorTop:anchor.getBoundingClientRect().top};
+    });
+    if(info.project.name === "phone") await page.getByRole("button",{name:"上划恢复对话",exact:true}).click();
+    else await page.getByRole("button",{name:"对话记录",exact:true}).evaluate(button=>button.click());
     await expect(chat).toBeVisible();
-    expect(await page.evaluate(()=>({top:scrollY,width:document.querySelector(".article-body").clientWidth}))).toEqual(before);
+    if(info.project.name === "desktop") {
+      expect(await article.locator('.article-body').evaluate(element=>element.clientWidth)).toBeLessThan(before.width);
+      expect(Math.abs((await article.locator(`[data-sentence-id="${before.anchor}"]`).first().boundingBox()).y-before.anchorTop)).toBeLessThan(2);
+    } else {
+      expect(await article.locator(".article-body").evaluate(element=>element.clientWidth)).toBe(before.width);
+      expect(Math.abs((await article.locator(`[data-sentence-id="${before.anchor}"]`).first().boundingBox()).y-before.anchorTop)).toBeLessThan(2);
+    }
+    const openedTop=await page.evaluate(()=>scrollY);
     await chat.locator(".chat-messages").evaluate(element=>{element.scrollTop=0;});
-    expect(await page.evaluate(()=>scrollY)).toBe(before.top);
+    expect(await page.evaluate(()=>scrollY)).toBe(openedTop);
     await chat.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();
     expect(await page.evaluate(()=>scrollY)).toBe(before.top);
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);

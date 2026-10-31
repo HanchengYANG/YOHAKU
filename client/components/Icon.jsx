@@ -21,12 +21,18 @@ export default function Icon({ name, size = 20, ...props }) {
     arrow: <path d="M5 12h14m-5-5 5 5-5 5" />,
     check: <path d="m5 12 4 4L19 6" />,
     close: <path d="m6 6 12 12M6 18 18 6" />,
+    "chevron-down": <path d="m6 9 6 6 6-6" />,
+    more: <><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></>,
+    send: <path d="M12 19V5m-6 6 6-6 6 6" />,
+    swap: <path d="m8 9 4-4 4 4m-8 6 4 4 4-4" />,
     down: (
       <>
         <path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5" />
       </>
     ),
     menu: <path d="M4 6h16M4 12h16M4 18h16" />,
+    "panel-close": <><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M9 3v18m7-12-3 3 3 3" /></>,
+    "panel-open": <><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M9 3v18m4-12 3 3-3 3" /></>,
     back: <path d="M19 12H5m5-5-5 5 5 5" />,
     type: (
       <>

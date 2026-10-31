@@ -77,7 +77,7 @@ test("关联历史保留A/B/A顺序，筛选与追问独立，旧新Markdown安�
     const article = page.getByRole("article", { name: "日语原文", exact: true });
     await expect(article).toBeVisible();
     await article.locator(`mark[data-qa-group-ids~="${groupA}"][data-qa-group-ids~="${groupB}"]`).first().click();
-    const chat = page.getByRole("region", { name: "原文 AI 讨论", exact: true });
+    const chat = page.getByLabel("原文 AI 讨论", {exact:true});
     await expect(chat.locator(".chat-message.user .chat-user-text")).toHaveText(["**A 首问**", "B 首问", "A 追问"]);
     await expect(chat.getByRole("button", { name: "翻译此片段", exact: true })).toHaveCount(0);
     await expect(chat.getByRole("button", { name: "解释此片段语法", exact: true })).toHaveCount(0);
@@ -101,16 +101,17 @@ test("关联历史保留A/B/A顺序，筛选与追问独立，旧新Markdown安�
       await expect(chat.locator(".chat-messages")).toHaveAttribute("aria-busy", "true");
       // On phones, move the original passage above the covering drawer before
       // tapping it. Keep the same panel mounted while B's response is pending.
+      if (info.project.name === "phone") await chat.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();
       const onlyA = article.locator(`mark[data-qa-group-ids="${groupA}"]`).first();
       await onlyA.evaluate((element) => { element.scrollIntoView({ block: "start" }); window.scrollBy(0, -100); });
       await onlyA.click();
       await expect(chat.locator(".chat-history-scope")).toContainText("此处关联 1 个问答组");
-      await expect(chat.getByRole("combobox", { name: "追问目标", exact: true })).toHaveValue(groupA);
+      await expect(chat.getByRole("combobox", { name: "追问目标", exact: true })).toHaveCount(0);
     } finally { releaseAnswer(); }
     await expect(chat.getByRole("textbox", { name: "向 AI 提问", exact: true })).toBeEnabled();
     await expect(chat.locator(".chat-message.assistant")).toHaveCount(2);
     await expect(chat.locator(".chat-message.user .chat-user-text")).toHaveText(["**A 首问**", "A 追问"]);
-    await expect(chat.getByRole("combobox", { name: "追问目标", exact: true })).toHaveValue(groupA);
+    await expect(chat.getByRole("combobox", { name: "追问目标", exact: true })).toHaveCount(0);
     await expect(chat.locator(".qa-group.active")).toHaveAttribute("data-qa-group-id", groupA);
     expect(discussion.messages.at(-1).groupId).toBe(groupB);
     await expect(chat.locator(".chat-markdown h2")).toHaveText("片段说明");

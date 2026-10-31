@@ -388,6 +388,39 @@ textarea::placeholder {
 .mobile-menu {
   display: none;
 }
+.desktop-sidebar-collapse,
+.desktop-sidebar-expand {
+  display: none;
+}
+@media (min-width: 761px) {
+  .desktop-sidebar-collapse {
+    display: flex;
+    position: absolute;
+    top: 6px;
+    right: 10px;
+  }
+  .sidebar-collapsed > .sidebar {
+    display: none;
+  }
+  .sidebar-collapsed > .main-panel {
+    margin-left: 0;
+  }
+  .sidebar-collapsed .topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    position: sticky;
+    top: 0;
+    z-index: 18;
+    min-height: 48px;
+    padding: 0 16px;
+    background: #f5f1e8;
+    border-bottom: 1px solid var(--line);
+  }
+  .sidebar-collapsed .desktop-sidebar-expand {
+    display: flex;
+  }
+}
 .welcome {
   width: min(810px, calc(100% - 100px));
   margin: 65px auto 30px;

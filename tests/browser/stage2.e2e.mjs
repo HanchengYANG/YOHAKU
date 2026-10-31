@@ -1,3 +1,4 @@
+import { openDocumentChat } from "./chat-controls.mjs";
 // UI integration only: actual uploads/Sharp/SQLite, explicit OAuth/model doubles.
 // These checks are not evidence of real subscription authorization or OCR quality.
 import { test, expect } from "@playwright/test";
@@ -1071,7 +1072,7 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
   const popup = page.getByRole("dialog", {name:"划词提问"});
   await popup.getByRole("button", {name:"自定义问题",exact:true}).click();
   await popup.getByRole("textbox", {name:"选区自定义问题"}).fill("背中在这里是什么意思？");
-  const chat = page.getByRole("region", { name: "原文 AI 讨论", exact: true });
+  const chat = page.getByLabel("原文 AI 讨论", {exact:true});
   let releaseAnswer;
   const answerGate = new Promise((resolve) => { releaseAnswer = resolve; });
   const answerRoute = `**/api/documents/${documentId}/conversations`;
@@ -1081,9 +1082,9 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
   });
   try {
     await popup.getByRole("button", { name: "发送", exact: true }).click();
-    const progress = chat.getByRole("region", { name: "AI回答进度", exact: true });
-    await expect(progress).toHaveAttribute("data-phase", "reply");
-    expect(await progress.getByRole("progressbar", { name: "生成回答进度", exact: true }).getAttribute("aria-valuenow")).toBeNull();
+    const progress = chat.getByRole("status", { name: "AI回答进度", exact: true });
+    await expect(progress).toHaveText("正在回答…");
+    await expect(progress.getByRole("progressbar")).toHaveCount(0);
     await expect(chat.getByRole("textbox", { name: "向 AI 提问", exact: true })).toBeDisabled();
     await page.screenshot({ path: `artifacts/design-2026-10-28/answer-progress-${info.project.name}.png`, fullPage: true, animations: "disabled" });
     releaseAnswer();
@@ -1110,7 +1111,7 @@ test("真实图片上传、校对保存与对话重开（OCR 和回答为测试�
     animations: "disabled",
   });
   await chat.getByRole("button", { name: "关闭 AI 讨论", exact: true }).click();
-  await page.getByRole("button", { name: "对话记录", exact: true }).click();
+  await openDocumentChat(page);
   await expect(chat.locator(".chat-message")).toHaveCount(4);
   const conversations = await (
     await page.request.get(`/api/documents/${documentId}/conversations`)
@@ -1771,7 +1772,7 @@ test("多页书籍逐张保存图片，翻页重开保留各页原图注音与�
     await expect(navigation.getByLabel("书籍文章", { exact: true })).toHaveValue(secondId);
     await expect(navigation.getByRole("button", { name: "下一篇", exact: true })).toBeDisabled();
     await expect(article.locator("rt")).toContainText(["そら"]);
-    await page.getByRole("button", { name: "对话记录", exact: true }).click();
+    await openDocumentChat(page);
     await expect(page.locator(".qa-group")).toHaveCount(0);
     await expect(page.locator(".chat-message")).toHaveCount(0);
     await page.getByRole("button", { name: "关闭 AI 讨论", exact: true }).click();
@@ -1781,7 +1782,7 @@ test("多页书籍逐张保存图片，翻页重开保留各页原图注音与�
     await expect(navigation.getByLabel("书籍文章", { exact: true })).toHaveValue(firstId);
     await expect(navigation.getByRole("button", { name: "上一篇", exact: true })).toBeDisabled();
     await expect(article.locator("rt")).toContainText(["くう"]);
-    await page.getByRole("button", { name: "对话记录", exact: true }).click();
+    await openDocumentChat(page);
     await expect(page.locator(".qa-group")).toHaveCount(discussion.groups.length);
     await expect(page.locator(".chat-message.user")).toContainText("第一张图片页的独立讨论");
     await page.getByRole("button", { name: "关闭 AI 讨论", exact: true }).click();
@@ -1856,7 +1857,7 @@ test("既有材料原地转为书籍，保留原图注音讨论并可追加文�
     await expect(navigation.getByLabel("书籍文章", { exact: true })).toHaveValue(secondId);
     await navigation.getByRole("button", { name: "上一篇", exact: true }).click();
     await expect(page.getByRole("heading", { name: original.title, exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "对话记录", exact: true }).click();
+    await openDocumentChat(page);
     await expect(page.locator(".qa-group")).toHaveCount(originalDiscussion.groups.length);
     await expect(page.locator(".chat-message.user")).toContainText("转换书籍前的原有讨论");
   } finally {

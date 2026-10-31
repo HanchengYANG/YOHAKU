@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import api from "./api.mjs";
 import { blocksToHtml, hasCompleteSentenceBoundaries, htmlToBlocks, appendImageBodyHtml } from "../shared/article-html.mjs";
 import { parseText, serializeBlocks } from "../shared/document.mjs";
@@ -13,6 +13,7 @@ import ImageImport from "./components/ImageImport.jsx";
 import { TaskList, TaskDetail } from "./components/ImageTasks.jsx";
 import { imageTasksChangedEvent, notifyImageTasksChanged } from "./image-tasks.mjs";
 import DocumentChat from "./components/DocumentChat.jsx";
+import { createChatSession } from "./chat-history.mjs";
 import AccountGate from "./components/AccountGate.jsx";
 import UserMenu from "./components/UserMenu.jsx";
 import BookView from "./components/BookView.jsx";
@@ -109,7 +110,7 @@ function Workspace({ user, onLoggedOut }) {
   const [importSession, setImportSession] = useState(0);
   const [importTask, setImportTask] = useState(null);
   const [chatRequest, setChatRequest] = useState(null);
-  const [selectedGroupIds, setSelectedGroupIds] = useState(null);
+  const [chatNavigation, setChatNavigation] = useState(null);
   const [appendTargetId, setAppendTargetId] = useState(null);
   const [segmentation, setSegmentation] = useState({ id: null, request: 0, busy: false, error: "" });
   const [promotion, setPromotion] = useState(null);
@@ -131,6 +132,10 @@ function Workspace({ user, onLoggedOut }) {
   const [taskCounts, setTaskCounts] = useState({});
   const [activeTaskCount, setActiveTaskCount] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem("yohaku.sidebarCollapsed") === "1"; }
+    catch { return false; }
+  });
   const [showRuby, setShowRuby] = useState(true);
   const [fontSize, setFontSize] = useState(26);
   const [panel, setPanel] = useState(() =>
@@ -146,8 +151,45 @@ function Workspace({ user, onLoggedOut }) {
   const pendingSegmentations = useRef(new Map());
   const automaticSegmentationAttempt = useRef(null);
   const currentView = useRef(null);
+  const chatSessions = useRef(new Map());
+  const chatSessionFor = (id) => {
+    if (!chatSessions.current.has(id)) chatSessions.current.set(id, createChatSession());
+    return chatSessions.current.get(id);
+  };
+  const readerMain = useRef(null);
+  const readingPosition = useRef(null);
+  const sidebarCollapseButton = useRef(null);
+  const sidebarExpandButton = useRef(null);
+  const focusSidebarToggle = useRef(false);
   const currentReadingDocument = document?.id === activeId ? document : null;
   const readingReady = !!currentReadingDocument && hasCompleteSentenceBoundaries(currentReadingDocument.bodyHtml || blocksToHtml(currentReadingDocument.blocks));
+  const rememberReadingPosition = () => {
+    if (!window.matchMedia("(min-width: 761px)").matches) return;
+    const anchor = Array.from(readerMain.current?.querySelectorAll(".article-body [data-sentence-id]") || [])
+      .find((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.bottom > 64 && rect.top < window.innerHeight;
+      });
+    readingPosition.current = anchor ? { element: anchor, top: anchor.getBoundingClientRect().top } : null;
+  };
+  const toggleDesktopSidebar = () => {
+    rememberReadingPosition();
+    focusSidebarToggle.current = true;
+    setSidebarCollapsed((value) => !value);
+  };
+  useLayoutEffect(() => {
+    const anchor = readingPosition.current;
+    readingPosition.current = null;
+    if (anchor?.element.isConnected) window.scrollBy(0, anchor.element.getBoundingClientRect().top - anchor.top);
+    if (focusSidebarToggle.current) {
+      focusSidebarToggle.current = false;
+      (sidebarCollapsed ? sidebarExpandButton : sidebarCollapseButton).current?.focus({ preventScroll: true });
+    }
+  }, [sidebarCollapsed, panel]);
+  useEffect(() => {
+    try { localStorage.setItem("yohaku.sidebarCollapsed", sidebarCollapsed ? "1" : "0"); }
+    catch { /* Sidebar controls still work when browser storage is unavailable. */ }
+  }, [sidebarCollapsed]);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -381,6 +423,7 @@ function Workspace({ user, onLoggedOut }) {
   const openPanel = (name) => {
     if (name === "settings" && !user.isAdmin) return;
     if (!mayLeave()) return;
+    if (name === "chat" && panel !== "chat") rememberReadingPosition();
     importRequest.current++;
     if (name === "image") {
       setImportSession((current) => current + 1);
@@ -397,6 +440,7 @@ function Workspace({ user, onLoggedOut }) {
   };
   const closePanel = () => {
     if (!mayLeave()) return;
+    if (panel === "chat") rememberReadingPosition();
     importRequest.current++;
     setPanel(null);
     setDirty(false);
@@ -675,7 +719,7 @@ function Workspace({ user, onLoggedOut }) {
   };
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       {sidebarOpen && (
         <button
           className="sidebar-backdrop"
@@ -684,9 +728,15 @@ function Workspace({ user, onLoggedOut }) {
         />
       )}
       <aside
+        id="bookshelf"
         className={`sidebar ${sidebarOpen ? "is-open" : ""}`}
         aria-label="书架"
       >
+        <button ref={sidebarCollapseButton} className="icon-button desktop-sidebar-collapse"
+          type="button" aria-label="收起书架" aria-controls="bookshelf" aria-expanded="true"
+          onClick={toggleDesktopSidebar}>
+          <Icon name="panel-close" size={18} />
+        </button>
         <a
           className="brand"
           href="#"
@@ -824,6 +874,11 @@ function Workspace({ user, onLoggedOut }) {
       </aside>
       <main className="main-panel">
         <header className="topbar">
+          {sidebarCollapsed && <button ref={sidebarExpandButton} className="icon-button desktop-sidebar-expand"
+            type="button" aria-label="展开书架" aria-controls="bookshelf" aria-expanded="false"
+            onClick={toggleDesktopSidebar}>
+            <Icon name="panel-open" />
+          </button>}
           <button
             className="icon-button mobile-menu"
             aria-label="打开书架"
@@ -879,6 +934,7 @@ function Workspace({ user, onLoggedOut }) {
           <Editor
             key={editorSession}
             initial={draft}
+            chatSession={draft.id ? chatSessionFor(draft.id) : null}
             onSave={save}
             onDelete={remove}
             onCancel={cancelEdit}
@@ -898,7 +954,7 @@ function Workspace({ user, onLoggedOut }) {
             onBack={() => openDocument("tasks")} onDocumentOpen={openDocument} />
         ) : document ? (
           <div className={`reader-workspace ${readingReady && panel === "chat" ? "has-chat" : ""}`}>
-            <div className="reader-main-column">
+            <div className="reader-main-column" ref={readerMain}>
               {currentReadingDocument && book ? (
                 <BookNavigation
                   book={book}
@@ -920,10 +976,10 @@ function Workspace({ user, onLoggedOut }) {
                 onDelete={() => remove(document)}
                 onDiscuss={() => {
                   if (panel === "chat") closePanel();
-                  else { setSelectedGroupIds(null); setChatRequest(null); openPanel("chat"); }
+                  else { setChatRequest(null); openPanel("chat"); }
                 }}
-                onAsk={(request) => { setChatRequest({...request,key:crypto.randomUUID()}); setSelectedGroupIds(null); setPanel("chat"); }}
-                onGroup={(ids) => { setSelectedGroupIds(ids); setChatRequest(null); setPanel("chat"); }}
+                onAsk={(request) => { if (panel !== "chat") rememberReadingPosition(); setChatRequest({...request,key:crypto.randomUUID()}); setPanel("chat"); }}
+                onGroup={(ids) => { if (panel !== "chat") rememberReadingPosition(); setChatNavigation({key:crypto.randomUUID(),documentId:document.id,groupIds:ids}); setChatRequest(null); setPanel("chat"); }}
                 onAppendImage={() => { openPanel("image"); setAppendTargetId(document.id); setImportBookId(document.bookId || null); }}
                 onSegment={() => segmentDocument(document, true)}
                 segmentationBusy={segmentation.id === document.id && segmentation.busy}
@@ -950,17 +1006,20 @@ function Workspace({ user, onLoggedOut }) {
                 onBack={() => openDocument("")}
               />}
             </div>
-            {readingReady && panel === "chat" && (
+            {readingReady && (
               <DocumentChat
+                key={document.id}
                 document={document}
-                request={chatRequest} selectedGroupIds={selectedGroupIds}
+                open={panel === "chat"} session={chatSessionFor(document.id)}
+                request={chatRequest} navigation={chatNavigation}
+                onOpen={() => { rememberReadingPosition(); setPanel("chat"); }}
                 onDocumentChanged={refreshCurrentDocument}
                 onRequestHandled={() => setChatRequest(null)}
                 onClose={() => {
+                  rememberReadingPosition();
                   setPanel(null);
                   setDirty(false);
                 }}
-                onDirty={setDirty}
               />
             )}
           </div>

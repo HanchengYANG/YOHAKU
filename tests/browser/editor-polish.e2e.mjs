@@ -59,7 +59,7 @@ test("真实编辑面的高亮与输入字体、换行和滚动对齐，记录�
     const rect=await mark.boundingBox();
     const beforeRecords=await input.boundingBox();
     await page.mouse.click(rect.x+1,rect.y+rect.height/2);
-    await expect(page.locator(".editor-chat-overlay")).toHaveCount(0);
+    await expect(page.locator(".editor-chat-overlay.is-open")).toHaveCount(0);
     await expect(page.getByRole("button",{name:/查看此处记录/})).toBeVisible();
     const afterRecords=await input.boundingBox();
     expect(afterRecords.y).toBeCloseTo(beforeRecords.y,1);
@@ -167,6 +167,7 @@ test("编辑器新增与删除问答后取消，阅读面立即同步已保存�
     await page.getByRole("button",{name:/查看此处记录/}).click();
     await expect(overlay.locator(".chat-message.assistant")).toHaveCount(1);
     page.once("dialog",dialog=>dialog.accept());
+    await overlay.getByRole("button",{name:"更多对话操作",exact:true}).click();
     await overlay.getByRole("button",{name:"删除文章对话",exact:true}).click();
     await expect(page.locator(".body-editor-part[data-qa-group-ids]")).toHaveCount(0);
     await overlay.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();
@@ -189,7 +190,7 @@ test("自定义问题确认输入法候选时不会提前发送", async ({page},
     await cdp.send("Input.imeSetComposition",{text:"せつめい",selectionStart:4,selectionEnd:4});
     await question.dispatchEvent("keydown",{key:"Enter",code:"Enter",keyCode:229,isComposing:true});
     expect((await(await page.request.get(`/api/documents/${document.id}/conversations`)).json()).conversations).toEqual([]);
-    await expect(page.locator(".editor-chat-overlay")).toHaveCount(0);
+    await expect(page.locator(".editor-chat-overlay.is-open")).toHaveCount(0);
     await cdp.send("Input.insertText",{text:"説明してください"});
     await expect(question).toHaveValue("説明してください");
     await question.press("Enter");

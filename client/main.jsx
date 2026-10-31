@@ -9,6 +9,7 @@ import "./design-theme.css";
 import "./welcome.css";
 import "./pwa.css";
 import "./article.css";
+import "./document-chat.css";
 
 createRoot(document.getElementById("root")).render(
   <>

@@ -9,3 +9,8 @@ export function visibleChatMessages(messages = [], groupIds = null) {
 export function availableChatGroups(groups = [], groupIds = null) {
   return groupIds ? groups.filter((group) => groupIds.includes(group.id)) : groups;
 }
+
+// Kept by the logged-in workspace only; drafts never survive a page reload.
+export function createChatSession() {
+  return { scopeGroupIds: null, groupId: null, drafts: {}, views: new Map(), lastScope: null, lastNavigationKey: null, failedIntent: null };
+}

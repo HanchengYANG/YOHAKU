@@ -84,6 +84,13 @@ summary:focus-visible {
 .sidebar .brand small {
   color: #b6cbbd;
 }
+.sidebar .desktop-sidebar-collapse {
+  color: #d3dfd2;
+}
+.sidebar .desktop-sidebar-collapse:hover {
+  color: #fbf4e6;
+  background: #ffffff12;
+}
 .sidebar .button.primary {
   color: var(--ink);
   background: #efdec0;

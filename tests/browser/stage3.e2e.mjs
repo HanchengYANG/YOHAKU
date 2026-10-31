@@ -1,3 +1,4 @@
+import { openDocumentChat } from "./chat-controls.mjs";
 import { test, expect } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -50,8 +51,9 @@ test("划词不发模型请求，快捷问答只送选区句子，校对与重�
     await expect(popup).toBeVisible();
     expect((await calls()).filter((call) => call.type === "chat")).toHaveLength(beforeSelection);
     await popup.getByRole("button", { name: "翻译", exact: true }).click();
-    const chat = page.getByRole("region", { name: "原文 AI 讨论", exact: true });
+    const chat = page.getByLabel("原文 AI 讨论", {exact:true});
     await expect(chat.locator(".chat-message.assistant")).toHaveCount(1);
+    await chat.locator(".chat-answer-sources > summary").click();
     await expect(chat.getByRole("link", { name: "日语学习测试来源" })).toHaveAttribute("href", "https://www.jpf.go.jp/");
     const sent = (await calls()).filter((call) => call.type === "chat").at(-1);
     expect(sent.webSearch).toBe(true);
@@ -75,7 +77,7 @@ test("划词不发模型请求，快捷问答只送选区句子，校对与重�
     saved = await current(page, document.id);
     expect(bodyRanges(saved.bodyHtml).sentences.map((sentence) => sentence.id)).toEqual(bodyRanges(document.bodyHtml).sentences.map((sentence) => sentence.id));
     expect(bodyRanges(saved.bodyHtml).qa[0].id).toBe(groupId);
-    await page.getByRole("button", { name: "对话记录", exact: true }).click();
+    await openDocumentChat(page);
     await expect(chat.locator(".qa-group-heading")).toContainText("原引用文字已修改");
     await expect(chat.locator(".qa-group blockquote")).toHaveText("背中");
     await chat.getByRole("textbox", { name: "向 AI 提问" }).fill("继续解释这个词。");
@@ -91,7 +93,7 @@ test("划词不发模型请求，快捷问答只送选区句子，校对与重�
     expect(bodyText(restructured.bodyHtml)).toBe(bodyText(saved.bodyHtml));
     expect(bodyRanges(restructured.bodyHtml).qa[0].id).toBe(groupId);
     await page.reload();
-    await page.getByRole("button", { name: "对话记录", exact: true }).click();
+    await openDocumentChat(page);
     await expect(chat.locator(".chat-message.assistant")).toHaveCount(2);
     const after = await (await page.request.get(`/api/documents/${document.id}/conversations`)).json();
     expect(after.conversations[0].id).toBe(conversationId);
@@ -106,7 +108,7 @@ test("删除选区即时提示游离，撤销取消恢复标记，保存后仍�
   try {
     await selectArticleText(page, "背中");
     await page.getByRole("dialog", {name:"划词提问"}).getByRole("button",{name:"解释语法",exact:true}).click();
-    const chat = page.getByRole("region", {name:"原文 AI 讨论"});
+    const chat = page.getByLabel("原文 AI 讨论", {exact:true});
     await expect(chat.locator(".qa-group")).toHaveCount(1);
     await chat.getByRole("button",{name:"关闭 AI 讨论"}).click();
     const saved = await current(page,document.id);
@@ -124,7 +126,7 @@ test("删除选区即时提示游离，撤销取消恢复标记，保存后仍�
     await page.getByRole("button",{name:"校对文字与注音"}).click();
     await body.fill(original.replace("背中", ""));
     await page.getByRole("button",{name:"保存并阅读"}).click();
-    await page.getByRole("button",{name:"对话记录",exact:true}).click();
+    await openDocumentChat(page);
     await expect(chat.locator(".qa-group-heading")).toContainText("游离／原文关联已删除");
     await chat.getByRole("textbox",{name:"向 AI 提问"}).fill("原引用已经删掉，请继续解释。");
     await chat.getByRole("button",{name:"发送问题",exact:true}).click();
@@ -132,6 +134,7 @@ test("删除选区即时提示游离，撤销取消恢复标记，保存后仍�
     const snapshot = (await calls()).filter((call)=>call.type === "chat").at(-1);
     expect(snapshot.prompt).toContain('"selectedText":"背中"');
     page.once("dialog",(dialog)=>dialog.accept());
+    await chat.getByRole("button",{name:"更多对话操作",exact:true}).click();
     await chat.getByRole("button",{name:"删除文章对话",exact:true}).click();
     await expect(chat.locator(".qa-group")).toHaveCount(0);
     expect((await (await page.request.get(`/api/documents/${document.id}/conversations`)).json()).conversations).toEqual([]);
@@ -297,7 +300,7 @@ test("编辑器删除对话后撤销和重做保留文字且不会恢复失效�
   try {
     await selectArticleText(page,"背中");
     await page.getByRole("dialog",{name:"划词提问"}).getByRole("button",{name:"翻译",exact:true}).click();
-    const chat=page.getByRole("region",{name:"原文 AI 讨论",exact:true});
+    const chat=page.getByLabel("原文 AI 讨论", {exact:true});
     await expect(chat.locator(".qa-group")).toHaveCount(1);
     await chat.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();
     await page.getByRole("button",{name:"校对文字与注音",exact:true}).click();
@@ -318,6 +321,7 @@ test("编辑器删除对话后撤销和重做保留文字且不会恢复失效�
     const overlay=page.locator(".editor-chat-overlay");
     await expect(overlay.locator(".qa-group")).toHaveCount(1);
     page.once("dialog",dialog=>dialog.accept());
+    await overlay.getByRole("button",{name:"更多对话操作",exact:true}).click();
     await overlay.getByRole("button",{name:"删除文章对话",exact:true}).click();
     await expect(structure.locator("[data-qa-group-ids]")).toHaveCount(0);
     await overlay.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();
