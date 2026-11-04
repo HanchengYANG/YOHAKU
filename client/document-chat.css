@@ -39,6 +39,11 @@
 .chat-timeline-panel .chat-message > .chat-markdown { margin: 0; white-space: normal; }
 .chat-answer-sources { margin-top: 10px; color: var(--muted); font-size: 12px; }
 .chat-answer-sources > summary { padding: 5px 0; cursor: pointer; }
+.ai-execution-details { margin-top: 8px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.ai-execution-details > summary { min-height: 32px; padding: 5px 0; cursor: pointer; }
+.ai-execution-details dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 4px 0 10px; }
+.ai-execution-details dt, .ai-execution-details dd { margin: 0; line-height: 1.7; }
+@media (pointer: coarse) { .ai-execution-details > summary { min-height: 44px; } }
 .chat-timeline-panel .chat-empty { padding: 28px 8px; font-size: 13px; color: var(--muted); }
 .chat-waiting { display: flex; align-items: center; gap: 8px; min-height: 32px; font-size: 12px; color: var(--muted); }
 .chat-waiting::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--rust); }

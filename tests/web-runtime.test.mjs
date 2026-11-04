@@ -121,3 +121,14 @@ test("流式连接中断或调用方取消后仍拒绝部分答案，并释放�
   await assert.rejects(g.runtime.run({prompt:"问题",model:"verified-model",signal:controller.signal}),/停止或超时/);
   assert.equal(g.calls.length,0);
 });
+
+test("Responses问答仅在显式配置时发送reasoning.effort，默认不插入参数", async () => {
+  const f = fixture();
+  await f.runtime.run({ prompt: "问题", model: "verified-model", reasoning: { effort: "low" } });
+  assert.deepEqual(JSON.parse(f.calls[0].request.body).reasoning, { effort: "low" });
+  await f.runtime.run({ prompt: "默认问题", model: "verified-model" });
+  assert.equal(Object.hasOwn(JSON.parse(f.calls[1].request.body), "reasoning"), false);
+  for (const reasoning of [{ enabled: true }, { budgetTokens: 1024 }])
+    await assert.rejects(f.runtime.run({ prompt: "不支持的控制", model: "verified-model", reasoning }), (error) => error.status === 400);
+  assert.equal(f.calls.length, 2);
+});

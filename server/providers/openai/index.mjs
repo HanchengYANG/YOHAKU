@@ -1,7 +1,12 @@
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { createChatGPTAuth } from "./auth.mjs";
 import { createWebRuntime } from "./web-runtime.mjs";
 import { createCodexRuntime } from "./runtime.mjs";
+import { createOpenAIModelTests } from "./model-tests.mjs";
+import { validateModelReasoning } from "../reasoning.mjs";
+import { normalizeReasoning } from "../../../shared/ai-roles.mjs";
 
 const capabilities = Object.freeze({
   imageInput: true,
@@ -35,7 +40,7 @@ export function createOpenAIConnection({
     storageDir: join(directory, "runtime"),
   });
   const web = createWebRuntime({ ...webRuntimeOptions, auth });
-  let busy = false, lastTransport = "cli", generation = 0;
+  let busy = false, testing = false, lastTransport = "cli", generation = 0;
   const runtime = {
     async run(input = {}) {
       if (busy) throw Object.assign(new Error("AI 正在处理另一项请求，请稍后重试。"), { status: 409, expose: true });
@@ -50,14 +55,63 @@ export function createOpenAIConnection({
       } finally { busy = false; }
     },
     stop: () => { generation++; cli.stop(); web.stop(); },
-    status: () => ({ ...cli.status(), busy, ...(lastTransport === "responses" ? { ...web.status(), busy } : {}), transport: lastTransport }),
+    status: () => ({ ...cli.status(), busy: busy || testing, testing, ...(lastTransport === "responses" ? { ...web.status(), busy: busy || testing } : {}), transport: lastTransport }),
   };
+  const credentialStatus = () => auth.credentialStatus();
+  const modelTests = createOpenAIModelTests({ directory, credentialStatus, runtime });
+  const catalogFile = join(directory, "model-catalog.json");
+  let catalog = null, loaded;
+  async function knownModels() {
+    await (loaded ||= (async () => {
+      try { catalog = JSON.parse(await readFile(catalogFile, "utf8")); }
+      catch (error) { if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error; }
+    })());
+    const credential = await credentialStatus();
+    return catalog?.credentialId === credential.credentialId ? catalog.value : { models: [], source: "subscription" };
+  }
+  async function models({ signal, refresh = true } = {}) {
+    if (busy || testing) throw Object.assign(new Error("AI 正在处理请求，请稍后刷新模型目录。"), { status: 409, expose: true });
+    signal?.throwIfAborted();
+    const credential = await credentialStatus();
+    const value = await cli.models({ refresh, expectedAccountId: credential.activeAccountId, expectedSubject: credential.subject });
+    signal?.throwIfAborted();
+    if ((await credentialStatus()).credentialId !== credential.credentialId)
+      throw Object.assign(new Error("授权已变化，请重新获取模型目录。"), { status: 409, expose: true });
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const next = { credentialId: credential.credentialId, value }, temporary = `${catalogFile}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, JSON.stringify(next), { mode: 0o600, flag: "wx" });
+      await rename(temporary, catalogFile); catalog = next; loaded = Promise.resolve();
+    } finally { await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; }); }
+    return value;
+  }
+  async function validateReasoning(model, input) {
+    if (!normalizeReasoning(input)) return undefined;
+    const catalog = await knownModels();
+    return validateModelReasoning(catalog.models.find((entry) => entry.id === model), input);
+  }
   return {
     id: "openai",
     label: "OpenAI",
     auth,
     runtime,
     capabilities,
+    credentialStatus,
+    models, knownModels, validateReasoning,
+    testReports: () => modelTests.reports(),
+    async testModel(model, options = {}) {
+      if (busy || testing) throw Object.assign(new Error("AI 正在处理请求，请稍后测试。"), { status: 409, expose: true });
+      testing = true;
+      try { await validateReasoning(model, options.reasoning); return await modelTests.test(model, options); }
+      finally { testing = false; }
+    },
+    async configuration() {
+      const catalog = await knownModels();
+      const defaultModel = catalog.models.find((entry) => entry.isDefault && entry.inputModalities?.includes("image"))
+        || catalog.models.find((entry) => entry.inputModalities?.includes("image"));
+      return { models: catalog.models, modelsSource: catalog.source, model: cli.status().model || defaultModel?.id || null,
+        modelChecks: await modelTests.reports() };
+    },
     async status() {
       const authentication = await auth.status();
       return {

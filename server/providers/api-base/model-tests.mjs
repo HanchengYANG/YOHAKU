@@ -4,6 +4,7 @@ import { join } from "node:path";
 import sharp from "sharp";
 import { generateText, streamText, Output } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { requiredCapabilities, normalizeReasoning, reasoningKey } from "../../../shared/ai-roles.mjs";
 
 const fail = (status, message) => Object.assign(new Error(message), { status, expose: true });
 const scopeFor = ({ baseURL, apiKey }) => createHash("sha256").update(JSON.stringify([baseURL, apiKey])).digest("hex");
@@ -39,20 +40,27 @@ export function createModelTests({ directory, fetchImpl, timeoutMs = 60000 }) {
     const scope = scopeFor(configuration);
     return records.filter((record) => record.scope === scope).map(publicReport);
   }
-  async function test(configuration, model, { signal } = {}) {
+  async function test(configuration, model, { signal, role, referenceImage = false, reasoning } = {}) {
     await load();
     const provider = createOpenAICompatible({ name: "api_base", baseURL: configuration.baseURL,
       apiKey: configuration.apiKey, fetch: fetchImpl });
-    const checks = {}, scope = scopeFor(configuration);
+    const selectedReasoning = normalizeReasoning(reasoning), key = reasoningKey(selectedReasoning);
+    const scope = scopeFor(configuration), checkedAt = new Date().toISOString();
+    const previous = records.find((record) => record.scope === scope && record.model === model && reasoningKey(record.reasoning) === key);
+    const checks = Object.fromEntries(Object.entries(previous?.checks || {}).map(([name, check]) =>
+      [name, { ...check, checkedAt: check.checkedAt || previous.checkedAt }]));
+    const required = role ? requiredCapabilities(role, referenceImage) : ["streaming", "json", "image"];
     let denied = false;
     async function check(capability, work) {
+      if (!required.includes(capability)) return;
       if (denied) { checks[capability] = { state: "failed", message: "前一步鉴权失败，未继续发送请求。", elapsedMs: 0 }; return; }
       signal?.throwIfAborted();
       const timeout = AbortSignal.timeout(timeoutMs);
       const abortSignal = AbortSignal.any([timeout, ...(signal ? [signal] : [])]);
       const start = performance.now();
       try {
-        await work({ model: provider(model), maxRetries: 0, maxOutputTokens: 2048, abortSignal });
+        await work({ model: provider(model), maxRetries: 0, maxOutputTokens: 2048, abortSignal,
+          ...(selectedReasoning ? { providerOptions: { apiBase: { reasoningEffort: selectedReasoning.effort } } } : {}) });
         checks[capability] = { state: "supported", message: "测试通过。" };
       } catch (error) {
         if (signal?.aborted) throw fail(409, "模型测试已取消。");
@@ -60,6 +68,7 @@ export function createModelTests({ directory, fetchImpl, timeoutMs = 60000 }) {
         checks[capability] = checkFailure(error, capability, timeout.aborted);
       }
       checks[capability].elapsedMs = Math.round(performance.now() - start);
+      checks[capability].checkedAt = checkedAt;
     }
     await check("streaming", async (options) => {
       const result = streamText({ ...options, prompt: "请只回复 OK，不要解释。", onError: () => {} });
@@ -83,9 +92,9 @@ export function createModelTests({ directory, fetchImpl, timeoutMs = 60000 }) {
       if (result.finishReason !== "stop" || result.text.replace(/\s/g, "") !== "42") throw new Error("图片测试未通过。");
     });
     signal?.throwIfAborted();
-    const report = { scope, model, checkedAt: new Date().toISOString(),
-      passed: Object.values(checks).every((result) => result.state === "supported"), checks };
-    const next = [...records.filter((record) => record.scope !== scope || record.model !== model), report].slice(-200);
+    const report = { scope, model, ...(selectedReasoning ? { reasoning: selectedReasoning } : {}), checkedAt,
+      passed: ["streaming", "json", "image"].every((name) => checks[name]?.state === "supported"), checks };
+    const next = [...records.filter((record) => record.scope !== scope || record.model !== model || reasoningKey(record.reasoning) !== key), report].slice(-200);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const temporary = `${filename}.${randomUUID()}.tmp`;
     try {
@@ -93,7 +102,8 @@ export function createModelTests({ directory, fetchImpl, timeoutMs = 60000 }) {
       await rename(temporary, filename);
       records = next;
     } finally { await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; }); }
-    return publicReport(report);
+    return { ...publicReport(report), ...(role ? { role,
+      passed: required.every((name) => checks[name]?.state === "supported") } : {}) };
   }
   return { reports, test };
 }

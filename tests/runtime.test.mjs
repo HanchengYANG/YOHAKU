@@ -695,3 +695,48 @@ test("业务固定的授权账号与subject必须在取token前后和发turn前�
   );
   assert.equal(subjectOnly.children.length, 0);
 });
+
+test("当前订阅目录包含纯文字模型，逐次模型选择不改全局默认或串用模型", async (t) => {
+  const f = await fixture(t, { catalog: { data: [catalog[0], { ...catalog[0], id: "text-only", model: "text-only", isDefault: false, inputModalities: ["text"] }] },
+    onTurn: (turn) => { turn.reply(); turn.item("完成"); turn.complete(); } });
+  const models = await f.runtime.models();
+  assert.deepEqual(models.models.map((model) => model.id), ["fixture-model", "text-only"]);
+  assert.equal(f.turns.length, 0);
+  const text = await f.runtime.run({ model: "text-only", prompt: "文字注音" });
+  assert.equal(text.model, "text-only");
+  assert.equal(f.turns[0].request.params.model, "text-only");
+  assert.equal(f.runtime.status().model, "fixture-model");
+  const image = await f.runtime.run({ model: "fixture-model", prompt: "图片识别", image: "data:image/png;base64,AA==" });
+  assert.equal(image.model, "fixture-model");
+  await assert.rejects(f.runtime.run({ model: "text-only", prompt: "不支持图片", image: "data:image/png;base64,AA==" }), /不支持图片/);
+  await assert.rejects(f.runtime.run({ model: "absent", prompt: "不在目录中" }), /不在当前订阅目录/);
+  assert.equal(f.turns.length, 2);
+});
+
+test("取消CLI角色调用会停止进程并释放共享执行位，已取消调用不改变运行状态", async (t) => {
+  const f = await fixture(t);
+  const canceled = new AbortController(); canceled.abort();
+  await assert.rejects(f.runtime.run({ prompt: "已取消", signal: canceled.signal }));
+  assert.equal(f.runtime.status().busy, false);
+  const controller = new AbortController();
+  const running = f.runtime.run({ prompt: "即将取消", signal: controller.signal });
+  await waitFor(() => f.turns.length === 1);
+  controller.abort();
+  await assert.rejects(running, /中断/);
+  assert.equal(f.runtime.status().busy, false);
+  assert.equal(f.runtime.status().running, false);
+});
+
+test("OpenAI角色推理强度来自订阅目录并传入turn，默认不覆盖，未知开关和预算在推理前拒绝", async (t) => {
+  const f = await fixture(t, { onTurn: (turn) => { turn.reply(); turn.item("完成"); turn.complete(); } });
+  const listed = await f.runtime.models();
+  assert.deepEqual(listed.models[0].reasoningOptions, { efforts: ["low", "medium", "high"] });
+  const result = await f.runtime.run({ model: "fixture-model", prompt: "角色请求", reasoning: { effort: "high" } });
+  assert.equal(f.turns[0].request.params.effort, "high");
+  assert.equal(result.reasoningEffort, "high");
+  const prepared = await f.runtime.prepare({ model: "fixture-model", reasoning: { effort: "low" } });
+  assert.equal(prepared.model, "fixture-model");
+  for (const reasoning of [{ effort: "none" }, { enabled: true }, { budgetTokens: 1024 }])
+    await assert.rejects(f.runtime.run({ model: "fixture-model", prompt: "不能推理", reasoning }), (error) => error.status === 400);
+  assert.equal(f.turns.length, 1);
+});

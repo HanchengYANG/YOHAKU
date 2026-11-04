@@ -15,7 +15,7 @@ export default function AISettings({ onClose, onChanged }) {
   useEffect(() => {
     mounted.current = true;
     const controller = new AbortController();
-    api("/ai/status", { signal: controller.signal })
+    api("/ai/status?providerId=openai", { signal: controller.signal })
       .then((value) => {
         setStatus(value);
         setSelectedProviderId(value.providerId || "openai");
@@ -108,22 +108,6 @@ export default function AISettings({ onClose, onChanged }) {
       setSelectedProviderId(value.providerId);
     }
   });
-  const chooseProvider = (model) =>
-    perform("provider", async () => {
-      const value = await api("/providers/active", {
-        method: "POST",
-        body: JSON.stringify({ providerId: selectedProviderId, ...(model ? { model } : {}) }),
-      });
-      if (mounted.current) {
-        setStatus(value);
-        setSelectedProviderId(value.providerId);
-        onChanged?.(value);
-        const name = value.providers.find((provider) => provider.id === value.providerId)?.name || value.providerId;
-        setNotice(value.providerId === "openai" && value.connected
-          ? "已保存提供方：OpenAI，继续使用已保存的 ChatGPT 授权。"
-          : `已保存提供方：${name}。`);
-      }
-    });
   const claim = () =>
     perform("claim", async () => {
       await api("/ai/claim-existing", { method: "POST" });
@@ -144,7 +128,7 @@ export default function AISettings({ onClose, onChanged }) {
       <div className="stage2-heading">
         <div>
           <span className="eyebrow">阅读助手</span>
-          <h1>配置网站共享 AI</h1>
+          <h1>AI 设置</h1>
         </div>
         <button
           type="button"
@@ -156,8 +140,7 @@ export default function AISettings({ onClose, onChanged }) {
         </button>
       </div>
       <p className="stage2-description">
-        网站拥有者统一配置 AI 服务，所有网站账号共用这份 AI 授权和额度。
-        各账号的书架、图片与讨论仍各自独立。
+        管理网站共享的 ChatGPT 授权和 API key。角色使用的提供方与模型在「角色配置」中统一保存。
       </p>
       <label className="stage2-field account-picker">
         AI 提供方
@@ -183,8 +166,7 @@ export default function AISettings({ onClose, onChanged }) {
           ))}
         </select>
       </label>
-      <p className="ai-model-caption provider-hint">当前提供方：{status?.providers?.find((provider) => provider.id === status.activeProviderId)?.name || "正在读取…"}。
-        选择后点击「保存提供方」生效，切换会保留各自已有的授权、API key 和模型。</p>
+      <p className="ai-model-caption provider-hint">选择提供方仅查看和管理连接，不会改变识别、注音、分句或问答的配置。</p>
       {error && (
         <div className="stage2-error" role="alert">
           {error}
@@ -196,7 +178,7 @@ export default function AISettings({ onClose, onChanged }) {
         </div>
       )}
       {status?.providerId === "api_base" ? <APIBaseSettings status={status} busy={busy}
-        perform={perform} refresh={refresh} onNotice={setNotice} onSaveProvider={chooseProvider} /> : <div className="ai-account-card">
+        perform={perform} refresh={refresh} onNotice={setNotice} /> : <div className="ai-account-card">
         {status?.canClaimExisting && (
           <div className="stage2-notice">
             <p>
@@ -244,9 +226,6 @@ export default function AISettings({ onClose, onChanged }) {
         {status?.lastError && (
           <p className="ai-status-error">{status.lastError}</p>
         )}
-        {status?.model && connected && (
-          <p className="ai-model-caption">当前模型：{status.model}</p>
-        )}
         {accounts.length > 0 && (
           <label className="stage2-field account-picker">
             已保存的 ChatGPT 账户
@@ -271,10 +250,6 @@ export default function AISettings({ onClose, onChanged }) {
           </label>
         )}
         <div className="ai-account-actions">
-          <button type="button" className="button primary" onClick={() => chooseProvider()}
-            disabled={!!busy || !status || selectedProviderId === status.activeProviderId}>
-            {busy === "provider" ? "正在保存…" : "保存提供方"}
-          </button>
           {!connected && status && (
             <button
               className="button primary chatgpt-connect"

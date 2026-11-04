@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { CHAT_INSTRUCTIONS } from "./runtime.mjs";
 import { readEventStream } from "../../../shared/event-stream.mjs";
+import { normalizeReasoning } from "../../../shared/ai-roles.mjs";
 
 const failure = (message, status = 502) => Object.assign(new Error(message), { status, expose: true });
 function publicUrl(value) {
@@ -53,9 +54,11 @@ export function createWebRuntime({ auth, fetchImpl = fetch, turnTimeoutMs = 1800
     if (!account.connected) throw failure("请先连接网站共享 ChatGPT 订阅授权。", 401);
     if ((expected.expectedAccountId && accountId(account) !== expected.expectedAccountId) || (expected.expectedSubject && account.subject !== expected.expectedSubject)) throw failure("AI 授权身份已变化，请重新发起请求。", 409);
   }
-  async function run({ prompt, model, threadId, expectedAccountId, expectedSubject, signal, onEvent } = {}) {
+  async function run({ prompt, model, threadId, reasoning, expectedAccountId, expectedSubject, signal, onEvent } = {}) {
     if (controller) throw failure("AI 正在处理请求，请稍后重试。", 409);
     if (typeof prompt !== "string" || !prompt.trim() || typeof model !== "string" || !model.trim()) throw failure("联网问答缺少问题或有效模型。", 400);
+    const selectedReasoning = normalizeReasoning(reasoning);
+    if (selectedReasoning && (selectedReasoning.enabled !== undefined || selectedReasoning.budgetTokens !== undefined)) throw failure("此连接仅支持模型目录中的推理强度。", 400);
     const active = new AbortController(); controller = active;
     const abort = () => active.abort(signal.reason);
     if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, {once:true});
@@ -71,6 +74,7 @@ export function createWebRuntime({ auth, fetchImpl = fetch, turnTimeoutMs = 1800
         method: "POST", signal: active.signal,
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ model, instructions: CHAT_INSTRUCTIONS,
+          ...(selectedReasoning ? { reasoning: { effort: selectedReasoning.effort } } : {}),
           input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
           tools: [{ type: "web_search", external_web_access: true }],
           include: ["web_search_call.action.sources"], store: false, stream: true }),

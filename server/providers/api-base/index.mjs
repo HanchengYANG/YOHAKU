@@ -4,6 +4,20 @@ import { join } from "node:path";
 import { generateText, streamText, Output } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createModelTests } from "./model-tests.mjs";
+import { effortOptions, validateModelReasoning } from "../reasoning.mjs";
+import { normalizeReasoning, reasoningKey } from "../../../shared/ai-roles.mjs";
+
+// Exact deployed model IDs covered by the service's published reasoning tiers.
+const documentedEfforts = Object.freeze({
+  "Deepseek/deepseek-v4-flash-0731": ["none", "low", "high", "max"],
+  "Qwen/Qwen3.6-35B": ["none", "low", "medium", "high"],
+  "Qwen/Qwen3.5-397B-A17B": ["none", "low", "medium", "high"],
+});
+function withReasoningOptions(model, remote = model) {
+  const reasoningOptions = effortOptions(remote?.reasoningOptions?.efforts || documentedEfforts[model.id]);
+  const { reasoningOptions: previous, ...metadata } = model;
+  return { ...metadata, ...(reasoningOptions ? { reasoningOptions } : {}) };
+}
 
 export const CODIX_MODELS = Object.freeze([
   { id: "codiX-agent", name: "codiX Agent", limit: { context: 262144, output: 32768 } },
@@ -85,13 +99,34 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
       lastError = null;
     } finally { await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; }); }
   }
+  const catalogFile = join(directory, "model-catalog.json");
+  let catalogLoaded;
+  async function knownModels() {
+    await load();
+    await (catalogLoaded ||= (async () => {
+      try {
+        const saved = JSON.parse(await readFile(catalogFile, "utf8"));
+        if (saved.credentialId === configuration.id && Array.isArray(saved.catalog?.models)) catalog = saved.catalog;
+      } catch (error) { if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw fail(503, "无法读取模型目录。"); }
+    })());
+    const known = catalog || { models: CODIX_MODELS, source: "preset" };
+    return { ...known, models: known.models.map((entry) => withReasoningOptions(entry)) };
+  }
+  async function credentialStatus() {
+    await load();
+    const connected = !!configuration.apiKey;
+    return { connected, requiresLogin: !connected, authMode: "api_key", credentialId: configuration.id,
+      activeAccountId: connected ? configuration.id : null,
+      subject: connected ? `api_base:${configuration.id}` : null };
+  }
   const settings = async () => {
     await load();
+    const known = await knownModels();
     const modelChecks = await modelTests.reports(configuration);
-    activeModel = configuration.modelSelected && modelChecks.some((report) => report.model === configuration.model && report.passed)
+    activeModel = configuration.modelSelected && modelChecks.some((report) => report.model === configuration.model && reasoningKey(report.reasoning) === "{}" && report.passed)
       ? configuration.model : null;
     return { baseURL: configuration.baseURL, model: configuration.model,
-      hasKey: !!configuration.apiKey, models: catalog?.models || CODIX_MODELS,
+      hasKey: !!configuration.apiKey, models: known.models,
       modelsSource: catalog ? "server" : "preset", activeModel, modelChecks };
   };
   async function models({ signal } = {}) {
@@ -115,11 +150,17 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
         if (typeof id !== "string" || !id || id.length > 300 || /\s/.test(id) || id.includes(selected.apiKey)) continue;
         const preset = CODIX_MODELS.find((model) => model.id === id);
         const name = typeof entry?.name === "string" ? entry.name.slice(0, 300).replaceAll(selected.apiKey, "[hidden]") : preset?.name || id;
-        unique.set(id, { id, name, ...(preset ? { limit: preset.limit } : {}) });
+        unique.set(id, withReasoningOptions({ id, name, ...(preset ? { limit: preset.limit } : {}) }, entry));
       }
       const available = [...unique.values()].filter((model) => !/(?:^|[-/_])(?:embeddings?|autocomplete)(?:[-/_]|$)/i.test(model.id));
       if (configuration !== selected) throw fail(409, "API 配置已变化，请重新获取模型列表。");
       catalog = { models: available, total: unique.size, excluded: unique.size - available.length, source: "server" };
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      const temporary = `${catalogFile}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, JSON.stringify({ credentialId: selected.id, catalog }), { mode: 0o600, flag: "wx" });
+        await rename(temporary, catalogFile);
+      } finally { await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; }); }
       return catalog;
     } catch (cause) { throw publicError(cause, abortSignal); }
   }
@@ -147,16 +188,16 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
     },
   };
   const runtime = {
-    status: () => ({ busy: busy || testing, running: busy || testing, ready: !!configuration.apiKey && !!activeModel,
+    status: () => ({ busy: busy || testing, testing, running: busy || testing, ready: !!configuration.apiKey && !!activeModel,
       model: activeModel, transport: "ai-sdk", lastError }),
     stop: () => controller?.abort(),
-    async run({ prompt, image, schema, webSearch = false, expectedAccountId, expectedSubject, signal, onEvent } = {}) {
+    async run({ prompt, image, schema, model, reasoning, webSearch = false, expectedAccountId, expectedSubject, signal, onEvent } = {}) {
       if (busy || testing) throw fail(409, "AI 正在处理另一项请求，请稍后重试。");
       busy = true;
       controller = new AbortController();
       const abortSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])]);
       try {
-        const account = await auth.status();
+        const account = await (model ? credentialStatus() : auth.status());
         abortSignal.throwIfAborted();
         if (!account.connected) throw fail(503, configuration.apiKey
           ? "请先由网站拥有者测试并启用一个模型，再使用网站 AI。"
@@ -164,18 +205,23 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
         if ((expectedAccountId && expectedAccountId !== account.activeAccountId) ||
             (expectedSubject && expectedSubject !== account.subject)) throw fail(409, "API 配置已变化，请重试。");
         if (typeof prompt !== "string" || !prompt.trim()) throw fail(400, "请提供有效的问题或识别指令。");
+        const selected = configuration, selectedModel = model || selected.model;
+        if (typeof selectedModel !== "string" || !selectedModel || selectedModel.length > 300 || /\s/.test(selectedModel))
+          throw fail(400, "请选择有效的模型。");
+        const selectedReasoning = await validateReasoning(selectedModel, reasoning);
         if (image && !/^data:image\/(png|jpeg|webp);base64,/.test(image)) throw fail(400, "请提供有效的图片数据。");
-        const provider = createOpenAICompatible({ name: "api_base", baseURL: configuration.baseURL,
-          apiKey: configuration.apiKey, fetch: fetchImpl });
+        const provider = createOpenAICompatible({ name: "api_base", baseURL: selected.baseURL,
+          apiKey: selected.apiKey, fetch: fetchImpl });
         const instructions = ["你是余白的日语阅读助手，按用户要求处理提供的学习资料。",
           ...(schema ? [`只返回符合以下 JSON Schema 的 JSON 对象，不要添加 Markdown：\n${JSON.stringify(schema)}`] : []),
           ...(webSearch ? ["当前连接没有网页搜索工具。请明确说明未联网，不得声称已检索或核实外部来源。"] : [])].join("\n");
-        const options = { model: provider(configuration.model), system: instructions,
+        const options = { model: provider(selectedModel), system: instructions,
           messages: [{ role: "user", content: image
             ? [{ type: "text", text: prompt }, { type: "file", data: image, mediaType: image.slice(5, image.indexOf(";")) }]
             : prompt }],
-          maxOutputTokens: CODIX_MODELS.find((model) => model.id === configuration.model)?.limit.output || 16384,
-          maxRetries: 0, abortSignal, ...(schema ? { output: Output.json() } : {}) };
+          maxOutputTokens: CODIX_MODELS.find((entry) => entry.id === selectedModel)?.limit.output || 16384,
+          maxRetries: 0, abortSignal, ...(schema ? { output: Output.json() } : {}),
+          ...(selectedReasoning ? { providerOptions: { apiBase: { reasoningEffort: selectedReasoning.effort } } } : {}) };
         let result, text;
         if (onEvent && !schema) {
           // Consume the SDK's full stream so errors cannot become saved answers.
@@ -197,8 +243,8 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
           throw fail(502, "AI 输出为空、被截断或未完整完成，未保存部分结果，请重试。");
         const response = await result.response;
         lastError = null;
-        return { text, completed: true, threadId: null, model: response.modelId || configuration.model,
-          reasoningEffort: null, sources: [], webSearch: { enabled: false, performed: false } };
+        return { text, completed: true, threadId: null, model: response.modelId || selectedModel,
+          reasoningEffort: selectedReasoning?.effort ?? null, sources: [], webSearch: { enabled: false, performed: false } };
       } catch (cause) {
         const error = publicError(cause, abortSignal, image);
         lastError = error.message;
@@ -206,7 +252,14 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
       } finally { busy = false; controller = null; }
     },
   };
+  async function validateReasoning(model, input) {
+    if (!normalizeReasoning(input)) return undefined;
+    const known = await knownModels();
+    return validateModelReasoning(known.models.find((entry) => entry.id === model), input);
+  }
   return { id: "api_base", label: "iliad codix", auth, runtime, capabilities, configuration: settings, models,
+    knownModels, credentialStatus, validateReasoning,
+    async testReports() { await load(); return modelTests.reports(configuration); },
     async configure(input) {
       if (busy || testing) throw fail(409, "AI 正在处理请求，请完成后再修改 API 配置。");
       await load();
@@ -216,18 +269,20 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
       await save(next);
       return settings();
     },
-    async testModel(model, { signal } = {}) {
+    async testModel(model, { signal, role, referenceImage = false, reasoning } = {}) {
       if (busy || testing) throw fail(409, "AI 正在处理请求，请完成后再测试模型。");
       if (typeof model !== "string" || !model || model.length > 300 || /\s/.test(model)) throw fail(400, "请填写有效的待测试模型 ID。");
       await load();
       if (!configuration.apiKey) throw fail(503, "请先保存 API key，再测试模型。");
+      const selectedReasoning = await validateReasoning(model, reasoning);
       testing = true;
       controller = new AbortController();
       try {
         const report = await modelTests.test(configuration, model, {
+          role, referenceImage, reasoning: selectedReasoning,
           signal: AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]),
         });
-        if (!report.passed && configuration.model === model && configuration.modelSelected)
+        if (!role && !selectedReasoning && !report.passed && configuration.model === model && configuration.modelSelected)
           await save({ ...configuration, modelSelected: false });
         await settings();
         return report;
@@ -237,7 +292,7 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
       if (busy || testing) throw fail(409, "AI 正在处理请求，请完成后再切换模型。");
       await load();
       const reports = await modelTests.reports(configuration);
-      if (!reports.some((report) => report.model === model && report.passed))
+      if (!reports.some((report) => report.model === model && reasoningKey(report.reasoning) === "{}" && report.passed))
         throw fail(409, "此模型尚未通过当前 API 配置的测试，请先测试模型。");
       await save({ ...configuration, model, modelSelected: true });
       return settings();

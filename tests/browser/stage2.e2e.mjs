@@ -172,7 +172,7 @@ async function openSettings(page) {
   }
   await page.getByRole("button", { name: "AI 设置", exact: true }).click();
   await expect(
-    page.getByRole("heading", { name: "配置网站共享 AI", exact: true }),
+    page.getByRole("heading", { name: "AI 设置", exact: true }),
   ).toBeVisible();
 }
 
@@ -741,9 +741,8 @@ test("授权设置主流程（OAuth 为明确测试替身，不向官方发送�
       .getByRole("paragraph")
       .filter({ hasText: /^ui-test-only@example\.invalid$/ }),
   ).toBeVisible();
-  await expect(
-    page.getByText("当前模型：UI-TEST-DOUBLE", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByText("当前模型：UI-TEST-DOUBLE", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "保存提供方", exact: true })).toHaveCount(0);
   await page.screenshot({
     path: `artifacts/stage2-auth-connected-test-double-${info.project.name}.png`,
     fullPage: true,

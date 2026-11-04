@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import api from "../api.mjs";
 import { imageTasksChangedEvent, notifyImageTasksChanged, newerTask, taskCounts, taskDisplayName, taskDuration, taskImageUrl, taskItemState, taskSegmentationState, taskStateLabel } from "../image-tasks.mjs";
 import Icon from "./Icon.jsx";
+import ExecutionDetails from "./ExecutionDetails.mjs";
 import "../image-tasks.css";
 
 function useTaskPolling(path, interval = 2000) {
@@ -154,6 +155,7 @@ export function TaskDetail({ taskId, onOpenDraft, onReady, onBack, onDocumentOpe
         {currentItem && <p className="task-current" role="status">当前：{currentItem.name || `照片 ${items.indexOf(currentItem) + 1}`} · {taskItemState(currentItem).status}</p>}
         {segmentation && <p className="task-current" role="status" data-task-phase="segment" data-status-kind={segmentation.statusKind}>{segmentation.status}</p>}
         {isSegmenting && task.segmentation?.error && <p className="task-item-error">{task.segmentation.error}</p>}
+        <ExecutionDetails execution={task.segmentation?.execution} label="分句" />
         <div className="task-actions">
           {task.appliedDocumentId && <button className="button primary" type="button" onClick={() => onDocumentOpen?.(task.appliedDocumentId)}>打开文章<Icon name="arrow" size={16} /></button>}
           {canResume && <button className="button primary" type="button" disabled={busy} onClick={() => action(() => post("resume"))}>继续处理</button>}
@@ -168,7 +170,10 @@ export function TaskDetail({ taskId, onOpenDraft, onReady, onBack, onDocumentOpe
       </div>
       <ol className="task-item-list" aria-label="逐图处理状态">{items.map((item, index) => { const status = taskItemState(item); return <li key={item.id} data-task-item-id={item.id} data-status-kind={status.statusKind}>
         {item.imageId && <img src={taskImageUrl(item)} alt={`照片 ${index + 1} 原图`} loading="lazy" />}
-        <div><span className="task-item-number">照片 {index + 1}</span><h2>{item.name || `来源图 ${index + 1}`}</h2><p className="task-item-status" role="status">{status.status}</p>{item.error && <p className="task-item-error">{typeof item.error === "string" ? item.error : item.error.message || "此步骤未完成，可重试或手动处理。"}</p>}</div>
+        <div><span className="task-item-number">照片 {index + 1}</span><h2>{item.name || `来源图 ${index + 1}`}</h2><p className="task-item-status" role="status">{status.status}</p>{item.error && <p className="task-item-error">{typeof item.error === "string" ? item.error : item.error.message || "此步骤未完成，可重试或手动处理。"}</p>}
+          <ExecutionDetails execution={item.steps?.recognize?.execution} label="OCR" />
+          <ExecutionDetails execution={item.steps?.annotate?.execution} label="注音" />
+        </div>
       </li>; })}</ol>
     </>}
   </section>;

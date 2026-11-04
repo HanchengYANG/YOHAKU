@@ -45,6 +45,71 @@ const dimensions = page => page.locator(".body-editor").evaluate(root => {
     font:getComputedStyle(input).font,mirrorFont:getComputedStyle(mirror).font};
 });
 
+test("纯文字文章生成注音先进入编辑器核对，保存前不写入文章且正文与已有标记保留", async ({page}, info) => {
+  const document = await fixture(page, `文字注音 ${info.project.name}`);
+  try {
+    const input = inputFor(page), original = await input.inputValue();
+    const annotationReply = page.waitForResponse(response => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/ai/annotate");
+    await page.getByRole("button", { name:"生成注音", exact:true }).click();
+    const response = await annotationReply;
+    expect(response.ok()).toBe(true);
+    expect(response.request().postDataJSON().sourceImageId).toBeUndefined();
+    const annotated = await response.json();
+    expect(annotated.annotation.imageReference).toBeNull();
+    expect(annotated.annotation.readingPolicy).toBe("text_context");
+    await expect(page.getByRole("button", { name:"保存并阅读", exact:true })).toBeEnabled();
+    await expect(input).toHaveValue(original);
+    await expect(page.getByText(/注音来源：OpenAI/)).toBeVisible();
+    const beforeSave = await (await page.request.get(`/api/documents/${document.id}`)).json();
+    expect(beforeSave.revision).toBe(document.revision);
+    expect(beforeSave.bodyHtml).toBe(document.bodyHtml);
+    expect(bodyText(annotated.bodyHtml)).toBe(bodyText(document.bodyHtml));
+    expect(bodyRanges(annotated.bodyHtml)).toEqual(bodyRanges(document.bodyHtml));
+    await page.getByRole("button", { name:"保存并阅读", exact:true }).click();
+    await expect(page.getByRole("article", { name:"日语原文", exact:true })).toBeVisible();
+    const saved = await (await page.request.get(`/api/documents/${document.id}`)).json();
+    expect(bodyText(saved.bodyHtml)).toBe(original);
+    expect(bodyRanges(saved.bodyHtml)).toEqual(bodyRanges(document.bodyHtml));
+    const readings = saved.blocks.flatMap(block => block.segments).filter(segment => segment.reading);
+    expect(readings.find(segment => segment.text === "背中")?.reading).toBe("せなか");
+    expect(readings.some(segment => segment.origin === "generated" && segment.text === "撫でる")).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path:`artifacts/text-annotation-${info.project.name}.png`, fullPage:true });
+  } finally { await remove(page, document.id); }
+});
+
+test("生成注音期间锁定编辑与保存，返回后可核对并取消生成结果", async ({page}, info) => {
+  const document = await fixture(page, `文字注音锁定 ${info.project.name}`, false);
+  let release;
+  const held = new Promise(resolve => release = resolve);
+  let completed;
+  const generated = new Promise(resolve => completed = resolve);
+  await page.route("**/api/ai/annotate", async route => {
+    const response = await route.fetch();
+    completed();
+    await held;
+    await route.fulfill({ response });
+  });
+  try {
+    const input = inputFor(page), original = await input.inputValue();
+    await page.getByRole("button", { name:"生成注音", exact:true }).click();
+    await generated;
+    await expect(input).toBeDisabled();
+    await expect(page.getByRole("button", { name:"正在生成注音…", exact:true })).toBeDisabled();
+    await expect(page.getByRole("button", { name:"取消", exact:true })).toBeDisabled();
+    release();
+    await expect(input).toBeEnabled();
+    await expect(input).toHaveValue(original);
+    await expect(page.getByRole("button", { name:"保存并阅读", exact:true })).toBeEnabled();
+    page.once("dialog", dialog => dialog.accept());
+    await page.getByRole("button", { name:"取消", exact:true }).click();
+    await expect(page.getByRole("article", { name:"日语原文", exact:true })).toBeVisible();
+    const saved = await (await page.request.get(`/api/documents/${document.id}`)).json();
+    expect(saved.bodyHtml).toBe(document.bodyHtml);
+    expect(saved.revision).toBe(document.revision);
+  } finally { release(); await page.unroute("**/api/ai/annotate"); await remove(page, document.id); }
+});
+
 test("真实编辑面的高亮与输入字体、换行和滚动对齐，记录入口不抢编辑点击", async ({page}, info) => {
   const document = await fixture(page,info.project.name);
   try {

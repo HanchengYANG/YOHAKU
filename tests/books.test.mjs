@@ -113,7 +113,7 @@ test("多页书籍保留每页原图、识别与注音，既有材料原地归�
   await f.restart();
   assert.deepEqual((await f.request(`/api/books/${bookId}`)).data, book);
   for (const expected of [member, second.page]) assert.deepEqual((await f.request(`/api/documents/${expected.id}`)).data, expected);
-  assert.deepEqual(f.inspect((database) => ({ ...database.prepare("SELECT * FROM conversations WHERE id=?").get(conversation.id) })), conversation);
+  assert.deepEqual(f.inspect((database) => ({ ...database.prepare("SELECT * FROM conversations WHERE id=?").get(conversation.id) })), { ...conversation, model: null, reasoning_json: null });
   const exported = await f.request(`/api/documents/${second.page.id}/export?format=json`);
   assert.deepEqual(exported.data.document.recognition, second.recognition);
   assert.deepEqual(exported.data.document.blocks[0].segments, second.page.blocks[0].segments);

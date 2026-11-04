@@ -13,6 +13,7 @@ import { OCR_BODY_SCHEMA } from "../../shared/ocr.mjs";
 import { SENTENCE_SCHEMA } from "../../shared/sentences.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 import express from "express";
+import { normalizeReasoning, reasoningKey } from "../../shared/ai-roles.mjs";
 
 const dataDir = fileURLToPath(
   new URL("../../artifacts/ai-e2e-data/", import.meta.url),
@@ -141,13 +142,13 @@ const runtime = {
   stop() {
     busy = false;
   },
-  async run({ schema, image, prompt, threadId, reasoningEffort, webSearch, onEvent, signal }) {
+  async run({ schema, image, prompt, threadId, reasoningEffort, reasoning, webSearch, onEvent, signal }) {
     if (!connected) throw new Error("测试账户尚未连接。");
     busy = true;
     try {
       const id = threadId || `ui-test-thread-${randomUUID()}`;
       const phase = schema === SENTENCE_SCHEMA ? "sentences" : schema === ANNOTATION_SCHEMA ? "annotate" : schema ? "recognize" : "chat";
-      runtimeCalls.push({ sequence: ++runtimeSequence, type: schema === SENTENCE_SCHEMA ? "sentences" : schema ? "image" : "chat", phase, prompt, threadId, webSearch });
+      runtimeCalls.push({ sequence: ++runtimeSequence, type: schema === SENTENCE_SCHEMA ? "sentences" : schema ? "image" : "chat", phase, prompt, threadId, webSearch, ...(reasoning ? { reasoning } : {}) });
       if (runtimeCalls.length > 100) runtimeCalls.shift();
       writeFileSync(new URL("../../artifacts/ai-e2e-data/runtime-calls.json", import.meta.url), JSON.stringify(runtimeCalls));
       if (phase === "recognize" || phase === "annotate") await imageFault(phase);
@@ -157,12 +158,14 @@ const runtime = {
         return { completed: true, text: JSON.stringify({ sentences: text.match(/[^。！？\n]+(?:[。！？][」』）]*)?|\n/g) || [text] }), model: "UI-TEST-DOUBLE", threadId: id };
       }
       if (schema === ANNOTATION_SCHEMA) {
-        if (typeof image !== "string" || !/^data:image\/(png|jpeg|webp);base64,/.test(image))
-          throw new Error("独立注音未收到参考原图。");
-        const referencePixels = Buffer.from(image.slice(image.indexOf(",") + 1), "base64");
-        const referenceMetadata = await sharp(referencePixels).metadata();
-        if (!referenceMetadata.width || !referenceMetadata.height || (referenceMetadata.orientation !== undefined && referenceMetadata.orientation !== 1))
-          throw new Error("注音参考原图未正确解码或按EXIF转正。");
+        if (image) {
+          if (typeof image !== "string" || !/^data:image\/(png|jpeg|webp);base64,/.test(image))
+            throw new Error("注音参考原图无效。");
+          const referencePixels = Buffer.from(image.slice(image.indexOf(",") + 1), "base64");
+          const referenceMetadata = await sharp(referencePixels).metadata();
+          if (!referenceMetadata.width || !referenceMetadata.height || (referenceMetadata.orientation !== undefined && referenceMetadata.orientation !== 1))
+            throw new Error("注音参考原图未正确解码或按EXIF转正。");
+        }
         const targets = JSON.parse(prompt.split("输入目标：\n").at(-1));
         return {
           completed: true,
@@ -233,10 +236,50 @@ const runtime = {
   },
 };
 
+// Role capability records belong to this explicit OpenAI test double only.
+const openAIModelChecks = new Map();
+const openAIModels = [
+  { id: "UI-TEST-DOUBLE", name: "OpenAI 浏览器测试替身", reasoningOptions: { efforts: ["low", "medium", "high"] } },
+  { id: "UI-REASONING-DOUBLE", name: "推理参数浏览器测试替身", reasoningOptions: {
+    efforts: ["low", "medium", "high"], toggle: true, budget: { min: 1024, max: 8192 },
+  } },
+];
+function validateFixtureReasoning(model, input) {
+  const reasoning = normalizeReasoning(input) || {}, options = openAIModels.find((item) => item.id === model)?.reasoningOptions;
+  if (!options || reasoning.effort && !options.efforts.includes(reasoning.effort) ||
+      reasoning.enabled !== undefined && !options.toggle ||
+      reasoning.budgetTokens !== undefined && (!options.budget || reasoning.budgetTokens < options.budget.min || reasoning.budgetTokens > options.budget.max))
+    throw Object.assign(new Error("测试模型不支持此推理配置。"), { status: 400, expose: true });
+  return reasoning;
+}
+const openAIService = {
+  auth, runtime,
+  credentialStatus: () => auth.status(),
+  knownModels: () => openAIModels,
+  models: async () => ({ models: openAIModels, source: "subscription" }),
+  testReports: async () => connected ? [...openAIModelChecks.values()] : [],
+  validateReasoning: validateFixtureReasoning,
+  testModel: async (model, { role, referenceImage, reasoning: inputReasoning } = {}) => {
+    if (!connected || !openAIModels.some((item) => item.id === model))
+      throw Object.assign(new Error("测试账户或模型不可用。"), { status: 409, expose: true });
+    const reasoning = validateFixtureReasoning(model, inputReasoning), key = JSON.stringify([model, reasoningKey(reasoning)]);
+    const checkedAt = new Date().toISOString();
+    const capabilities = role === "chat" ? ["streaming"]
+      : role === "ocr" || (role === "annotation" && referenceImage) ? ["json", "image"] : ["json"];
+    const checks = { ...openAIModelChecks.get(key)?.checks };
+    for (const capability of capabilities) checks[capability] = {
+      state: "supported", message: "浏览器能力测试替身通过。", elapsedMs: 1, checkedAt,
+    };
+    const report = { model, role, ...(Object.keys(reasoning).length ? { reasoning } : {}), checkedAt, passed: true, checks };
+    openAIModelChecks.set(key, report);
+    return report;
+  },
+};
+
 const { app, close } = createApp({
   dataDir,
   callbackUri,
-  aiServices: (ownerId, providerId) => providerId === "openai" ? { auth, runtime }
+  aiServices: (ownerId, providerId) => providerId === "openai" ? openAIService
     : createProviderConnection({ providerId, storageDir: join(dataDir, "users", ownerId, "providers"),
       apiBaseOptions: { fetchImpl: (url, init) =>
         fetch(`http://127.0.0.1:4319/__test/api-base${new URL(url).pathname}`, init) },
@@ -245,7 +288,7 @@ const { app, close } = createApp({
 });
 const harness=express();
 harness.get("/__test/api-base/v1/models", (_req, res) => res.json({ data: [
-  { id: "codiX-agent" }, { id: "Qwen/Qwen3.6-35B" }, { id: "Zai/GLM-5.2" },
+  { id: "codiX-agent" }, { id: "Qwen/Qwen3.6-35B", reasoningOptions: { efforts: ["none", "low", "medium", "high"] } }, { id: "Zai/GLM-5.2" },
   { id: "Qwen/Qwen3-Embedding-8B" }, { id: "codiX-embedding" }, { id: "codiX-autocomplete" },
 ] }));
 harness.post("/__test/api-base/v1/chat/completions", express.json({ limit: "1mb" }), (req, res) => {

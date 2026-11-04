@@ -306,3 +306,118 @@ test("不支持图片和暂时出错分别显示，重新测试失败撤销当�
   assert.equal(reports.length, 1, "重测更新同一模型的记录");
   assert.equal(reports[0].passed, false);
 });
+
+test("角色测试仅验证所需能力，文字模型可用于分句和注音；同一密钥支持不同模型且不改全局模型", async (t) => {
+  const fixture = await setup(t);
+  await fixture.configure();
+  fixture.reply((_url, init) => {
+    const body = JSON.parse(init.body);
+    if (body.stream) return stream([chunk("OK", "stop"), "[DONE]"]);
+    return body.response_format ? complete('{"ok":true}')
+      : Response.json({ error: { message: "This is not a multimodal model" } }, { status: 400 });
+  });
+  assert.equal((await fixture.connection.credentialStatus()).connected, true);
+  assert.equal((await fixture.connection.auth.status()).connected, false, "旧业务在首次保存角色配置前仍需原全局启用");
+  const textModel = CODIX_MODELS[2].id;
+  const segmented = await fixture.connection.testModel(textModel, { role: "segmentation" });
+  assert.equal(segmented.passed, true);
+  assert.deepEqual(Object.keys(segmented.checks), ["json"]);
+  assert.equal(fixture.requests.length, 1);
+  const annotated = await fixture.connection.testModel(textModel, { role: "annotation" });
+  assert.equal(annotated.passed, true);
+  assert.equal(fixture.requests.length, 2);
+  const reference = await fixture.connection.testModel(textModel, { role: "annotation", referenceImage: true });
+  assert.equal(reference.passed, false);
+  assert.equal(reference.checks.image.state, "unsupported");
+  assert.equal(fixture.requests.length, 4, "参考原图只测试JSON与图片");
+  const { roleReport } = await import("../shared/ai-roles.mjs");
+  const reports = await fixture.connection.testReports();
+  assert.equal(roleReport(reports, textModel, "segmentation").passed, true);
+  assert.equal(roleReport(reports, textModel, "annotation").passed, true);
+  assert.equal(roleReport(reports, textModel, "ocr").passed, false);
+  fixture.requests.length = 0;
+  await fixture.connection.runtime.run({ model: textModel, prompt: "只用文字", schema: { type: "object" } });
+  await fixture.connection.runtime.run({ model: "Qwen/Qwen3.6-35B", prompt: "只用文字", schema: { type: "object" } });
+  assert.deepEqual(fixture.requests.map((request) => request.body.model), [textModel, "Qwen/Qwen3.6-35B"]);
+  assert.equal((await fixture.connection.configuration()).model, "codiX-agent");
+  assert.equal((await fixture.connection.auth.status()).connected, false);
+  await fixture.configure({ apiKey: "fixture-replacement-key" });
+  assert.deepEqual(await fixture.connection.testReports(), []);
+});
+
+test("远端模型目录缓存随凭据持久化，重启读取与保存角色无需网络请求", async (t) => {
+  const fixture = await setup(t);
+  await fixture.configure();
+  fixture.reply(() => Response.json({ data: [{ id: "remote-text-model" }] }));
+  await fixture.connection.models();
+  const reopened = createProviderConnection({ providerId: "api_base", storageDir: fixture.storageDir,
+    apiBaseOptions: { fetchImpl: () => { throw new Error("缓存读取不能发请求"); } } });
+  t.after(() => reopened.close());
+  assert.deepEqual((await reopened.knownModels()).models.map((model) => model.id), ["remote-text-model"]);
+  assert.deepEqual((await reopened.configuration()).models.map((model) => model.id), ["remote-text-model"]);
+  await reopened.configure({ apiKey: "fixture-new-key" });
+  assert.equal((await reopened.knownModels()).source, "preset");
+});
+
+test("角色草稿测试失败只更新能力证据，不改已有全局模型选择或远端目录", async (t) => {
+  const fixture = await setup(t);
+  await fixture.configure();
+  fixture.reply(() => Response.json({ data: [{ id: "codiX-agent" }, { id: "text-model" }] }));
+  await fixture.connection.models();
+  await fixture.enable();
+  const filename = join(fixture.storageDir, "api_base", "connection.json");
+  const selected = await readFile(filename, "utf8");
+  assert.equal(JSON.parse(selected).modelSelected, true);
+  fixture.reply(() => Response.json({ error: { message: "unsupported JSON" } }, { status: 422 }));
+  const failed = await fixture.connection.testModel("codiX-agent", { role: "segmentation" });
+  assert.equal(failed.passed, false);
+  assert.equal(await readFile(filename, "utf8"), selected);
+  assert.deepEqual((await fixture.connection.knownModels()).models.map((item) => item.id), ["codiX-agent", "text-model"]);
+});
+
+test("iliad推理强度按模型声明验证、映射reasoning_effort，默认省略，测试按强度独立保留", async (t) => {
+  const fixture = await setup(t);
+  await fixture.configure();
+  const model = "Deepseek/deepseek-v4-flash-0731";
+  const known = await fixture.connection.knownModels();
+  assert.deepEqual(known.models.find((entry) => entry.id === model).reasoningOptions, { efforts: ["none", "low", "high", "max"] });
+  assert.equal(known.models.find((entry) => entry.id === "codiX-agent").reasoningOptions, undefined);
+  assert.deepEqual(await fixture.connection.validateReasoning(model, { effort: "low" }), { effort: "low" });
+  for (const reasoning of [{ effort: "medium" }, { enabled: false }, { budgetTokens: 1024 }])
+    await assert.rejects(fixture.connection.validateReasoning(model, reasoning), (error) => error.status === 400);
+  assert.equal(fixture.requests.length, 0);
+  fixture.reply(() => complete('{"ok":true}'));
+  await fixture.connection.runtime.run({ model, prompt: "JSON", schema: { type: "object" } });
+  assert.equal(Object.hasOwn(fixture.requests.at(-1).body, "reasoning_effort"), false);
+  for (const effort of ["none", "low"]) {
+    const report = await fixture.connection.testModel(model, { role: "segmentation", reasoning: { effort } });
+    assert.equal(report.passed, true);
+    assert.deepEqual(report.reasoning, { effort });
+    assert.equal(fixture.requests.at(-1).body.reasoning_effort, effort);
+    const result = await fixture.connection.runtime.run({ model, prompt: "JSON", schema: { type: "object" }, reasoning: { effort } });
+    assert.equal(fixture.requests.at(-1).body.reasoning_effort, effort);
+    assert.equal(result.reasoningEffort, effort);
+  }
+  await fixture.connection.testModel(model, { role: "segmentation" });
+  const { roleReport } = await import("../shared/ai-roles.mjs");
+  const reports = await fixture.connection.testReports();
+  assert.equal(reports.filter((report) => report.model === model).length, 3);
+  assert.equal(roleReport(reports, model, "segmentation", false, { effort: "low" }).passed, true);
+  assert.equal(roleReport(reports, model, "segmentation", false, { effort: "high" }), null);
+  const reopened = createProviderConnection({ providerId: "api_base", storageDir: fixture.storageDir });
+  t.after(() => reopened.close());
+  assert.equal(roleReport(await reopened.testReports(), model, "segmentation", false, { effort: "none" }).passed, true);
+});
+
+test("旧远端目录补充已知强度、未知模型不伪造支持；刷新只保留安全强度声明", async (t) => {
+  const fixture = await setup(t);
+  await fixture.configure();
+  fixture.reply(() => Response.json({ data: [
+    { id: "Qwen/Qwen3.6-35B" }, { id: "unknown-model" },
+    { id: "declared-model", reasoningOptions: { efforts: ["none", "low", "bad value", "low"], toggle: true, budget: { min: 1, max: 999 } } },
+  ] }));
+  const catalog = await fixture.connection.models();
+  assert.deepEqual(catalog.models.find((entry) => entry.id === "Qwen/Qwen3.6-35B").reasoningOptions, { efforts: ["none", "low", "medium", "high"] });
+  assert.equal(catalog.models.find((entry) => entry.id === "unknown-model").reasoningOptions, undefined);
+  assert.deepEqual(catalog.models.find((entry) => entry.id === "declared-model").reasoningOptions, { efforts: ["none", "low"] });
+});

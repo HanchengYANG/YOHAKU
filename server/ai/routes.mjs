@@ -7,6 +7,9 @@ import { PROVIDERS, createProviderConnection } from "../providers/index.mjs";
 import { createImageStore } from "./images.mjs";
 import { createOperationQueue } from "./operation-queue.mjs";
 import { respondToChat } from "./chat-stream.mjs";
+import { createRoleConfiguration } from "./roles.mjs";
+import { prepareBodyAnnotation, applyBodyAnnotation } from "./annotation.mjs";
+import { ROLE_IDS, normalizeReasoning, reasoningKey } from "../../shared/ai-roles.mjs";
 import { createMangaOcr } from "../ocr/manga.mjs";
 import { createNdlOcr } from "../ocr/ndl.mjs";
 import {
@@ -50,6 +53,7 @@ export function attachAIRoutes({
   const connections = new Map(),
     pendingLogins = new Map(),
     operations = new Set(), queues = new Map(), imageMutations = new Map(), answeringDocuments = new Set();
+  let managementEpoch = 0, activeManagement = 0;
   let closed = false, imageMutationGuard = () => {}, imageAnnotationGuard = () => {};
   function assertOpen(signal) {
     if (closed) throw Object.assign(fail(503, "AI 服务正在停止，请稍后重试。"), { code: "AI_STOPPED" });
@@ -79,6 +83,8 @@ export function attachAIRoutes({
     ["image_drafts", "user_id", "TEXT"],
     ["conversations", "user_id", "TEXT"],
     ["conversations", "provider_id", "TEXT NOT NULL DEFAULT 'openai'"],
+    ["conversations", "model", "TEXT"],
+    ["conversations", "reasoning_json", "TEXT"],
   ]) {
     if (
       !database
@@ -156,8 +162,39 @@ export function attachAIRoutes({
       } finally { operations.delete(key); }
     }, options);
   }
-  const withManagementProvider = (userId, providerId, work) =>
-    withProvider(userId, providerId, work, { wait: false });
+  const roleConfiguration = createRoleConfiguration({ database, ownerId: siteOwner, connection, preferred, managementRevision: () => activeManagement ? null : managementEpoch });
+  const execution = (route, result) => ({ role: route.role, providerId: route.providerId,
+    model: result?.model || route.model || null, configurationVersion: route.configurationVersion,
+    ...(route.reasoning ? { reasoning: route.reasoning } : {}) });
+  // A queued step resolves again when its provider slot opens. If its provider
+  // changed while waiting, release that slot and join the new provider queue.
+  async function withRole(userId, role, work, options = {}) {
+    while (true) {
+      const candidate = roleConfiguration.current();
+      const providerId = candidate?.roles[role].providerId || preferred();
+      const result = await withProvider(userId, providerId, async (provider) => {
+        const configuration = roleConfiguration.current();
+        const selected = configuration?.roles[role] || { providerId: preferred() };
+        if (selected.providerId !== providerId) return { redirected: true };
+        const route = { ...selected, role, configurationVersion: configuration?.version || 0,
+          referenceImage: role === "annotation" && (configuration ? configuration.annotationReferenceImage : true) };
+        if (configuration) {
+          const ready = await roleConfiguration.readiness(role, selected, route.referenceImage);
+          if (!ready.ready) throw Object.assign(fail(503, `${{ocr:"OCR",annotation:"注音",segmentation:"分句",chat:"问答"}[role]}角色不可用：${ready.message}`),
+            { code: ready.credentialsReady ? "AI_ROLE_NOT_READY" : "AI_AUTH_REQUIRED" });
+        }
+        if ((roleConfiguration.current()?.version || 0) !== route.configurationVersion) return { redirected: true };
+        try { return { value: await work(provider, route) }; }
+        catch (error) { error.execution = execution(route); throw error; }
+      }, options);
+      if (!result.redirected) return result.value;
+    }
+  }
+  const withManagementProvider = async (userId, providerId, work) => {
+    managementEpoch++; activeManagement++;
+    try { return await withProvider(userId, providerId, work, { wait: false }); }
+    finally { managementEpoch++; activeManagement--; }
+  };
   function forgetPending(userId, providerId) {
     for (const [state, attempt] of pendingLogins) {
       if (attempt.userId === userId && attempt.providerId === providerId)
@@ -184,8 +221,8 @@ export function attachAIRoutes({
       .run(providerId, subject, userId);
     return accountId;
   }
-  async function identity(provider) {
-    const account = await provider.auth.status();
+  async function identity(provider, route) {
+    const account = await (route?.configurationVersion && provider.credentialStatus ? provider.credentialStatus() : provider.auth.status());
     assertOpen();
     return {
       provider,
@@ -206,8 +243,22 @@ export function attachAIRoutes({
         bindingError = cause.message;
       }
     const runtime = provider.runtime.status();
+    const credentials = provider.credentialStatus ? await provider.credentialStatus() : account;
+    const configuration = roleConfiguration.current();
+    const roleStates = configuration ? Object.fromEntries(await Promise.all(ROLE_IDS.map(async (role) => [role, {
+      ...configuration.roles[role], ...await roleConfiguration.readiness(role, configuration.roles[role], role === "annotation" && configuration.annotationReferenceImage),
+    }]))) : null;
+    const roleStatus = roleStates ? { credentialsReady: !!credentials.connected, rolesEnabled: true, configurationVersion: configuration.version, roles: roleStates } : { rolesEnabled: false, credentialsReady: !!credentials.connected };
     const canManageAI = userId === siteOwner();
+    const aggregate = roleStates && providerId === undefined ? {
+      connected: Object.values(roleStates).some((role) => role.ready),
+      ready: Object.values(roleStates).every((role) => role.ready),
+      requiresLogin: !Object.values(roleStates).some((role) => role.credentialsReady),
+      lastError: Object.entries(roleStates).filter(([, state]) => !state.ready)
+        .map(([role, state]) => `${{ocr:"OCR",annotation:"注音",segmentation:"分句",chat:"问答"}[role]}：${state.message}`).join("；") || null,
+    } : null;
     if (!canManageAI) return {
+      ...roleStatus,
       shared: true,
       canManageAI: false,
       connected: !!account.connected && !bindingError,
@@ -219,10 +270,12 @@ export function attachAIRoutes({
       canClaimExisting: false,
       lastError: !account.connected || bindingError
         ? "网站 AI 尚未连接，请联系网站拥有者。" : null,
+      ...aggregate,
     };
     const accounts = await provider.auth.accounts();
     assertOpen();
     return {
+      ...roleStatus,
       shared: true,
       canManageAI: true,
       ...account,
@@ -236,6 +289,7 @@ export function attachAIRoutes({
       model: runtime.model,
       runtime,
       lastError: bindingError || account.lastError || runtime.lastError,
+      ...(providerId !== undefined ? { connected: !!credentials.connected, requiresLogin: !credentials.connected } : aggregate),
       canClaimExisting:
         provider.id === "openai" &&
         userId === siteOwner() &&
@@ -298,6 +352,7 @@ export function attachAIRoutes({
     }),
   );
   app.post("/api/providers/active", requireOwner, async (req, res) => {
+    if (roleConfiguration.current()) throw fail(409, "角色配置已启用，请刷新页面并在角色配置中修改分工。");
     const next = req.body?.providerId;
     if (!PROVIDERS.some((p) => p.id === next && p.enabled))
       throw fail(501, "这个提供方仅预留接口，目前尚未实现。");
@@ -319,10 +374,12 @@ export function attachAIRoutes({
       return withManagementProvider(req.user.id, next, activate);
     });
   });
+  app.get("/api/ai/roles", requireOwner, async (_req, res) => { res.json(await roleConfiguration.describe()); });
+  app.put("/api/ai/roles", requireOwner, async (req, res) => { res.json(await roleConfiguration.save(req.body)); });
   app.get("/api/ai/status", async (req, res) => {
     if (req.query.providerId !== undefined && req.user.id !== siteOwner())
       throw fail(403, "只有网站拥有者可以查看提供方配置。");
-    res.json(await statusForUser(req.user.id, req.query.providerId ?? preferred()));
+    res.json(await statusForUser(req.user.id, req.query.providerId));
   });
   app.put("/api/ai/configuration", requireOwner, async (req, res) => {
     await withManagementProvider(req.user.id, managementProvider(req), async (provider) => {
@@ -333,21 +390,24 @@ export function attachAIRoutes({
     });
   });
   app.get("/api/ai/models", requireOwner, async (req, res) => {
-    const provider = connection(req.user.id, managementProvider(req));
-    if (!provider.models) throw fail(405, "当前提供方不支持此模型列表接口。");
-    const models = await provider.models({ signal: req.aiSignal });
-    assertOpen(req.aiSignal);
-    res.json(models);
+    await withManagementProvider(req.user.id, managementProvider(req), async (provider) => {
+      if (!provider.models) throw fail(405, "当前提供方不支持此模型列表接口。");
+      const models = await provider.models({ signal: req.aiSignal });
+      assertOpen(req.aiSignal);
+      res.json({ ...models, modelChecks: await provider.testReports?.() || [] });
+    });
   });
   app.post("/api/ai/models/test", requireOwner, async (req, res) => {
     await withManagementProvider(req.user.id, managementProvider(req), async (provider) => {
       if (!provider.testModel) throw fail(405, "当前提供方不支持此模型测试接口。");
-      const report = await provider.testModel(req.body?.model, { signal: req.aiSignal });
+      if (req.body?.role !== undefined && !ROLE_IDS.includes(req.body.role)) throw fail(400, "请选择有效的 AI 角色。");
+      const report = await provider.testModel(req.body?.model, { role: req.body?.role, referenceImage: req.body?.referenceImage === true, reasoning: normalizeReasoning(req.body?.reasoning), signal: req.aiSignal });
       assertOpen(req.aiSignal);
       res.json(report);
     });
   });
   app.post("/api/ai/model", requireOwner, async (req, res) => {
+    if (roleConfiguration.current()) throw fail(409, "角色配置已启用，请刷新页面并在角色配置中修改模型。");
     await withManagementProvider(req.user.id, managementProvider(req), async (provider) => {
       if (!provider.selectModel) throw fail(405, "当前提供方不支持此模型选择接口。");
       await provider.selectModel(req.body?.model);
@@ -573,11 +633,11 @@ export function attachAIRoutes({
     assertOpen(signal);
     if (expectedRevision !== undefined && expectedRevision !== image.revision)
       throw fail(409, "图片方向已变化，请重新打开任务后再识别。");
-    return withProvider(
+    return withRole(
       userId,
-      preferred(),
-      async (provider) => {
-        const { accountId, expectedSubject } = await identity(provider);
+      "ocr",
+      async (provider, route) => {
+        const { accountId, expectedSubject } = await identity(provider, route);
         const started = performance.now();
         let localResult;
         let pixels;
@@ -591,9 +651,9 @@ export function attachAIRoutes({
         }
         assertOpen(signal);
         const llmStarted = performance.now();
-        const result = await provider.runtime.run({
+        const result = await provider.runtime.run({ model: route.model, reasoning: route.reasoning, signal,
           prompt: localResult ? buildOcrCorrectionPrompt(localResult) : OCR_TRANSCRIPTION_PROMPT,
-          reasoningEffort: OCR_REASONING_EFFORT,
+          ...(!route.configurationVersion ? { reasoningEffort: OCR_REASONING_EFFORT } : {}),
           ...(pixels ? { image: `data:${image.mimeType};base64,${pixels.toString("base64")}` } : {}),
           schema: localResult ? CORRECTION_SCHEMA : OCR_BODY_SCHEMA,
           expectedAccountId: accountId,
@@ -642,7 +702,7 @@ export function attachAIRoutes({
           recognizedAt: new Date().toISOString(),
           model: result.model,
           reasoningEffort: result.reasoningEffort ?? null,
-          providerId: provider.id,
+          providerId: provider.id, role: "ocr", execution: execution(route, result),
         };
         assertOpen(signal);
         if (persist) database
@@ -668,9 +728,9 @@ export function attachAIRoutes({
     assertOpen(signal);
     if (expectedRevision !== undefined && expectedRevision !== image.revision)
       throw fail(409, "图片方向已变化，请重新打开任务后再注音。");
-    return withProvider(userId, preferred(), async (provider) => {
+    return withRole(userId, "annotation", async (provider, route) => {
       checkAllowed();
-      const { accountId, expectedSubject } = await identity(provider);
+      const { accountId, expectedSubject } = await identity(provider, route);
       const row = database.prepare("SELECT draft_json FROM image_drafts WHERE image_id=? AND user_id=?")
         .get(id, userId);
       if (!suppliedDraft && !row) throw fail(400, "请先完成正文识别与校对，再单独生成注音。");
@@ -711,16 +771,17 @@ export function attachAIRoutes({
       const started = performance.now();
       let result;
       if (ocrAnnotationTargetCount(blocks)) {
-        const pixels = await images.read(image.id, {
+        const pixels = route.referenceImage ? await images.read(image.id, {
           normalizeOrientation: true,
           revision: image.revision,
-        });
+        }) : null;
         assertOpen(signal);
         checkAllowed();
         result = await provider.runtime.run({
-          prompt: buildOcrAnnotationPrompt(blocks), schema: ANNOTATION_SCHEMA,
-          image: `data:${image.mimeType};base64,${pixels.toString("base64")}`,
-          reasoningEffort: OCR_REASONING_EFFORT,
+          prompt: buildOcrAnnotationPrompt(blocks, { referenceImage: !!pixels }), schema: ANNOTATION_SCHEMA,
+          ...(pixels ? { image: `data:${image.mimeType};base64,${pixels.toString("base64")}` } : {}),
+          model: route.model, reasoning: route.reasoning, signal,
+          ...(!route.configurationVersion ? { reasoningEffort: OCR_REASONING_EFFORT } : {}),
           expectedAccountId: accountId, expectedSubject,
         });
         assertOpen(signal);
@@ -736,8 +797,9 @@ export function attachAIRoutes({
       const elapsedMs = Math.round(performance.now() - started);
       const annotation = { blocks, content: serializeBlocks(blocks), elapsedMs,
         model: result?.model ?? null, reasoningEffort: result?.reasoningEffort ?? null,
-        imageReference: result ? { imageId: image.id, revision: image.revision } : null,
-        readingPolicy: result ? "image_reference" : "existing_only",
+        execution: result ? execution(route, result) : null,
+        imageReference: result && route.referenceImage ? { imageId: image.id, revision: image.revision } : null,
+        readingPolicy: result ? route.referenceImage ? "image_reference" : "text_context" : "existing_only",
         createdAt: new Date().toISOString(),
       };
       const annotated = { ...draft, annotation,
@@ -756,6 +818,41 @@ export function attachAIRoutes({
       };
     }, { priority, signal });
   }
+  app.post("/api/ai/annotate", async (req, res) => {
+    if (typeof req.body?.bodyHtml !== "string" || req.body.bodyHtml.length > 1500000) throw fail(400, "请提供有效的待注音正文。");
+    const html = normalizeBodyHtml(req.body.bodyHtml);
+    // Ownership of an optional image is checked even when the current role is
+    // text-only, but it never requires an OCR draft.
+    const sourceImage = req.body.sourceImageId ? await getImage(req.user.id, req.body.sourceImageId) : null;
+    res.json(await withRole(req.user.id, "annotation", async (provider, route) => {
+      const referenceImage = !!sourceImage && route.referenceImage;
+      const prepared = prepareBodyAnnotation(html, { referenceImage });
+      const started = performance.now();
+      let result;
+      if (prepared.targetCount) {
+        const { accountId, expectedSubject } = await identity(provider, route);
+        const pixels = referenceImage ? await images.read(sourceImage.id, { normalizeOrientation: true, revision: sourceImage.revision }) : null;
+        result = await provider.runtime.run({ model: route.model, reasoning: route.reasoning, signal: req.aiSignal,
+          prompt: prepared.prompt, schema: ANNOTATION_SCHEMA,
+          ...(pixels ? { image: `data:${sourceImage.mimeType};base64,${pixels.toString("base64")}` } : {}),
+          expectedAccountId: accountId, expectedSubject });
+        assertOpen(req.aiSignal);
+        if (result.completed !== true) throw fail(502, "注音未完成，正文和已有标记保持原样。");
+        if (referenceImage && (await getImage(req.user.id, sourceImage.id)).revision !== sourceImage.revision) throw fail(409, "注音期间原图已变化，请重试。");
+      }
+      let annotated;
+      try { annotated = applyBodyAnnotation(result ? JSON.parse(result.text) : { blocks: [] }, prepared); }
+      catch { throw fail(502, "注音结果改变了正文或格式不完整，未应用；请重试。"); }
+      const elapsedMs = Math.round(performance.now() - started);
+      const metadata = { providerId: provider.id, model: result?.model || null, elapsedMs,
+        execution: result ? execution(route, result) : null,
+        imageReference: result && referenceImage ? { imageId: sourceImage.id, revision: sourceImage.revision } : null,
+        readingPolicy: result ? referenceImage ? "image_reference" : "text_context" : "existing_only",
+        createdAt: new Date().toISOString() };
+      return { ...annotated, annotation: metadata, execution: metadata.execution,
+        annotationModel: metadata.model, annotationElapsedMs: elapsedMs };
+    }, { signal: req.aiSignal }));
+  });
   app.post("/api/images/:id/recognize", async (req, res) => {
     res.json(await recognizeImage(req.user.id, req.params.id, {
       engine: req.body?.engine, signal: req.aiSignal,
@@ -824,17 +921,18 @@ export function attachAIRoutes({
       const cached = !force && !ranges.sentences.length && database.prepare("SELECT fragments_json FROM sentence_cache WHERE body_hash=?").get(hash);
       return cached ? validateSentences({ sentences: JSON.parse(cached.fragments_json) }, text) : null;
     };
-    let fragments = cachedFragments();
-    if (!fragments) await withProvider(userId, preferred(), async (provider) => {
+    let fragments = cachedFragments(), usedExecution = null;
+    if (!fragments) await withRole(userId, "segmentation", async (provider, route) => {
       // Another request may have filled the same cache while this one queued.
       fragments = cachedFragments();
       if (fragments) return;
-      const { accountId, expectedSubject } = await identity(provider);
+      const { accountId, expectedSubject } = await identity(provider, route);
       const split = async (part) => {
         if (!part.trim()) return [part];
-        const result = await provider.runtime.run({ prompt: sentencePrompt(part), schema: SENTENCE_SCHEMA,
+        const result = await provider.runtime.run({ model: route.model, reasoning: route.reasoning, signal, prompt: sentencePrompt(part), schema: SENTENCE_SCHEMA,
           expectedAccountId: accountId, expectedSubject, webSearch: false });
         assertOpen(signal);
+        usedExecution = execution(route, result);
         if (result.completed !== true) throw fail(502, "分句未完成，现有正文已保留。");
         try { return validateSentences(JSON.parse(result.text), part); }
         catch (error) { throw fail(502, error.expose ? error.message : "分句返回格式无效，现有正文已保留，请重试。"); }
@@ -854,7 +952,7 @@ export function attachAIRoutes({
     assertOpen(signal);
     const next = force ? applySentenceBoundaries(html, fragments) : initializeSentenceBoundaries(html, fragments);
     if (bodyText(next) !== text || !hasCompleteSentenceBoundaries(next)) throw fail(502, "分句尚未覆盖全部正文，请重试。");
-    return { bodyHtml: next, bodyHash: hash, sentences: bodyRanges(next).sentences };
+    return { bodyHtml: next, bodyHash: hash, sentences: bodyRanges(next).sentences, execution: usedExecution };
   }
   app.post("/api/documents/:id/sentences", async (req, res) => {
     const row = getDocument(req.user.id, req.params.id), supplied = typeof req.body?.bodyHtml === "string", html = supplied ? normalizeBodyHtml(req.body.bodyHtml) : rowHtml(row), hash = bodyHash(html);
@@ -901,13 +999,13 @@ export function attachAIRoutes({
     try { return await work(); }
     finally { answeringDocuments.delete(documentId); }
   }
-  async function answer(req, row, record, group, input, provider, expected, emit) {
+  async function answer(req, row, record, group, input, provider, expected, emit, route) {
     const selection = JSON.parse(group.snapshot_json);
-    const activeRecord = record.account_id === expected.expectedAccountId && record.provider_id === provider.id ? record : { ...record, thread_id: null };
+    const activeRecord = record.account_id === expected.expectedAccountId && record.provider_id === provider.id && (!route.model || record.model === route.model) && reasoningKey(JSON.parse(record.reasoning_json || "null")) === reasoningKey(route.reasoning) ? record : { ...record, thread_id: null };
     try {
       await emit?.({type:"start",conversation:presentConversation(record),groupId:group.id,question:input.question,operation:input.operation});
       await emit?.({type:"status",phase:"preparing"});
-      const result = await provider.runtime.run({ prompt: promptFor(row, selection, input.question, activeRecord), threadId: activeRecord.thread_id, webSearch: true, ...expected,
+      const result = await provider.runtime.run({ model: route.model, reasoning: route.reasoning, prompt: promptFor(row, selection, input.question, activeRecord), threadId: activeRecord.thread_id, webSearch: true, ...expected,
         ...(emit ? {onEvent:emit,signal:req.aiSignal} : {}) });
       assertOpen(req.aiSignal);
       if (result.completed !== true) throw fail(502, "AI 回答未完成，未把部分输出存成答案。");
@@ -915,8 +1013,8 @@ export function attachAIRoutes({
       if (!current || !database.prepare("SELECT id FROM qa_groups WHERE id=? AND conversation_id=? AND user_id=?").get(group.id, record.id, req.user.id)) throw fail(409, "对话已删除，本次迟到结果未恢复对话。");
       const at = new Date().toISOString(), metadata = { groupId: group.id, operation: input.operation, createdAt: at };
       const sources = (Array.isArray(result.sources) ? result.sources : []).filter((item) => { try { return ["http:", "https:"].includes(new URL(item.url).protocol); } catch { return false; } }).map(({ url, title }) => ({ url, title: String(title || url).slice(0, 500) }));
-      const messages = [...JSON.parse(current.messages_json), { role: "user", content: input.question, ...metadata }, { role: "assistant", content: result.text, ...metadata, sources, webSearch: result.webSearch || { enabled: true, performed: false } }];
-      database.prepare("UPDATE conversations SET thread_id=?,messages_json=?,last_error=NULL,document_revision=?,updated_at=?,account_id=?,provider_id=? WHERE id=? AND user_id=?").run(result.threadId, JSON.stringify(messages), row.revision, at, expected.expectedAccountId, provider.id, record.id, req.user.id);
+      const messages = [...JSON.parse(current.messages_json), { role: "user", content: input.question, ...metadata }, { role: "assistant", content: result.text, ...metadata, sources, execution: execution(route, result), webSearch: result.webSearch || { enabled: true, performed: false } }];
+      database.prepare("UPDATE conversations SET thread_id=?,messages_json=?,last_error=NULL,document_revision=?,updated_at=?,account_id=?,provider_id=?,model=?,reasoning_json=? WHERE id=? AND user_id=?").run(result.threadId, JSON.stringify(messages), row.revision, at, expected.expectedAccountId, provider.id, route.model || result.model || null, route.reasoning ? JSON.stringify(route.reasoning) : null, record.id, req.user.id);
       return presentConversation(database.prepare("SELECT * FROM conversations WHERE id=? AND user_id=?").get(record.id, req.user.id));
     } catch (cause) {
       if (!closed) database.prepare("UPDATE conversations SET last_error=?,updated_at=? WHERE id=? AND user_id=?").run(cause.message, new Date().toISOString(), record.id, req.user.id);
@@ -925,9 +1023,9 @@ export function attachAIRoutes({
   }
   app.post("/api/documents/:id/conversations", async (req, res) => {
     const documentId = getDocument(req.user.id, req.params.id).id;
-    await oneArticleQuestion(documentId, () => respondToChat(req,res,(emit) => withProvider(req.user.id, preferred(), async (provider) => {
+    await oneArticleQuestion(documentId, () => respondToChat(req,res,(emit) => withRole(req.user.id, "chat", async (provider, route) => {
       let row = getDocument(req.user.id, req.params.id);
-      const input = questionInput(req.body), { accountId, expectedSubject } = await identity(provider);
+      const input = questionInput(req.body), { accountId, expectedSubject } = await identity(provider, route);
       // Identity refresh may await the network. Always mark the current body,
       // including edits and markers made while authorization was refreshing.
       row = getDocument(req.user.id, row.id);
@@ -945,20 +1043,20 @@ export function attachAIRoutes({
       row = getDocument(req.user.id, row.id);
       record = database.prepare("SELECT * FROM conversations WHERE id=? AND user_id=?").get(id, req.user.id);
       const group = database.prepare("SELECT * FROM qa_groups WHERE id=?").get(groupId);
-      const conversation = await answer(req, row, record, group, input, provider, { expectedAccountId: accountId, expectedSubject },emit);
+      const conversation = await answer(req, row, record, group, input, provider, { expectedAccountId: accountId, expectedSubject },emit, route);
       return {status:created ? 201 : 200,conversation};
     }, { signal: req.aiSignal })));
   });
   app.post("/api/conversations/:id/messages", async (req, res) => {
     const existing = database.prepare("SELECT document_id FROM conversations WHERE id=? AND user_id=?").get(req.params.id, req.user.id);
     if (!existing) throw fail(404, "找不到你账号下的对话。");
-    await oneArticleQuestion(existing.document_id, () => respondToChat(req,res,(emit) => withProvider(req.user.id, preferred(), async (provider) => {
+    await oneArticleQuestion(existing.document_id, () => respondToChat(req,res,(emit) => withRole(req.user.id, "chat", async (provider, route) => {
       const record = database.prepare("SELECT * FROM conversations WHERE id=? AND user_id=?").get(req.params.id, req.user.id);
       if (!record) throw fail(404, "找不到你账号下的对话。");
       const group = database.prepare("SELECT * FROM qa_groups WHERE id=? AND conversation_id=? AND user_id=?").get(req.body?.groupId || "", record.id, req.user.id);
       if (!group) throw fail(400, "请选择要继续追问的问答组。");
-      const { accountId, expectedSubject } = await identity(provider), input = questionInput({ ...req.body, operation: req.body?.operation || "followup" });
-      const conversation = await answer(req, getDocument(req.user.id, record.document_id), record, group, input, provider, { expectedAccountId: accountId, expectedSubject },emit);
+      const { accountId, expectedSubject } = await identity(provider, route), input = questionInput({ ...req.body, operation: req.body?.operation || "followup" });
+      const conversation = await answer(req, getDocument(req.user.id, record.document_id), record, group, input, provider, { expectedAccountId: accountId, expectedSubject },emit, route);
       return {status:200,conversation};
     }, { signal: req.aiSignal })));
   });

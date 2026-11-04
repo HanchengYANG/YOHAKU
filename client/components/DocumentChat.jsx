@@ -7,6 +7,7 @@ import { availableChatGroups, createChatSession, visibleChatMessages } from "../
 import useChatSheet from "../use-chat-sheet.mjs";
 import { sendChat } from "../chat-stream.mjs";
 import useStreamedReply from "../use-streamed-reply.mjs";
+import ExecutionDetails from "./ExecutionDetails.mjs";
 
 const operationNames = { translation: "翻译", grammar: "解释语法", custom: "自定义问题", followup: "追问" };
 const scopeKey = (ids) => ids?.length ? "groups:" + [...ids].sort().join(",") : "all";
@@ -277,6 +278,7 @@ export default function DocumentChat({ document, open, onOpen, onClose, session:
       <span className="chat-speaker" title={message.createdAt ? new Date(message.createdAt).toLocaleString("zh-CN") : undefined}>
         {message.role === "user" ? "我" : "AI"}{!scopeGroupIds && ` · ${groupIndex >= 0 ? `问答 ${groupIndex + 1}` : "历史记录"}`}{message.role === "assistant" && message.webSearch?.enabled === false ? " · 未联网" : ""}</span>
       {message.role === "assistant" ? <div className="chat-markdown"><Markdown {...chatMarkdownOptions}>{message.content || ""}</Markdown></div> : <div className="chat-user-text">{message.content}</div>}
+      {message.role === "assistant" && <ExecutionDetails execution={message.execution} label="问答" detailId={"execution:" + key} />}
       {message.sources?.length > 0 && <details className="chat-answer-sources" data-chat-detail={"sources:" + key}><summary>参考来源</summary>
         <ul className="answer-sources" aria-label="回答来源">{message.sources.map((source, i) => {
           const url = safeSource(source);

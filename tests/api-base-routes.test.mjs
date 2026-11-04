@@ -92,7 +92,7 @@ test("iliad codix真实路由：固定地址、仅拥有者保存密钥，全站
     return { status: response.status, data };
   }
   assert.equal((await request("/api/ai/configuration", "PUT", {})).status, 405);
-  assert.equal((await request("/api/ai/models")).status, 405);
+  assert.equal((await request("/api/ai/models")).status, 401, "OpenAI目录需要已有订阅授权");
   const initial = await request("/api/ai/status?providerId=api_base");
   assert.equal(initial.status, 200);
   assert.equal(initial.data.connected, false);
@@ -105,7 +105,7 @@ test("iliad codix真实路由：固定地址、仅拥有者保存密钥，全站
   assert.equal(saved.data.configuration.baseURL, API_BASE_DEFAULTS.baseURL);
   const redirected = await request("/api/ai/configuration", "PUT", { providerId: "api_base", baseURL: "https://other.test/v1", apiKey: "fixture-wrong-key" });
   assert.equal(redirected.status, 400);
-  assert.equal(saved.data.connected, false);
+  assert.equal(saved.data.connected, true);
   assert.equal(saved.data.configuration.hasKey, true);
   assert.equal(saved.data.configuration.activeModel, null);
   assert.equal((await request("/api/providers/active", "POST", { providerId: "api_base", model: "codiX-agent" })).status, 409);

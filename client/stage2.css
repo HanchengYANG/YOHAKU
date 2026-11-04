@@ -812,3 +812,47 @@
     font-size: 9px;
   }
 }
+
+/* Connection management and role assignments have independent save flows. */
+.ai-role-settings { max-width: 1080px; }
+.ai-role-settings .stage2-heading { margin-bottom: 16px; }
+.ai-role-settings .stage2-description { margin-bottom: 20px; }
+.ai-role-form { max-width: 920px; }
+.ai-role-list { border: 1px solid #e0e4d7; border-radius: 6px; background: #fcfcf7; }
+.ai-role-row { display: grid; grid-template-columns: 68px minmax(0, 1fr) auto; align-items: center; gap: 8px 16px; padding: 14px 16px; min-width: 0; }
+.ai-role-row + .ai-role-row { border-top: 1px solid #e0e4d7; }
+.ai-role-row h2 { font-size: 16px; font-weight: 500; color: #3d5038; margin: 12px 0 0; }
+.ai-role-fields { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 2fr); gap: 12px; min-width: 0; }
+.ai-role-fields .stage2-field { min-width: 0; margin: 0; gap: 5px; font-size: 11px; }
+.ai-role-fields select { width: 100%; min-width: 0; height: 38px; padding: 7px 9px; font-size: 13px; text-overflow: ellipsis; }
+.ai-role-refresh { font-size: 12px; min-height: 38px; margin-top: 17px; }
+.ai-role-image-option { grid-column: 2 / -1; display: flex; align-items: center; gap: 7px; color: #526548; font-size: 12px; }
+.ai-role-image-option input { accent-color: #6d8d58; width: 16px; height: 16px; margin: 0; }
+.ai-role-note { grid-column: 2 / -1; color: #839175; font-size: 11px; }
+.ai-role-error { grid-column: 1 / -1; font-size: 12px; line-height: 1.7; margin: 2px 0 0; overflow-wrap: anywhere; }
+.ai-role-save { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; padding: 18px 0; }
+.ai-role-save p { color: #839175; font-size: 12px; line-height: 1.8; margin: 0; }
+.ai-role-settings .stage2-error .text-button { margin-left: 12px; }
+.sidebar-admin-row { flex-wrap: wrap; }
+@media (max-width: 600px) {
+  .ai-role-row { grid-template-columns: minmax(0, 1fr) auto; padding: 10px 12px; gap: 6px 10px; }
+  .ai-role-row h2 { margin: 0; font-size: 15px; }
+  .ai-role-fields { grid-column: 1 / -1; grid-row: 2; grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr); gap: 8px; }
+  .ai-role-refresh { grid-column: 2; grid-row: 1; min-height: 28px; margin: 0; padding: 0 4px; }
+  .ai-role-image-option, .ai-role-note { grid-column: 1 / -1; }
+  .ai-role-save { align-items: stretch; padding: 14px 0; }
+  .ai-role-save .button { width: 100%; }
+}
+.ai-role-advanced { grid-column: 2 / -1; min-width: 0; font-size: 11px; color: #839175; }
+.ai-role-advanced > summary { cursor: pointer; width: fit-content; padding: 3px 0; }
+.ai-role-advanced > summary span { margin-left: 8px; color: #697e5b; }
+.ai-role-reasoning-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 10px 12px; padding-top: 12px; }
+.ai-role-reasoning-fields .stage2-field { min-width: 0; gap: 5px; margin: 0; }
+.ai-role-reasoning-fields input, .ai-role-reasoning-fields select { min-width: 0; height: 36px; padding: 7px 9px; font-size: 12px; }
+.ai-role-reasoning-fields small { line-height: 1.6; font-size: 10px; }
+.ai-role-reasoning-warning { font-size: 11px; color: #9a7254; line-height: 1.7; margin: 9px 0 0; overflow-wrap: anywhere; }
+.ai-role-reasoning-reset { font-size: 11px; margin-top: 9px; }
+@media (max-width: 600px) {
+  .ai-role-advanced { grid-column: 1 / -1; }
+  .ai-role-reasoning-fields { grid-template-columns: repeat(auto-fit, minmax(125px, 1fr)); }
+}

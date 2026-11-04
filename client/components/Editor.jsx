@@ -22,7 +22,7 @@ import RubyText from "./RubyText.jsx";
 import ImportProgress from "./ImportProgress.jsx";
 import SourceImageSorter from "./SourceImageSorter.jsx";
 
-const annotationSteps = [{ id: "annotate", label: "生成注音", copy: "正在参考原图补全缺失读音，正文和已有读音保持不变。" }];
+const annotationSteps = [{ id: "annotate", label: "生成注音", copy: "正在按正文语境补全缺失读音，正文和已有读音保持不变。" }];
 
 export default function Editor({ initial, chatSession, onSave, onDelete, onCancel, onDirty, onDocumentChanged, saving, saveError = null, books = [], onCreateBook }) {
   const [value, setValue] = useState(() => ({
@@ -270,8 +270,9 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
   const editingBlocks = useMemo(() => htmlToBlocks(editingHtml), [editingHtml]);
   const taskResultStale = saveError?.code === "TASK_RESULT_STALE";
   const taskUnavailable = saveError?.code === "TASK_UNAVAILABLE";
-  const canGenerateReadings = !taskResultStale && !taskUnavailable && !!sourceImageId && (initial.taskId
+  const usesDraftAnnotation = !!sourceImageId && (initial.taskId
     ? activeSource?.taskId === initial.taskId : !initial.id);
+  const canGenerateReadings = !taskResultStale && !taskUnavailable && (!initial.taskId || usesDraftAnnotation);
   const emptySourceIds = useMemo(() => {
     const filled = new Set(bodyRanges(bodyHtml).sources.filter((source) => source.text.trim()).map((source) => source.id));
     return new Set(imageSources.filter((image) => !filled.has(image.id)).map((image) => image.id));
@@ -351,6 +352,7 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
     annotationRequest.current = controller;
     const currentContent = serializeBlocks(editingBlocks);
     const currentBody = plainText(editingBlocks);
+    const currentHtml = htmlRef.current;
     const manualReadings = editingBlocks.flatMap((block, blockIndex) =>
       block.segments.filter((segment) => segment.reading).flatMap((segment, rubyIndex) =>
         segment.origin === "manual"
@@ -366,19 +368,23 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
     let awaitingPaint = false;
     try {
       const taskItemId = imageSources.find((image) => image.id === sourceImageId)?.taskItemId;
-      const annotationPath = initial.taskId && taskItemId
+      const annotationPath = !usesDraftAnnotation ? "/ai/annotate" : initial.taskId && taskItemId
         ? `/image-tasks/${encodeURIComponent(initial.taskId)}/items/${encodeURIComponent(taskItemId)}/annotate`
         : `/images/${encodeURIComponent(sourceImageId)}/annotate`;
       const result = await api(annotationPath, {
         method: "POST",
-        body: JSON.stringify({ content: currentContent, manualReadings,
-          ...(initial.taskId ? { resultVersion:initial.taskResultVersion } : {}) }),
+        body: JSON.stringify(usesDraftAnnotation ? { content: currentContent, manualReadings,
+          ...(initial.taskId ? { resultVersion:initial.taskResultVersion } : {}) }
+          : { bodyHtml: editingHtml, ...(sourceImageId ? { sourceImageId } : {}) }),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
+      if (htmlRef.current !== currentHtml)
+        throw new Error("生成注音期间正文已变化，未应用旧结果；当前修改保留，请重试。");
       if (!Array.isArray(result?.blocks) || plainText(result.blocks) !== currentBody)
         throw new Error("注音结果改变了正文，已拒绝应用；当前正文保留，可重试。");
-      const nextHtml = replaceSourceBodyHtml(htmlRef.current, sourceImageId, syncBodyReadings(editingHtml, result.blocks));
+      const annotatedHtml = result.bodyHtml || syncBodyReadings(editingHtml, result.blocks);
+      const nextHtml = sourceImageId ? replaceSourceBodyHtml(currentHtml, sourceImageId, annotatedHtml) : annotatedHtml;
       const nextBlocks = htmlToBlocks(nextHtml), content = serializeBlocks(nextBlocks);
       updateBlocks(nextBlocks, false, nextHtml);
       setValue((old) => ({
@@ -388,6 +394,7 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
         annotationModel: result.annotationModel,
         annotationReasoningEffort: result.annotationReasoningEffort,
         annotationElapsedMs: result.annotationElapsedMs,
+        annotation: result.annotation,
       }));
       setMessage("");
       setAnnotationPaint({ startedAt });
@@ -711,10 +718,11 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
                     disabled={busy || !editingText.trim() || incompleteRuby}
                     onClick={generateMissingReadings}>
                     {annotating ? "正在生成缺失注音…"
-                      : annotationCompleted ? "补全缺失注音" : "生成缺失注音"}
+                      : annotationCompleted ? "补全缺失注音" : sourceImageId ? "生成缺失注音" : "生成注音"}
                   </button>
                 )}
-                {annotating && <p role="status">正在参考原图生成缺失注音，正文保持不变。</p>}
+                {annotating && <p role="status">正在按正文语境生成缺失注音，正文和已有读音保持不变。</p>}
+                {value.annotation?.model && <p>注音来源：{(value.annotation.providerId || value.annotation.execution?.providerId) === "api_base" ? "iliad codix" : "OpenAI"} · {value.annotation.model}{value.annotation.imageReference ? " · 已参考原图" : " · 文字语境"}</p>}
                 {annotationStartedAt !== null && (annotating || annotationError) && (
                   <ImportProgress phase="annotate" startedAt={annotationStartedAt}
                     steps={annotationSteps} failed={!annotating && !!annotationError} />
@@ -1019,6 +1027,7 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
                   <button type="button" className="text-button" disabled={!redoHistory.current.length} onClick={() => undo(true)}>重做</button>
                   {initial.id ? <button type="button" className="text-button" disabled={busy || incompleteRuby} onClick={resegment}>{segmenting ? "正在重新分句…" : "重新分句"}</button> : <small>首次保存后初始化分句；普通校对保留现有句子。</small>}
                 </div>
+                {!sourceImageId && annotationTask}
                 {orphanedIds.length > 0 && <p role="status" className="qa-orphan-warning">{orphanedIds.length} 组讨论对应的文字已移除。记录会保留，保存后解除正文关联；撤销或取消校对可恢复。</p>}
                 {selection && initial.id && <div className="editor-selection-questions" role="group" aria-label="选区提问">
                   <button type="button" className="text-button" disabled={answering} onClick={() => askEditor("translation")}>翻译</button>

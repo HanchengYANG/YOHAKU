@@ -289,6 +289,12 @@ export function createChatGPTAuth({
       await ready;
       return statusValue();
     },
+    async credentialStatus() {
+      await ready;
+      const record = active();
+      return { ...statusValue(), credentialId: record
+        ? createHash("sha256").update(JSON.stringify([record.id, record.grant_id || "legacy"])).digest("hex") : null };
+    },
     async accounts() {
       await ready;
       return {
@@ -446,6 +452,7 @@ export function createChatGPTAuth({
             .digest("base64url");
           const record = {
             id,
+            grant_id: randomUUID(),
             issuer,
             subject: identity.sub,
             email: typeof identity.email === "string" ? identity.email : null,

@@ -9,6 +9,7 @@ import Reader from "./components/Reader.jsx";
 import ReadingPreparation from "./components/ReadingPreparation.jsx";
 import Editor from "./components/Editor.jsx";
 import AISettings from "./components/AISettings.jsx";
+import RoleSettings from "./components/RoleSettings.jsx";
 import ImageImport from "./components/ImageImport.jsx";
 import { TaskList, TaskDetail } from "./components/ImageTasks.jsx";
 import { imageTasksChangedEvent, notifyImageTasksChanged } from "./image-tasks.mjs";
@@ -422,7 +423,7 @@ function Workspace({ user, onLoggedOut }) {
     }
   };
   const openPanel = (name) => {
-    if (name === "settings" && !user.isAdmin) return;
+    if (["settings", "roles"].includes(name) && !user.isAdmin) return;
     if (!mayLeave()) return;
     if (name === "chat" && panel !== "chat") rememberReadingPosition();
     importRequest.current++;
@@ -864,6 +865,13 @@ function Workspace({ user, onLoggedOut }) {
                 <span className="ai-dot" aria-hidden="true" />
                 AI 设置
               </button>
+              <button
+                className={`text-button sidebar-settings-button ${panel === "roles" ? "active" : ""}`}
+                type="button" disabled={saving} onClick={() => openPanel("roles")}
+              >
+                <span className="ai-dot" aria-hidden="true" />
+                角色配置
+              </button>
             </div>
           )}
           <UserMenu
@@ -916,6 +924,8 @@ function Workspace({ user, onLoggedOut }) {
           />
         ) : panel === "settings" && user.isAdmin ? (
           <AISettings onClose={closePanel} />
+        ) : panel === "roles" && user.isAdmin ? (
+          <RoleSettings onClose={closePanel} />
         ) : panel === "image" ? (
           <ImageImport
             key={importSession}

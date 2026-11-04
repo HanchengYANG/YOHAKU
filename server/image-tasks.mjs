@@ -284,13 +284,14 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
       transaction(() => {
         if (phase === "segment") {
           const current = requireTask(task.user_id, task.id), step = segmentationStep(current);
-          changeTask(task.id, { state: "ready", segmentation_json: json({ ...step, state: "succeeded", error: null, nextRunAt: 0, result: output }),
+          changeTask(task.id, { state: "ready", segmentation_json: json({ ...step, state: "succeeded", error: null, nextRunAt: 0, execution: output.execution, result: output }),
             segmentation_token: null, blocked_reason: null, next_run_at: 0,
             result_version: current.version + 1, completed_at: iso() });
           return;
         }
         const current = getItem.get(task.id, item.id), steps = parse(current.steps_json);
-        steps[phase] = { ...steps[phase], state: "succeeded", error: null, nextRunAt: 0 };
+        steps[phase] = { ...steps[phase], state: "succeeded", error: null, nextRunAt: 0,
+          execution: phase === "annotate" ? output.annotation?.execution : output.execution };
         const patch = { attempt_token: null };
         if (phase === "prepare") { patch.image_json = json(output); patch.prepared_revision = output.revision; }
         else if (phase === "recognize") {
@@ -310,7 +311,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
         const transient = error.name === "TypeError" || [408, 429, 500, 502, 503, 504].includes(error.status) || ["ETIMEDOUT", "ECONNRESET", "ENETUNREACH"].includes(error.code);
         const retry = authRequired || busy || transient && step.attempts <= maxAutomaticRetries;
         const message = authRequired ? "网站 AI 授权需要恢复，请联系网站拥有者；已上传图片和已完成结果均已保留。" : String(error.message || "处理失败，请重试或手动处理。").slice(0, 1000);
-        const failed = { ...step, state: retry ? "pending" : "failed", error: message,
+        const failed = { ...step, ...(error.execution ? { execution: error.execution } : {}), state: retry ? "pending" : "failed", error: message,
           attempts: authRequired || busy ? Math.max(0, step.attempts - 1) : step.attempts,
           nextRunAt: retry ? now() + (authRequired ? blockedRetryMs : retryDelayMs * Math.max(1, step.attempts)) : 0 };
         if (steps) { steps[phase] = failed; setSteps(current, steps, { attempt_token: null }); }
