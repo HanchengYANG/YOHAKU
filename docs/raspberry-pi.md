@@ -137,6 +137,9 @@ sudo bash scripts/pi-setup-system.sh
 ## AI 首次授权
 
 AI 由首个网站账号（网站拥有者）统一连接，所有已登录账号共享这份授权；其他账号没有 AI 配置权限。
+
+使用 iliad codix 时，在「AI 设置」选择「iliad codix」，填写服务方的 API key 后保存，再测试并启用模型，无需授权回调隧道或 CLI。服务地址固定，模型与能力说明见 [iliad codix 配置](../README.md#使用-iliad-codix)。密钥和模型测试结果保存在实例数据目录，部署备份同样包含这些私有配置。
+
 ChatGPT 授权使用本机回调。在执行授权的电脑上，通过自己的 SSH 别名建立隧道，端口需与实例中的 `PORT` 一致。默认端口示例：
 
 ```bash

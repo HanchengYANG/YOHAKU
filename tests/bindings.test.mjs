@@ -164,6 +164,64 @@ async function credentialFixture(directory, host) {
   return registration;
 }
 
+test("提供方预览不切换，保存后往返复用已有ChatGPT授权且不触发重新登录", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "yohaku-provider-reuse-"));
+  const mockCodix = {
+    auth: {
+      status: async () => ({ connected: true, activeAccountId: "codix-fixture", subject: "codix-fixture-subject" }),
+      accounts: async () => ({ accounts: [], activeId: "codix-fixture" }),
+    },
+    runtime: { status: () => ({ busy: false, model: "Qwen/Qwen3.6-35B" }), stop() {} },
+    configuration: async () => ({ model: "Qwen/Qwen3.6-35B" }),
+    selectModel: async (model) => assert.equal(model, "Qwen/Qwen3.6-35B"),
+  };
+  const running = await start(dataDir, (_ownerId, providerId) => providerId === "api_base" ? mockCodix : undefined);
+  const originalFetch = globalThis.fetch;
+  let externalRequests = 0;
+  globalThis.fetch = (input, options) => {
+    const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+    if (url.hostname !== "127.0.0.1" || url.protocol !== "http:") {
+      externalRequests++;
+      throw new Error("切换已有授权不应访问授权服务或模型接口");
+    }
+    return originalFetch(input, options);
+  };
+  t.after(async () => {
+    await running.stop();
+    globalThis.fetch = originalFetch;
+    await rm(dataDir, { recursive: true, force: true });
+  });
+  const owner = await ensureSession(running.url);
+  const directory = join(dataDir, "users", owner.user.id, "providers", "openai");
+  const registration = await credentialFixture(directory, { ext_agent_host_id: `urn:uuid:${randomUUID()}` });
+  registration.accounts[0].expires_at = Date.now() - 1000;
+  const filename = join(directory, "chatgpt-accounts.json");
+  const credentials = JSON.stringify(registration);
+  await writeFile(filename, credentials, { mode: 0o600 });
+  const ask = (path, method = "GET", body) => request(running.url, owner.cookie, path, method, body);
+  const initial = await ask("/api/ai/status");
+  assert.equal(initial.data.connected, true, "保留refresh token时无需重新授权");
+  for (let turn = 0; turn < 2; turn++) {
+    const preview = await ask("/api/ai/status?providerId=api_base");
+    assert.equal(preview.data.activeProviderId, "openai");
+    assert.equal((await ask("/api/ai/status")).data.providerId, "openai");
+    const switched = await ask("/api/providers/active", "POST", { providerId: "api_base", model: "Qwen/Qwen3.6-35B" });
+    assert.equal(switched.status, 200);
+    const savedOpenAI = await ask("/api/ai/status?providerId=openai");
+    assert.equal(savedOpenAI.data.connected, true);
+    assert.equal(savedOpenAI.data.activeProviderId, "api_base");
+    const back = await ask("/api/providers/active", "POST", { providerId: "openai" });
+    assert.equal(back.status, 200);
+    assert.equal(back.data.connected, true);
+    assert.equal(back.data.requiresLogin, false);
+    assert.equal(back.data.pending, false);
+    assert.equal(back.data.activeAccountId, registration.activeId);
+    noCredentials(back);
+    assert.equal(await readFile(filename, "utf8"), credentials);
+  }
+  assert.equal(externalRequests, 0);
+});
+
 test("真实provider与网站会话：拥有者认领旧SIWC后全站共享，重启保留绑定并忽略成员旧授权", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "yohaku-legacy-bindings-"));
   const host = { ext_agent_host_id: `urn:uuid:${randomUUID()}` };
@@ -467,7 +525,7 @@ test("真实登录与OAuth替身：无Cookie回调按pending state绑定发起�
     assert.equal(rejected.status, 400);
     assert.ok(!rejected.text.includes("TEST-ONLY-OAUTH-CODE"));
   }
-  for (const providerId of ["claude", "api_base"]) {
+  for (const providerId of ["claude", "unknown"]) {
     assert.equal(
       (
         await request(

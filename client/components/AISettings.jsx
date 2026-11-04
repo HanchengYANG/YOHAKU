@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import api from "../api.mjs";
 import Icon from "./Icon.jsx";
+import APIBaseSettings from "./APIBaseSettings.jsx";
 
 export default function AISettings({ onClose, onChanged }) {
   const [status, setStatus] = useState(null);
+  const [selectedProviderId, setSelectedProviderId] = useState("openai");
   const [busy, setBusy] = useState("loading");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -16,6 +18,7 @@ export default function AISettings({ onClose, onChanged }) {
     api("/ai/status", { signal: controller.signal })
       .then((value) => {
         setStatus(value);
+        setSelectedProviderId(value.providerId || "openai");
         onChanged?.(value);
       })
       .catch((e) => {
@@ -47,10 +50,11 @@ export default function AISettings({ onClose, onChanged }) {
   };
 
   const refresh = async () => {
-    const value = await api("/ai/status");
+    const value = await api(`/ai/status?providerId=${encodeURIComponent(selectedProviderId)}`);
     if (mounted.current) {
       setStatus(value);
-      onChanged?.(value);
+      setSelectedProviderId(value.providerId || "openai");
+      if (value.providerId === value.activeProviderId) onChanged?.(value);
     }
   };
 
@@ -58,7 +62,7 @@ export default function AISettings({ onClose, onChanged }) {
     perform("login", async () => {
       const result = await api("/ai/login", {
         method: "POST",
-        body: JSON.stringify({ newAccount }),
+        body: JSON.stringify({ newAccount, providerId: selectedProviderId }),
       });
       const target = new URL(result.url);
       if (
@@ -75,7 +79,7 @@ export default function AISettings({ onClose, onChanged }) {
 
   const disconnect = () =>
     perform("logout", async () => {
-      const result = await api("/ai/logout", { method: "POST" });
+      const result = await api("/ai/logout", { method: "POST", body: JSON.stringify({ providerId: selectedProviderId }) });
       await refresh();
       if (mounted.current) {
         setNotice(
@@ -90,20 +94,35 @@ export default function AISettings({ onClose, onChanged }) {
     perform("account", async () => {
       await api("/ai/account", {
         method: "POST",
-        body: JSON.stringify({ id }),
+        body: JSON.stringify({ id, providerId: selectedProviderId }),
       });
       await refresh();
     });
 
   const accounts = Array.isArray(status?.accounts) ? status.accounts : [];
   const connected = status?.connected === true;
-  const chooseProvider = (providerId) =>
+  const previewProvider = (providerId) => perform("provider-preview", async () => {
+    const value = await api(`/ai/status?providerId=${encodeURIComponent(providerId)}`);
+    if (mounted.current) {
+      setStatus(value);
+      setSelectedProviderId(value.providerId);
+    }
+  });
+  const chooseProvider = (model) =>
     perform("provider", async () => {
-      await api("/providers/active", {
+      const value = await api("/providers/active", {
         method: "POST",
-        body: JSON.stringify({ providerId }),
+        body: JSON.stringify({ providerId: selectedProviderId, ...(model ? { model } : {}) }),
       });
-      await refresh();
+      if (mounted.current) {
+        setStatus(value);
+        setSelectedProviderId(value.providerId);
+        onChanged?.(value);
+        const name = value.providers.find((provider) => provider.id === value.providerId)?.name || value.providerId;
+        setNotice(value.providerId === "openai" && value.connected
+          ? "已保存提供方：OpenAI，继续使用已保存的 ChatGPT 授权。"
+          : `已保存提供方：${name}。`);
+      }
     });
   const claim = () =>
     perform("claim", async () => {
@@ -137,16 +156,16 @@ export default function AISettings({ onClose, onChanged }) {
         </button>
       </div>
       <p className="stage2-description">
-        网站拥有者统一连接 ChatGPT，所有网站账号共用这份 AI 授权和额度。
+        网站拥有者统一配置 AI 服务，所有网站账号共用这份 AI 授权和额度。
         各账号的书架、图片与讨论仍各自独立。
       </p>
       <label className="stage2-field account-picker">
         AI 提供方
         <select
           aria-label="AI 提供方"
-          value={status?.providerId || "openai"}
+          value={selectedProviderId}
           disabled={!!busy}
-          onChange={(event) => chooseProvider(event.target.value)}
+          onChange={(event) => previewProvider(event.target.value)}
         >
           {(
             status?.providers || [
@@ -164,6 +183,8 @@ export default function AISettings({ onClose, onChanged }) {
           ))}
         </select>
       </label>
+      <p className="ai-model-caption provider-hint">当前提供方：{status?.providers?.find((provider) => provider.id === status.activeProviderId)?.name || "正在读取…"}。
+        选择后点击「保存提供方」生效，切换会保留各自已有的授权、API key 和模型。</p>
       {error && (
         <div className="stage2-error" role="alert">
           {error}
@@ -174,7 +195,8 @@ export default function AISettings({ onClose, onChanged }) {
           {notice}
         </div>
       )}
-      <div className="ai-account-card">
+      {status?.providerId === "api_base" ? <APIBaseSettings status={status} busy={busy}
+        perform={perform} refresh={refresh} onNotice={setNotice} onSaveProvider={chooseProvider} /> : <div className="ai-account-card">
         {status?.canClaimExisting && (
           <div className="stage2-notice">
             <p>
@@ -249,6 +271,10 @@ export default function AISettings({ onClose, onChanged }) {
           </label>
         )}
         <div className="ai-account-actions">
+          <button type="button" className="button primary" onClick={() => chooseProvider()}
+            disabled={!!busy || !status || selectedProviderId === status.activeProviderId}>
+            {busy === "provider" ? "正在保存…" : "保存提供方"}
+          </button>
           {!connected && status && (
             <button
               className="button primary chatgpt-connect"
@@ -280,22 +306,22 @@ export default function AISettings({ onClose, onChanged }) {
             </button>
           )}
         </div>
-      </div>
+      </div>}
       <div className="ai-usage-note">
         <Icon name="book" size={18} />
         <div>
           <p>识别图片与讨论内容会发送给所连接账户的 AI 服务。</p>
           <p>
-            所有网站账号的 AI 请求均消耗网站拥有者配置的订阅额度，用量达到限制时会显示实际错误。
+            所有网站账号的 AI 请求均使用网站拥有者配置的订阅或 API 配额。
           </p>
-          <a
+          {status?.providerId !== "api_base" && <a
             className="text-button"
             href="https://chatgpt.com/settings/usage"
             target="_blank"
             rel="noreferrer"
           >
             到 ChatGPT 管理用量和授权 <Icon name="arrow" size={14} />
-          </a>
+          </a>}
         </div>
       </div>
     </section>

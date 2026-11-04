@@ -16,7 +16,7 @@ async function temporaryDirectory(t) {
   return path;
 }
 
-test("提供方注册表仅OpenAI启用，Claude和API Base是无认证的空预留", () => {
+test("提供方注册表启用OpenAI订阅和iliad codix密钥连接，Claude仍为预留", () => {
   assert.deepEqual(PROVIDERS, [
     {
       id: "openai",
@@ -25,7 +25,7 @@ test("提供方注册表仅OpenAI启用，Claude和API Base是无认证的空预
       authModes: ["chatgpt_subscription"],
     },
     { id: "claude", name: "Claude", enabled: false, authModes: [] },
-    { id: "api_base", name: "API Base", enabled: false, authModes: [] },
+    { id: "api_base", name: "iliad codix", enabled: true, authModes: ["api_key"] },
   ]);
   assert.doesNotMatch(
     JSON.stringify(PROVIDERS),
@@ -46,7 +46,7 @@ test("未实现提供方明确501且不联网、不创建目录或初始化任�
   t.after(() => {
     globalThis.fetch = savedFetch;
   });
-  for (const providerId of ["claude", "api_base", "unknown", "OpenAI", null]) {
+  for (const providerId of ["claude", "unknown", "OpenAI", null]) {
     assert.throws(
       () =>
         createProviderConnection({

@@ -1284,7 +1284,7 @@ test("共享AI：成员可使用拥有者授权，但不能配置AI或访问别�
     [
       { id: "openai", enabled: true },
       { id: "claude", enabled: false },
-      { id: "api_base", enabled: false },
+      { id: "api_base", enabled: true },
     ],
   );
   const ownerConnection = connections.get(owner.id);

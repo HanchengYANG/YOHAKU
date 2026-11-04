@@ -110,6 +110,7 @@ export function attachAIRoutes({
     database
       .prepare("SELECT provider_id FROM user_providers WHERE user_id=?")
       .get(siteOwner())?.provider_id || "openai";
+  const managementProvider = (req) => req.body?.providerId ?? req.query.providerId ?? preferred();
   function connection(userId, providerId = preferred()) {
     if (!userId) throw fail(401, "请先登录你的网站账号。");
     const metadata = PROVIDERS.find((p) => p.id === providerId);
@@ -192,9 +193,9 @@ export function attachAIRoutes({
       expectedSubject: account.subject,
     };
   }
-  async function statusForUser(userId) {
+  async function statusForUser(userId, providerId) {
     if (!userId) return { connected: false, requiresLogin: true };
-    const provider = connection(userId),
+    const provider = connection(userId, providerId ?? preferred()),
       account = await provider.auth.status();
     assertOpen();
     let bindingError;
@@ -212,6 +213,7 @@ export function attachAIRoutes({
       connected: !!account.connected && !bindingError,
       requiresLogin: !account.connected || !!bindingError,
       providerId: provider.id,
+      activeProviderId: preferred(),
       model: runtime.model,
       runtime: { busy: runtime.busy },
       canClaimExisting: false,
@@ -228,11 +230,14 @@ export function attachAIRoutes({
       accounts: accounts.accounts,
       activeAccountId: accounts.activeId,
       providerId: provider.id,
+      activeProviderId: preferred(),
       providers: PROVIDERS,
+      ...(provider.configuration ? { configuration: await provider.configuration() } : {}),
       model: runtime.model,
       runtime,
       lastError: bindingError || account.lastError || runtime.lastError,
       canClaimExisting:
+        provider.id === "openai" &&
         userId === siteOwner() &&
         existsSync(join(storageDir, "ai", "chatgpt-accounts.json")),
     };
@@ -296,22 +301,63 @@ export function attachAIRoutes({
     const next = req.body?.providerId;
     if (!PROVIDERS.some((p) => p.id === next && p.enabled))
       throw fail(501, "这个提供方仅预留接口，目前尚未实现。");
-    await withManagementProvider(req.user.id, preferred(), async () => {
+    const current = preferred();
+    const activate = async (provider) => {
+      if (next === "api_base") {
+        const model = req.body?.model || (await provider.configuration()).model;
+        await provider.selectModel(model);
+      }
       database
         .prepare(
           "INSERT INTO user_providers(user_id,provider_id) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET provider_id=excluded.provider_id",
         )
         .run(req.user.id, next);
-      res.json(await statusForUser(req.user.id));
+      res.json(await statusForUser(req.user.id, next));
+    };
+    await withManagementProvider(req.user.id, current, async (provider) => {
+      if (next === current) return activate(provider);
+      return withManagementProvider(req.user.id, next, activate);
     });
   });
-  app.get("/api/ai/status", async (req, res) =>
-    res.json(await statusForUser(req.user.id)),
-  );
+  app.get("/api/ai/status", async (req, res) => {
+    if (req.query.providerId !== undefined && req.user.id !== siteOwner())
+      throw fail(403, "只有网站拥有者可以查看提供方配置。");
+    res.json(await statusForUser(req.user.id, req.query.providerId ?? preferred()));
+  });
+  app.put("/api/ai/configuration", requireOwner, async (req, res) => {
+    await withManagementProvider(req.user.id, managementProvider(req), async (provider) => {
+      if (!provider.configure) throw fail(405, "当前提供方通过订阅授权连接，无需填写 API 配置。");
+      await provider.configure(req.body);
+      assertOpen();
+      res.json(await statusForUser(req.user.id, provider.id));
+    });
+  });
+  app.get("/api/ai/models", requireOwner, async (req, res) => {
+    const provider = connection(req.user.id, managementProvider(req));
+    if (!provider.models) throw fail(405, "当前提供方不支持此模型列表接口。");
+    const models = await provider.models({ signal: req.aiSignal });
+    assertOpen(req.aiSignal);
+    res.json(models);
+  });
+  app.post("/api/ai/models/test", requireOwner, async (req, res) => {
+    await withManagementProvider(req.user.id, managementProvider(req), async (provider) => {
+      if (!provider.testModel) throw fail(405, "当前提供方不支持此模型测试接口。");
+      const report = await provider.testModel(req.body?.model, { signal: req.aiSignal });
+      assertOpen(req.aiSignal);
+      res.json(report);
+    });
+  });
+  app.post("/api/ai/model", requireOwner, async (req, res) => {
+    await withManagementProvider(req.user.id, managementProvider(req), async (provider) => {
+      if (!provider.selectModel) throw fail(405, "当前提供方不支持此模型选择接口。");
+      await provider.selectModel(req.body?.model);
+      res.json(await statusForUser(req.user.id, provider.id));
+    });
+  });
   app.post("/api/ai/login", requireOwner, async (req, res) => {
     await withManagementProvider(
       req.user.id,
-      preferred(),
+      managementProvider(req),
       async (provider) => {
         forgetPending(req.user.id, provider.id);
         const result = await provider.auth.start({
@@ -444,7 +490,7 @@ export function attachAIRoutes({
   app.post("/api/ai/logout", requireOwner, async (req, res) => {
     await withManagementProvider(
       req.user.id,
-      preferred(),
+      managementProvider(req),
       async (provider) => {
         forgetPending(req.user.id, provider.id);
         const account = await provider.auth.status();
@@ -464,12 +510,12 @@ export function attachAIRoutes({
   app.post("/api/ai/account", requireOwner, async (req, res) => {
     await withManagementProvider(
       req.user.id,
-      preferred(),
+      managementProvider(req),
       async (provider) => {
         await provider.auth.select(req.body?.id);
         forgetPending(req.user.id, provider.id);
         provider.runtime.stop();
-        res.json(await statusForUser(req.user.id));
+        res.json(await statusForUser(req.user.id, provider.id));
       },
     );
   });

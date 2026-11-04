@@ -261,6 +261,40 @@
   padding: 25px 27px;
   max-width: 730px;
 }
+.api-base-settings {
+  display: grid;
+  gap: 18px;
+}
+.api-base-settings .ai-model-caption {
+  margin: 0;
+}
+.api-model-heading {
+  border-top: 1px solid #e0e4d7;
+  padding-top: 20px;
+  display: grid;
+  gap: 8px;
+  color: #3d5038;
+  font-size: 13px;
+}
+.api-model-checks {
+  font-size: 12px;
+  color: #5e774d;
+}
+.api-model-checks p {
+  margin: 0 0 10px;
+}
+.api-model-checks ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.api-model-checks li {
+  margin: 8px 0;
+}
+.api-model-checks li span {
+  display: block;
+  margin-top: 4px;
+  color: #839175;
+}
 .ai-account-state {
   display: flex;
   align-items: flex-start;
@@ -310,6 +344,10 @@
 .account-picker {
   margin-top: 23px;
   max-width: 420px;
+}
+.ai-model-caption.provider-hint {
+  margin-bottom: 18px;
+  max-width: 730px;
 }
 .ai-status-error {
   color: #9a7254;

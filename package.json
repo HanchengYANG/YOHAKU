@@ -16,11 +16,14 @@
     "test:browser": "npm run build && playwright test",
     "test:browser:ai": "npm run build && playwright test -c playwright.ai.config.mjs",
     "verify:ai": "node scripts/verify-ai.mjs",
+    "verify:api-base": "node scripts/verify-api-base.mjs",
     "check": "npm run test && npm run build",
     "verify:stage3": "node scripts/verify-stage3.mjs",
     "verify:image-tasks": "node scripts/verify-image-tasks.mjs"
   },
   "dependencies": {
+    "@ai-sdk/openai-compatible": "3.0.84",
+    "ai": "7.0.162",
     "express": "^5.3.0",
     "jose": "^6.2.13",
     "multer": "^2.5.0",

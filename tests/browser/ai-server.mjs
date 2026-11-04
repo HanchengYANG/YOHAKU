@@ -4,8 +4,10 @@ import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import sharp from "sharp";
 import { createApp } from "../../server/app.mjs";
+import { createProviderConnection } from "../../server/providers/index.mjs";
 import { ANNOTATION_SCHEMA } from "../../shared/ocr-correction.mjs";
 import { OCR_BODY_SCHEMA } from "../../shared/ocr.mjs";
 import { SENTENCE_SCHEMA } from "../../shared/sentences.mjs";
@@ -234,10 +236,30 @@ const runtime = {
 const { app, close } = createApp({
   dataDir,
   callbackUri,
-  aiServices: { auth, runtime },
+  aiServices: (ownerId, providerId) => providerId === "openai" ? { auth, runtime }
+    : createProviderConnection({ providerId, storageDir: join(dataDir, "users", ownerId, "providers"),
+      apiBaseOptions: { fetchImpl: (url, init) =>
+        fetch(`http://127.0.0.1:4319/__test/api-base${new URL(url).pathname}`, init) },
+    }),
   imageTaskOptions: { runnerOptions: { pollIntervalMs: 20, retryDelayMs: 20, blockedRetryMs: 100 } },
 });
 const harness=express();
+harness.get("/__test/api-base/v1/models", (_req, res) => res.json({ data: [
+  { id: "codiX-agent" }, { id: "Qwen/Qwen3.6-35B" }, { id: "Zai/GLM-5.2" },
+  { id: "Qwen/Qwen3-Embedding-8B" }, { id: "codiX-embedding" }, { id: "codiX-autocomplete" },
+] }));
+harness.post("/__test/api-base/v1/chat/completions", express.json({ limit: "1mb" }), (req, res) => {
+  const body = req.body;
+  const image = Array.isArray(body.messages?.at(-1)?.content);
+  if (image && ["codiX-agent", "Zai/GLM-5.2"].includes(body.model))
+    return res.status(400).json({ error: { message: "Test fixture: not a multimodal model" } });
+  if (body.stream) {
+    res.set("Content-Type", "text/event-stream");
+    res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: "OK" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
+    return;
+  }
+  res.json({ model: body.model, choices: [{ message: { role: "assistant", content: image ? "42" : '{"ok":true}' }, finish_reason: "stop" }] });
+});
 harness.post("/__test/chat-stream",express.json(),(req,res)=>{
   for (const release of [...chatStreamWaiters]) release();
   if (req.body.action !== "release") chatStreamControl=req.body.action === "reset" ? null : {...req.body};

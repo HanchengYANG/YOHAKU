@@ -275,7 +275,7 @@ export default function DocumentChat({ document, open, onOpen, onClose, session:
     const groupIndex = groups.findIndex((group) => group.id === message.groupId), key = message.id || `${message.groupId || "legacy"}:${index}`;
     return <div className={`chat-message ${message.role}`} key={key} data-qa-group-id={message.groupId || undefined}>
       <span className="chat-speaker" title={message.createdAt ? new Date(message.createdAt).toLocaleString("zh-CN") : undefined}>
-        {message.role === "user" ? "我" : "AI"}{!scopeGroupIds && ` · ${groupIndex >= 0 ? `问答 ${groupIndex + 1}` : "历史记录"}`}</span>
+        {message.role === "user" ? "我" : "AI"}{!scopeGroupIds && ` · ${groupIndex >= 0 ? `问答 ${groupIndex + 1}` : "历史记录"}`}{message.role === "assistant" && message.webSearch?.enabled === false ? " · 未联网" : ""}</span>
       {message.role === "assistant" ? <div className="chat-markdown"><Markdown {...chatMarkdownOptions}>{message.content || ""}</Markdown></div> : <div className="chat-user-text">{message.content}</div>}
       {message.sources?.length > 0 && <details className="chat-answer-sources" data-chat-detail={"sources:" + key}><summary>参考来源</summary>
         <ul className="answer-sources" aria-label="回答来源">{message.sources.map((source, i) => {

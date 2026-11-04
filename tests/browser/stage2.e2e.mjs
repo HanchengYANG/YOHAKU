@@ -699,7 +699,7 @@ test("授权设置主流程（OAuth 为明确测试替身，不向官方发送�
   );
   await expect(providers.locator('option[value="api_base"]')).toHaveJSProperty(
     "disabled",
-    true,
+    false,
   );
   expect(
     await providers
@@ -709,7 +709,7 @@ test("授权设置主流程（OAuth 为明确测试替身，不向官方发送�
           .filter((option) => !option.disabled)
           .map((option) => option.value),
       ),
-  ).toEqual(["openai"]);
+  ).toEqual(["openai", "api_base"]);
   await page.screenshot({
     path: `artifacts/stage2-auth-disconnected-test-double-${info.project.name}.png`,
     fullPage: true,
