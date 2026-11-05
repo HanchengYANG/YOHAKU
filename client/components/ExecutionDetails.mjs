@@ -1,12 +1,12 @@
 import { createElement as h } from "react";
+import { ROLE_NAMES } from "../../shared/ai-roles.mjs";
 
-const roles = { ocr: "OCR", correction: "正文校正", annotation: "注音", segmentation: "分句", chat: "问答" };
 const providers = { openai: "OpenAI", api_base: "iliad codix" };
 const tokenCount = (value) => Number.isSafeInteger(value) && value >= 0 ? `${value.toLocaleString("zh-CN")} tokens` : null;
 
 export default function ExecutionDetails({ execution, detailId, label }) {
   if (!execution?.providerId || !execution?.model) return null;
-  const role = roles[execution.role] || label || "AI";
+  const role = ROLE_NAMES[execution.role] || label || "AI";
   const reasoning = execution.reasoningParameterSent === false ? "提供方默认" : execution.reasoningEffort || execution.reasoning?.effort;
   const usage = execution.usage || {};
   const facts = [

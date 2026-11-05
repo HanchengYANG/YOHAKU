@@ -10,6 +10,12 @@ test('校正角色仅需结构化文字能力，独立于图片识别', () => {
   assert.deepEqual(requiredCapabilities('correction'), ['json']);
 });
 
+test('分章角色仅需结构化文字能力，图片识别仍需图像能力', () => {
+  assert.ok(ROLE_IDS.includes('chaptering'));
+  assert.deepEqual(requiredCapabilities('chaptering'), ['json']);
+  assert.deepEqual(requiredCapabilities('ocr'), ['json', 'image']);
+});
+
 test('来源处理为照片、正文校正、分句及两条注音路径转发状态、取消和分组元数据',async()=>{
   const events=[],onStatus=event=>events.push(event),controller=new AbortController();
   const metadata={onStatus,signal:controller.signal,groupKey:JSON.stringify(['u','article']),getPriority:()=> 'foreground'};
@@ -297,19 +303,19 @@ test('分章使用PDF实际页码并拒绝越界，缺少边界证据标为待�
   assert.throws(() => validateChapterProposal({ chapters: [{ title: '错', startPage: 3, endPage: 11 }] }, { pageCount: 10 }));
 });
 
-test('分章向OCR角色传递全书逐页OCR原文，只返回章节和非正文排除范围',async()=>{
+test('分章向独立角色传递全书逐页原文，只返回章节和非正文排除范围',async()=>{
   const pages=[{page:1,text:'封面'},{page:2,text:'页眉\n叙事正文。\n'},{page:3,text:'最后一页正文。'}],before=JSON.stringify(pages);
   const processor=createSourceProcessor({execute:async(_user,role,input)=>{
-    assert.equal(role,'ocr');assert.equal(input.document,undefined);assert.equal(input.image,undefined);
+    assert.equal(role,'chaptering');assert.equal(input.document,undefined);assert.equal(input.image,undefined);
     assert.match(input.prompt,/全书/);assert.match(input.prompt,/禁止.*改写|不得.*改写/);assert.match(input.prompt,/叙事/);
     const sent=JSON.parse(input.prompt.split('全书逐页原文：\n')[1]);
     assert.deepEqual(sent.pages.map(({page,lines})=>({page,text:lines.map(line=>line.text).join('\n')})),pages);
     assert.deepEqual(sent.pages[1].lines.map(line=>line.line),[1,2,3]);
     assert.ok(input.schema.required.includes('exclusions'));assert.ok(input.schema.properties.chapters.items.required.includes('excluded'));
-    return {value:{chapters:[{title:'封面',startPage:1,endPage:1,excluded:true,needsReview:false},{title:'正文',startPage:2,endPage:3,excluded:false,needsReview:true}],exclusions:[{page:2,startLine:1,endLine:1,reason:'页眉'}]},execution:{role:'ocr'}};
+    return {value:{chapters:[{title:'封面',startPage:1,endPage:1,excluded:true,needsReview:false},{title:'正文',startPage:2,endPage:3,excluded:false,needsReview:true}],exclusions:[{page:2,startLine:1,endLine:1,reason:'页眉'}]},execution:{role}};
   }});
   const result=await processor.proposeChapters('u',{metadata:{pageCount:3},pages});
-  assert.equal(result.chapters[0].excluded,true);assert.deepEqual(result.exclusions,[{page:2,startLine:1,endLine:1,reason:'页眉'}]);assert.equal(result.execution.role,'ocr');assert.equal(JSON.stringify(pages),before);
+  assert.equal(result.chapters[0].excluded,true);assert.deepEqual(result.exclusions,[{page:2,startLine:1,endLine:1,reason:'页眉'}]);assert.equal(result.execution.role,'chaptering');assert.equal(JSON.stringify(pages),before);
 });
 
 test('分章排除范围严格对应已提供原文的实际页码与闭区间行号',()=>{

@@ -166,7 +166,7 @@ export default function AISettings({ onClose, onChanged }) {
           ))}
         </select>
       </label>
-      <p className="ai-model-caption provider-hint">选择提供方仅查看和管理连接，不会改变识别、注音、分句或问答的配置。</p>
+      <p className="ai-model-caption provider-hint">在这里查看和管理提供方连接。各角色使用的模型在「角色配置」中设置。</p>
       {error && (
         <div className="stage2-error" role="alert">
           {error}

@@ -11,7 +11,7 @@ import { respondToChat } from "./chat-stream.mjs";
 import { createRoleConfiguration } from "./roles.mjs";
 import { prepareBodyAnnotation, applyBodyAnnotation } from "./annotation.mjs";
 import { createSourceProcessor } from "./source-processing.mjs";
-import { ROLE_IDS, normalizeReasoning, reasoningKey } from "../../shared/ai-roles.mjs";
+import { ROLE_IDS, ROLE_NAMES, normalizeReasoning, reasoningKey } from "../../shared/ai-roles.mjs";
 import { createMangaOcr } from "../ocr/manga.mjs";
 import { createNdlOcr } from "../ocr/ndl.mjs";
 import { createLocalRuby } from "../ocr/ruby.mjs";
@@ -235,7 +235,7 @@ export function attachAIRoutes({
         try {
           if (configuration) {
             const ready = await roleConfiguration.readiness(role, selected, route.referenceImage);
-            if (!ready.ready) throw Object.assign(fail(503, `${{ocr:"OCR",correction:"正文校正",annotation:"注音",segmentation:"分句",chat:"问答"}[role]}角色不可用：${ready.message}`),
+            if (!ready.ready) throw Object.assign(fail(503, `${ROLE_NAMES[role]}角色不可用：${ready.message}`),
               { code: ready.credentialsReady ? "AI_ROLE_NOT_READY" : "AI_AUTH_REQUIRED" });
           }
           if ((roleConfiguration.current()?.version || 0) !== route.configurationVersion) return { redirected: true };
@@ -323,7 +323,7 @@ export function attachAIRoutes({
       ready: Object.values(roleStates).every((role) => role.ready),
       requiresLogin: !Object.values(roleStates).some((role) => role.credentialsReady),
       lastError: Object.entries(roleStates).filter(([, state]) => !state.ready)
-        .map(([role, state]) => `${{ocr:"OCR",correction:"正文校正",annotation:"注音",segmentation:"分句",chat:"问答"}[role]}：${state.message}`).join("；") || null,
+        .map(([role, state]) => `${ROLE_NAMES[role]}：${state.message}`).join("；") || null,
     } : null;
     if (!canManageAI) return {
       ...roleStatus,

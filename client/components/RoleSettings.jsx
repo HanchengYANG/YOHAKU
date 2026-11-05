@@ -1,14 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import api from "../api.mjs";
-import { requiredCapabilities, normalizeReasoning, reasoningKey } from "../../shared/ai-roles.mjs";
+import { ROLE_IDS, ROLE_NAMES, requiredCapabilities, normalizeReasoning, reasoningKey } from "../../shared/ai-roles.mjs";
 
-const ROLES = [
-  { id: "ocr", name: "OCR" },
-  { id: "correction", name: "正文校正" },
-  { id: "annotation", name: "注音" },
-  { id: "segmentation", name: "分句" },
-  { id: "chat", name: "问答" },
-];
+const ROLES = ROLE_IDS.map((id) => ({ id, name: ROLE_NAMES[id] }));
 const labels = { json: "JSON 输出", image: "图片输入", streaming: "流式文本" };
 const effortLabels = { none: "关闭推理（none）", minimal: "最低（minimal）", low: "低（low）", medium: "中（medium）", high: "高（high）", xhigh: "很高（xhigh）", max: "最高（max）" };
 
@@ -58,7 +52,8 @@ export default function RoleSettings({ onClose }) {
   const saveController = useRef(null);
   const accept = (value) => {
     setConfiguration(value);
-    setDraft({ ...value.roles, correction:value.roles.correction || value.roles.ocr });
+    setDraft({ ...value.roles, correction:value.roles.correction || value.roles.ocr,
+      chaptering:value.roles.chaptering || value.roles.segmentation });
     setReferenceImage(value.annotationReferenceImage === true);
     setProviders(value.providers.filter((provider) => provider.enabled !== false));
     setRowErrors({});
@@ -228,6 +223,7 @@ export default function RoleSettings({ onClose }) {
               disabled={!!busy || !provider?.connected} onClick={() => refreshModels(role)}>
               {busy === `models:${role.id}` ? "刷新中…" : "刷新"}
             </button>
+            {role.id === "chaptering" && <small className="ai-role-note">用于 PDF 的 AI 章节建议，输入为本地提取的文字。</small>}
             {role.id === "annotation" && <label className="ai-role-image-option" title="没有原图的文章仍按文字处理。">
               <input type="checkbox" checked={referenceImage} disabled={!!busy}
                 onChange={(event) => {

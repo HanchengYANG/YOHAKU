@@ -1,4 +1,4 @@
-import { ROLE_IDS, roleReport, normalizeReasoning } from "../../shared/ai-roles.mjs";
+import { ROLE_IDS, ROLE_NAMES, roleReport, normalizeReasoning } from "../../shared/ai-roles.mjs";
 
 const fail = (status, message) => Object.assign(new Error(message), { status, expose: true });
 export function createRoleConfiguration({ database, ownerId, connection, preferred, managementRevision = () => 0 }) {
@@ -12,6 +12,7 @@ export function createRoleConfiguration({ database, ownerId, connection, preferr
     if (!saved) return null;
     const configuration = JSON.parse(saved.configuration_json);
     configuration.roles.correction ||= { ...configuration.roles.ocr };
+    configuration.roles.chaptering ||= { ...configuration.roles.segmentation };
     return { ...configuration, version: saved.version, enabled: true, updatedAt: saved.updated_at };
   }
   async function providerState(id) {
@@ -55,17 +56,21 @@ export function createRoleConfiguration({ database, ownerId, connection, preferr
     const revision = managementRevision();
     if (revision === null) throw fail(409, "连接、模型目录或测试记录正在更新，请完成后再保存角色配置。");
     if (!input || !Number.isSafeInteger(input.version) || input.version < 0) throw fail(400, "缺少角色配置版本，请刷新页面。");
-    if ((current()?.version || 0) !== input.version) throw fail(409, "角色配置已更新，请刷新页面后再保存。");
+    const previous = current();
+    if ((previous?.version || 0) !== input.version) throw fail(409, "角色配置已更新，请刷新页面后再保存。");
     if (!input.roles || typeof input.annotationReferenceImage !== "boolean") throw fail(400, "请提供完整的角色及注音参考原图设置。");
-    // Older clients can save their four existing roles without resetting an
-    // independently configured correction role.
-    const suppliedRoles = { ...input.roles, correction: input.roles.correction || current()?.roles.correction || input.roles.ocr };
+    // Preserve independent selections when older clients omit newer roles.
+    const suppliedRoles = {
+      ...input.roles,
+      correction: input.roles.correction || previous?.roles.correction || input.roles.ocr,
+      chaptering: input.roles.chaptering || previous?.roles.chaptering || input.roles.segmentation,
+    };
     const roles = {}, readyStates = {}, identities = new Map(), evidence = new Map();
     for (const role of ROLE_IDS) {
       const selected = suppliedRoles[role];
       const state = selected && ["openai", "api_base"].includes(selected.providerId) ? await providerState(selected.providerId) : undefined;
       const ready = await readiness(role, selected, role === "annotation" && input.annotationReferenceImage, state);
-      if (!ready.ready) throw fail(409, `${{ocr:"OCR",correction:"正文校正", annotation:"注音",segmentation:"分句",chat:"问答"}[role]}尚未就绪：${ready.message}`);
+      if (!ready.ready) throw fail(409, `${ROLE_NAMES[role]}尚未就绪：${ready.message}`);
       readyStates[role] = ready;
       const reasoning = normalizeReasoning(selected.reasoning);
       roles[role] = { providerId: selected.providerId, model: selected.model, ...(reasoning ? { reasoning } : {}) };

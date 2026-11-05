@@ -16,22 +16,23 @@ import { ANNOTATION_SCHEMA } from '../shared/ocr-correction.mjs';
 
 async function fixture(t,{connected=true,ndlOcr,beforeRun,chapterProposal,correctionEdits=[]}={}) {
   const dataDir=await mkdtemp(join(tmpdir(),'yohaku-source-api-')),calls=[];
-  const modelIds=['vision','correction-model','sentence-model','ruby-model','chat-model'];
+  const modelIds=['vision','vision-2','chapter-model','correction-model','sentence-model','ruby-model','chat-model'];
   const checkedAt=new Date().toISOString();
-  const reports=modelIds.map(model=>({model,checkedAt,passed:true,checks:Object.fromEntries(['json','image','streaming'].map(name=>[name,{state:'supported',checkedAt}]))}));
+  const reports=modelIds.map(model=>({model,checkedAt,passed:true,checks:Object.fromEntries((model==='chapter-model'?['json']:['json','image','streaming']).map(name=>[name,{state:'supported',checkedAt}]))}));
   function aiServices(_user,providerId) {
     const account={connected,activeAccountId:'account-'+providerId,subject:'subject-'+providerId};
     return {auth:{status:async()=>account,accounts:async()=>({accounts:[],activeId:account.activeAccountId})},credentialStatus:async()=>account,
       knownModels:()=>modelIds.map(id=>({id})),models:async()=>({models:modelIds.map(id=>({id}))}),testReports:async()=>reports,
       runtime:{status:()=>({model:'vision',busy:false}),stop(){},async run(input){
         await beforeRun?.(input);
-        calls.push({providerId,model:input.model,prompt:input.prompt,schema:input.schema});
+        calls.push({providerId,model:input.model,prompt:input.prompt,schema:input.schema,hasImage:!!input.image});
         let value;
         if(input.schema?.properties?.chapters&&chapterProposal)value=chapterProposal;
         else if(input.schema===SENTENCE_SCHEMA){const text=JSON.parse(input.prompt.split('输入正文：\n').at(-1).split('\n')[0]);value={sentences:text.match(/[^。]*。|[^。]+$/gu)||[text]};}
         else if(input.schema?.properties?.changes)value={changes:[],uncertain:[]};
         else if(input.schema===ANNOTATION_SCHEMA){const targets=JSON.parse(input.prompt.split('输入目标：\n').at(-1).split('\n')[0]);value={blocks:targets.map(({text})=>({words:[{t:text,r:'にほんご'}]}))};}
         else if(input.schema?.properties?.edits)value={edits:correctionEdits};
+        else if(input.image&&input.schema?.properties?.text)value={text:'写真の原文。'};
         return {completed:true,text:value?JSON.stringify(value):'語句の説明。',model:input.model,threadId:'source-api-thread'};
       }} };
   }
@@ -229,6 +230,63 @@ test('reading API exposes safe role diagnostics and retains failures after retry
   await f.restart();reading=await f.request(`/documents/${id}/reading-pages`);assert.equal(reading.diagnostics.recentFailures.length,1);
   failOnce=false;await f.request(`/documents/${id}/reading-session`,'POST',{index:0,active:true,retry:true});await f.instance.sources.drain();
   reading=await f.request(`/documents/${id}/reading-pages`);assert.equal(reading.currentPage.ready,true);assert.equal(reading.diagnostics.current,null);assert.equal(reading.diagnostics.recentFailures.length,1);
+});
+
+test('scan PDF chaptering uses its JSON-only role independently of photo OCR and older role saves',async t=>{
+  const originals=['日本語の原文。','次の頁の本文。'];
+  const chapters=originals.map((_text,index)=>({title:`第${index+1}章`,startPage:index+1,endPage:index+1,excluded:false,needsReview:false}));
+  let extracted=0;
+  const f=await fixture(t,{chapterProposal:{chapters,exclusions:[]},ndlOcr:{async recognize(){return {text:originals[extracted++%originals.length],regions:[]};},close(){}}});
+  const initial=await f.configure();
+  assert.deepEqual(initial.roles.chaptering,initial.roles.segmentation,'the older initial save uses its segmentation selection');
+  const database=new DatabaseSync(join(f.dataDir,'yohaku.sqlite'));
+  try{
+    database.prepare("UPDATE ai_role_configurations SET configuration_json=json_remove(configuration_json,'$.roles.chaptering') WHERE owner_id=?").run(f.user.id);
+  }finally{database.close();}
+  await f.restart();
+  const migrated=await f.request('/ai/roles');
+  assert.deepEqual(migrated.roles.chaptering,initial.roles.segmentation,'saved settings predating chaptering migrate from segmentation');
+  const chaptering={providerId:'api_base',model:'chapter-model'};
+  const configured=await f.request('/ai/roles','PUT',{version:migrated.version,annotationReferenceImage:false,roles:{...migrated.roles,chaptering}});
+  assert.deepEqual(configured.roles.chaptering,chaptering);
+  assert.equal(configured.readiness.chaptering.ready,true);
+  assert.deepEqual(Object.keys(configured.readiness.chaptering.report.checks),['json']);
+
+  const pdf=Buffer.from('%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] >> endobj\n4 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] >> endobj\ntrailer << /Root 1 0 R /Size 5 >>\n%%EOF');
+  const runChaptering=async()=>{
+    const form=new FormData();form.append('files',new Blob([pdf],{type:'application/pdf'}),'chapter-role.pdf');
+    const beforeCalls=f.calls.length,beforeExtraction=extracted;
+    const draft=await f.request('/imports','POST',form,201),path=`/imports/${draft.id}`;
+    assert.equal(draft.detectedType,'scan_pdf');
+    assert.equal(extracted,beforeExtraction);assert.equal(f.calls.length,beforeCalls);
+    await f.request(`${path}/chapters`,'POST',{type:'scan_pdf'},202);await f.instance.imports.drain();
+    const proposal=await f.request(path);
+    assert.equal(proposal.chapterProcessing.status,'done');
+    assert.equal(proposal.execution.role,'chaptering');
+    assert.equal(proposal.execution.providerId,chaptering.providerId);assert.equal(proposal.execution.model,chaptering.model);
+    assert.equal(extracted-beforeExtraction,2);
+    const calls=f.calls.slice(beforeCalls);assert.equal(calls.length,1);
+    assert.equal(calls[0].providerId,chaptering.providerId);assert.equal(calls[0].model,chaptering.model);assert.equal(calls[0].hasImage,false);
+    assert.ok(calls[0].schema.properties.chapters);
+    const input=JSON.parse(calls[0].prompt.split('\n全书逐页原文：\n').at(-1));
+    assert.deepEqual(input.pages,originals.map((text,index)=>({page:index+1,lines:[{line:1,text}]})));
+    const saved=await f.request(`${path}/confirm`,'POST',{type:'scan_pdf',asBook:true,chapters:proposal.chapters},201);
+    assert.equal(saved.documents.length,2);
+    assert.equal(f.calls.length,beforeCalls+1);assert.equal(extracted,beforeExtraction+2);
+  };
+  const photo=new FormData();photo.append('image',new Blob([await sharp({create:{width:20,height:20,channels:3,background:'white'}}).png().toBuffer()],{type:'image/png'}),'photo.png');
+  const image=await f.request('/images','POST',photo,201);
+  const recognize=async({providerId,model})=>{
+    const result=await f.request(`/images/${image.id}/recognize`,'POST',{});
+    assert.equal(result.execution.role,'ocr');assert.equal(result.execution.providerId,providerId);assert.equal(result.execution.model,model);
+    assert.equal(f.calls.at(-1).hasImage,true);
+  };
+  await runChaptering();await recognize(configured.roles.ocr);
+  const {chaptering:omitted,...olderRoles}=configured.roles,ocr={providerId:'api_base',model:'vision-2'};
+  const updated=await f.request('/ai/roles','PUT',{version:configured.version,annotationReferenceImage:false,roles:{...olderRoles,ocr}});
+  assert.deepEqual(updated.roles.chaptering,omitted);
+  assert.deepEqual(updated.roles.ocr,ocr);
+  await runChaptering();await recognize(ocr);
 });
 
 test('an excluded PDF source keeps its exact OCR and does not block the first reading page',async t=>{

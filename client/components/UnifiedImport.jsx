@@ -286,7 +286,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
       {asBook && type.includes("pdf") && <div className="source-chapters">
         <h2>确认章节与正文范围</h2><p>范围使用 PDF 实际页码。可排除封面、目录等内容；待核对边界请对照原页确认。</p>
         {draft.files?.[0] && <a className="text-button" target="_blank" rel="noreferrer" href={`/api/imports/${draft.id}/files/${draft.files[0].id}/raw`}>查看原 PDF</a>}
-        <p>{type === "scan_pdf" ? "先对全书进行本地 OCR，再将全部文字交给 AI 提议章节，并标记无关内容。" : "先提取全书文字，再交给 AI 提议章节，并标记无关内容。"}</p>
+        <p>{type === "scan_pdf" ? "点击「AI 提议章节」后，先对全书进行本地 OCR，再将提取的文字发送给「分章」角色配置的模型。" : "点击「AI 提议章节」后，先在本地提取全书文字，再发送给「分章」角色配置的模型。"}模型会提议章节并标记无关内容。</p>
         {processing && <section aria-label="PDF 分章进度" aria-live="polite" aria-busy={chapterRunning}>
           <p>{type === "scan_pdf" ? "全书本地 OCR" : "全书文字提取"}：{processing.completedPages ?? 0} / {processing.totalPages || "待确定"} 页</p>
           {processing.status === "extracting" && <progress aria-label="全书文字提取页数" value={processing.completedPages || 0} max={Math.max(1,processing.totalPages || 1)} />}

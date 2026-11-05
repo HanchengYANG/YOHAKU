@@ -57,9 +57,9 @@ test("角色页紧凑配置，保存时自动测试且仅显示失败角色与�
     await open("角色配置");
     await expect(page.getByRole("heading", { name: "角色配置", exact: true })).toBeVisible();
     await expect(save).toHaveCount(1);
-    for (const role of ["OCR", "注音", "分句", "问答"]) {
+    for (const role of ["OCR", "分章", "正文校正", "注音", "分句", "问答"]) {
       await page.getByRole("combobox", { name: `${role}提供方`, exact: true }).selectOption("api_base");
-      await page.getByRole("combobox", { name: `${role}模型`, exact: true }).selectOption("codiX-agent");
+      await page.getByRole("combobox", { name: `${role}模型`, exact: true }).selectOption(role === "分章" ? "Qwen/Qwen3.6-35B" : "codiX-agent");
     }
     await page.getByLabel("参考原图", { exact: false }).uncheck();
     await expect(page.getByRole("button", { name: /^测试/ })).toHaveCount(0);
@@ -70,8 +70,10 @@ test("角色页紧凑配置，保存时自动测试且仅显示失败角色与�
     expect(saves).toHaveLength(0);
     await save.click();
     const ocr = page.getByRole("region", { name: "OCR角色", exact: true });
+    const chaptering = page.getByRole("region", { name: "分章角色", exact: true });
     const annotation = page.getByRole("region", { name: "注音角色", exact: true });
     await expect(ocr.getByRole("alert")).toContainText(/图片输入.*(?:不支持|未通过)/);
+    await expect(chaptering.getByRole("alert")).toHaveCount(0);
     await expect(page.getByRole("region", { name: "分句角色", exact: true }).getByRole("alert")).toHaveCount(0);
     expect((await rolesState()).version).toBe(original.version);
     expect(saves).toHaveLength(0);
@@ -87,25 +89,29 @@ test("角色页紧凑配置，保存时自动测试且仅显示失败角色与�
     const successfulAttempt = tests.length;
     await save.click();
     await expect(page.getByRole("status")).toContainText("角色配置已保存");
-    expect(tests.slice(successfulAttempt).map(({ role }) => role)).toEqual(["ocr", "annotation", "chat"]);
+    expect(tests.slice(successfulAttempt).map(({ role }) => role)).toEqual(["ocr", "chaptering", "correction", "chat"]);
     expect(tests.slice(successfulAttempt).filter(({ providerId }) => providerId === "api_base")
       .every(({ referenceImage }) => !referenceImage)).toBe(true);
     const applied = await rolesState();
     expect(applied.roles.ocr.providerId).toBe("openai");
+    expect(applied.roles.chaptering).toEqual({ providerId: "api_base", model: "Qwen/Qwen3.6-35B" });
+    expect(applied.readiness.chaptering).toMatchObject({ ready: true, report: { role: "chaptering", checks: { json: { state: "supported" } } } });
+    expect(Object.keys(applied.readiness.chaptering.report.checks)).toEqual(["json"]);
     expect(applied.roles.segmentation).toEqual({ providerId: "api_base", model: "codiX-agent" });
     expect(applied.annotationReferenceImage).toBe(false);
     expect(applied.enabled).toBe(true);
     await expect(page.getByRole("alert")).toHaveCount(0);
     await expect(page.getByLabel(/测试结果/)).toHaveCount(0);
-    const firstRow = await ocr.boundingBox(), saveBounds = await save.boundingBox();
-    expect(firstRow.y).toBeGreaterThanOrEqual(0);
-    expect(saveBounds.y + saveBounds.height).toBeLessThanOrEqual(page.viewportSize().height);
+    await expect(save).toBeInViewport({ ratio: 1 });
+    if (info.project.name === "phone") await ocr.scrollIntoViewIfNeeded();
+    await expect(ocr).toBeInViewport({ ratio: 1 });
     await page.screenshot({ path: `artifacts/role-settings-${info.project.name}.png`, fullPage: true });
     await page.getByRole("combobox", { name: "分句模型", exact: true }).selectOption("Qwen/Qwen3.6-35B");
     await expect(save).toBeEnabled();
     expect((await rolesState()).roles.segmentation.model).toBe("codiX-agent");
     await page.reload();
     await open("角色配置");
+    await expect(page.getByRole("combobox", { name: "分章模型", exact: true })).toHaveValue("Qwen/Qwen3.6-35B");
     await expect(page.getByRole("combobox", { name: "分句模型", exact: true })).toHaveValue("codiX-agent");
     await expect(page.getByLabel(/测试结果/)).toHaveCount(0);
     await page.getByRole("region", { name: "分句角色", exact: true }).getByRole("button", { name: "刷新模型目录", exact: true }).click();
@@ -117,7 +123,7 @@ test("角色页紧凑配置，保存时自动测试且仅显示失败角色与�
     const replacementAttempt = tests.length;
     await save.click();
     await expect(page.getByRole("status")).toContainText("角色配置已保存");
-    expect(tests.slice(replacementAttempt).map(({ role }) => role)).toEqual(["ocr", "annotation", "chat"]);
+    expect(tests.slice(replacementAttempt).map(({ role }) => role)).toEqual(["ocr", "chaptering", "correction", "chat"]);
     const replacementApplied = await rolesState();
     expect(replacementApplied.version).toBe(applied.version + 1);
     // Detect a stale page before sending any model tests or partial role update.
@@ -173,7 +179,7 @@ test("角色推理设置按模型提供，保存测试使用相同参数且不�
   try {
     await page.goto("/");
     await openRoles();
-    for (const name of ["OCR", "注音", "分句", "问答"]) {
+    for (const name of ["OCR", "分章", "正文校正", "注音", "分句", "问答"]) {
       await page.getByRole("combobox", { name: `${name}提供方`, exact: true }).selectOption("openai");
       await page.getByRole("combobox", { name: `${name}模型`, exact: true }).selectOption("UI-REASONING-DOUBLE");
       await expect(advanced(name)).not.toHaveAttribute("open");
@@ -183,6 +189,9 @@ test("角色推理设置按模型提供，保存测试使用相同参数且不�
     await page.getByLabel("OCR推理开关", { exact: true }).selectOption("enabled");
     await page.getByLabel("OCR推理预算", { exact: true }).fill("2048");
     await openAdvanced("OCR");
+    await openAdvanced("分章");
+    await page.getByLabel("分章推理强度", { exact: true }).selectOption("medium");
+    await openAdvanced("分章");
     await openAdvanced("注音");
     await page.getByLabel("注音推理强度", { exact: true }).selectOption("low");
     await openAdvanced("注音");
@@ -192,19 +201,21 @@ test("角色推理设置按模型提供，保存测试使用相同参数且不�
     expect(tests).toHaveLength(0);
     await save.click();
     await expect(page.getByRole("status")).toContainText("角色配置已保存");
-    expect(tests.map(({ role }) => role)).toEqual(["ocr", "annotation", "segmentation", "chat"]);
+    expect(tests.map(({ role }) => role)).toEqual(["ocr", "chaptering", "correction", "annotation", "segmentation", "chat"]);
     expect(tests.find(({ role }) => role === "ocr").reasoning).toEqual({ effort: "high", enabled: true, budgetTokens: 2048 });
+    expect(tests.find(({ role }) => role === "chaptering").reasoning).toEqual({ effort: "medium" });
     expect(tests.find(({ role }) => role === "annotation").reasoning).toEqual({ effort: "low" });
     expect(tests.find(({ role }) => role === "segmentation").reasoning).toEqual({ effort: "high" });
     expect(tests.find(({ role }) => role === "chat").reasoning || {}).toEqual({});
     const saved = saves.at(-1);
     expect(saved.roles.ocr.reasoning).toEqual({ effort: "high", enabled: true, budgetTokens: 2048 });
+    expect(saved.roles.chaptering.reasoning).toEqual({ effort: "medium" });
     expect(saved.roles.annotation.reasoning).toEqual({ effort: "low" });
     expect(saved.roles.segmentation.reasoning).toEqual({ effort: "high" });
     expect(saved.roles.chat.reasoning).toBeUndefined();
-    const first = await row("OCR").boundingBox(), last = await save.boundingBox();
-    expect(first.y).toBeGreaterThanOrEqual(0);
-    expect(last.y + last.height).toBeLessThanOrEqual(page.viewportSize().height);
+    await expect(save).toBeInViewport({ ratio: 1 });
+    if (info.project.name === "phone") await row("OCR").scrollIntoViewIfNeeded();
+    await expect(row("OCR")).toBeInViewport({ ratio: 1 });
     await page.screenshot({ path: `artifacts/role-reasoning-${info.project.name}.png`, fullPage: true });
     await page.reload();
     await openRoles();

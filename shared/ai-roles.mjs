@@ -1,4 +1,12 @@
-export const ROLE_IDS = Object.freeze(["ocr", "correction", "annotation", "segmentation", "chat"]);
+export const ROLE_NAMES = Object.freeze({
+  ocr: "OCR",
+  chaptering: "分章",
+  correction: "正文校正",
+  annotation: "注音",
+  segmentation: "分句",
+  chat: "问答",
+});
+export const ROLE_IDS = Object.freeze(Object.keys(ROLE_NAMES));
 
 // Persist only explicit controls. Empty settings retain the provider default
 // and remain compatible with checks/configuration written before this feature.
@@ -30,9 +38,8 @@ export const reasoningKey = (input) => JSON.stringify(normalizeReasoning(input) 
 
 export function requiredCapabilities(role, referenceImage = false) {
   if (role === "ocr") return ["json", "image"];
-  if (role === "correction") return ["json"];
+  if (role === "chaptering" || role === "correction" || role === "segmentation") return ["json"];
   if (role === "annotation") return referenceImage ? ["json", "image"] : ["json"];
-  if (role === "segmentation") return ["json"];
   if (role === "chat") return ["streaming"];
   throw new Error("未知 AI 角色。");
 }
