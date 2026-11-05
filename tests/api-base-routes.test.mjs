@@ -17,7 +17,8 @@ import { readEventStream } from "../shared/event-stream.mjs";
 test("iliad codix真实路由：固定地址、仅拥有者保存密钥，全站共享，模型验证与重启保持配置", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "yohaku-api-base-http-"));
   const key = "fixture-only-private-api-key", calls = [], modelCalls = [];
-  let incomplete = false;
+  let incomplete = false, holdRequests = false;
+  const gates = [];
   const upstream = createServer(async (req, res) => {
     if (req.method === "GET" && req.url === "/v1/models") {
       modelCalls.push(req.headers.authorization);
@@ -29,6 +30,7 @@ test("iliad codix真实路由：固定地址、仅拥有者保存密钥，全站
     for await (const chunk of req) raw += chunk;
     const body = JSON.parse(raw);
     calls.push({ url: req.url, authorization: req.headers.authorization, body });
+    if (holdRequests) await new Promise(resolve => gates.push(resolve));
     if (body.stream) {
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       for (const text of ["这是一段", "测试解释。"])
@@ -184,6 +186,24 @@ test("iliad codix真实路由：固定地址、仅拥有者保存密钥，全站
   assert.equal(calls.length, 4);
   assert.ok(calls.every((call) => call.authorization === `Bearer ${key}` && call.url === "/v1/chat/completions"));
   assert.equal(calls.filter((call) => Array.isArray(call.body.messages.at(-1).content)).length, 2);
+  // Real backend scheduling + real SDK + controlled HTTP provider: a hung
+  // request occupies one slot, while other chapters independently advance.
+  holdRequests = true;
+  const concurrent = Array.from({length:6}, () => request('/api/ai/annotate','POST',{bodyHtml:'<p>日本語。</p>'},friend));
+  const waitFor = async count => {
+    const deadline = Date.now()+2000;
+    while(gates.length<count && Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve,5));
+    assert.equal(gates.length,count);
+  };
+  await waitFor(4);
+  await new Promise(resolve=>setTimeout(resolve,30));
+  assert.equal(gates.length,4,'每个HTTP提供方默认最多4个真实请求');
+  gates[1](); await waitFor(5); gates[2](); await waitFor(6);
+  gates.slice(1).forEach(release=>release());
+  assert.equal((await concurrent[1]).status,200,'第一请求仍挂起时后续请求已独立完成');
+  gates[0]();
+  assert.ok((await Promise.all(concurrent)).every(result=>result.status===200));
+  holdRequests=false;
   incomplete = true;
   const failed = await ask();
   assert.equal(failed.at(-1).type, "error");

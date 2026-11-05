@@ -132,3 +132,30 @@ test("Responses问答仅在显式配置时发送reasoning.effort，默认不插�
     await assert.rejects(f.runtime.run({ prompt: "不支持的控制", model: "verified-model", reasoning }), (error) => error.status === 400);
   assert.equal(f.calls.length, 2);
 });
+
+test('联网请求独立取消，一个请求挂起时另一个可完成', async () => {
+  const waiting=[];
+  const f=fixture({fetchImpl:(_url,{signal})=>new Promise((resolve,reject)=>{
+    waiting.push({resolve,signal});signal.addEventListener('abort',()=>reject(signal.reason),{once:true});
+  })});
+  const controller=new AbortController();
+  const first=f.runtime.run({prompt:'第一章',model:'verified-model',signal:controller.signal});
+  const failed=assert.rejects(first,/停止或超时/);
+  const second=f.runtime.run({prompt:'第二章',model:'verified-model'});
+  await new Promise(setImmediate);
+  assert.equal(waiting.length,2);assert.equal(f.runtime.status().activeCount,2);
+  controller.abort();await failed;
+  assert.equal(waiting[1].signal.aborted,false);
+  waiting[1].resolve(stream([{type:'response.completed',response:completed()}]));
+  assert.equal((await second).completed,true);assert.equal(f.runtime.status().busy,false);
+});
+
+test('无视取消的HTTP传输超时后仍释放请求，不接受迟到答案',async()=>{
+  let late;
+  const f=fixture({turnTimeoutMs:20,fetchImpl:()=>new Promise(resolve=>late=resolve)});
+  await assert.rejects(f.runtime.run({prompt:'慢请求',model:'verified-model'}),/停止或超时/);
+  assert.equal(f.runtime.status().busy,false);
+  late(stream([{type:'response.completed',response:completed()}]));
+  await new Promise(setImmediate);
+  assert.equal(f.runtime.status().lastSuccessfulAt,null);
+});

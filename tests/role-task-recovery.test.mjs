@@ -90,9 +90,14 @@ test("图片任务重试和重启使用新角色配置，已完成 OCR 不重做
   assert.equal(task.items[0].steps.recognize.state, "succeeded");
   assert.equal(task.items[0].steps.recognize.execution.configurationVersion, 1);
   assert.equal(task.items[0].steps.annotate.state, "failed");
-  assert.deepEqual(task.items[0].steps.annotate.execution, {
+  const failedExecution=task.items[0].steps.annotate.execution;
+  assert.deepEqual(Object.fromEntries(['role','providerId','model','configurationVersion'].map(key=>[key,failedExecution[key]])), {
     role: "annotation", providerId: "api_base", model: "text", configurationVersion: 1,
   });
+  assert.ok(Number.isFinite(Date.parse(failedExecution.queuedAt)));
+  assert.ok(Number.isFinite(Date.parse(failedExecution.startedAt)));
+  assert.ok(Number.isFinite(failedExecution.queueMs)&&failedExecution.queueMs>=0);
+  assert.ok(Number.isFinite(failedExecution.elapsedMs)&&failedExecution.elapsedMs>=0);
   assert.deepEqual(calls.map(({ phase }) => phase), ["ocr", "annotation"]);
   await stop(); await start();
   task = await request(`/image-tasks/${task.id}`);

@@ -1,0 +1,6 @@
+# Production offline Japanese ruby: packaged dictionary/rules and nani classifier.
+# pyopenjtalk-plus bundles its OpenJTalk dictionary and both nani ONNX models.
+pyopenjtalk-plus==0.4.1.post10
+SudachiPy==0.6.11
+SudachiDict-core==20260723
+onnxruntime==1.24.2

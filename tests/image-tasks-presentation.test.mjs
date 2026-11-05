@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pendingLocalEntries, newerTask, taskCounts, taskDisplayName, taskDuration, taskImageUrl, taskItemState, taskSegmentationState, taskStateLabel } from "../client/image-tasks.mjs";
+import * as presentation from "../client/image-tasks.mjs";
+const {pendingLocalEntries,newerTask,taskActions,taskCounts,taskDisplayName,taskDuration,taskImageUrl,taskItemState,taskSegmentationState,taskStateLabel,taskStepState,taskSummary,taskTypeLabel}=presentation;
 
 test("任务视图忽略迟到的旧版本，同账号新任务仍可切换", () => {
   const current = { id: "same", version: 5, state: "ready" };
@@ -69,4 +70,32 @@ test("整批分句失败单独提示结果保留，保存后的归档任务不�
   assert.deepEqual(taskSegmentationState(task), { status: "整批分句未完成，识别与注音结果已保留", statusKind: "error" });
   assert.equal(taskStateLabel({ ...task, appliedDocumentId: "saved" }), "已保存");
   assert.equal(taskSegmentationState({ ...task, appliedDocumentId: "saved" }), null);
+});
+
+test("统一任务区分依赖等待、资源排队、超时与完成", () => {
+  assert.equal(taskStateLabel({type:"preparation",status:"dependency_wait"}), "等待依赖");
+  assert.equal(taskStateLabel({type:"preparation",status:"queued"}), "资源排队中");
+  assert.equal(taskStateLabel({type:"preparation",status:"timeout"}), "已超时");
+  assert.equal(taskStateLabel({type:"import",status:"completed",archived:true}), "已完成 · 已归档");
+  assert.equal(taskTypeLabel({type:"import"}), "文件与文字导入");
+  assert.equal(taskTypeLabel({type:"preparation"}), "正文准备");
+  assert.deepEqual(taskStepState({status:"requires_review"}), {status:"待人工核对",statusKind:"review"});
+  assert.deepEqual(taskStepState({status:"timeout"}), {status:"已超时",statusKind:"error"});
+  assert.equal(taskSummary({type:"preparation",progress:{completed:2,total:4}}), "已完成 2 / 4 个步骤");
+  assert.equal(taskSummary({type:"import",progress:{completed:15,total:126,unit:"page"}}), "已完成 15 / 126 页");
+  assert.equal(taskStateLabel({type:"image",state:"needs_attention",status:"running",steps:[{id:"manual:image",status:"running"}]}),"手动注音中");
+});
+
+test("任务操作服从服务端能力，运行中与已归档任务始终隐藏删除", () => {
+  assert.deepEqual(taskActions({status:"failed",canRetry:true,canDelete:true}), {retry:true,delete:true});
+  assert.deepEqual(taskActions({status:"running",canRetry:true,canDelete:true}), {retry:false,delete:false});
+  assert.deepEqual(taskActions({status:"queued",canDelete:true}), {retry:false,delete:false});
+  assert.deepEqual(taskActions({status:"completed",archived:true,canDelete:true}), {retry:false,delete:false});
+  assert.deepEqual(taskActions({status:"timeout"}), {retry:false,delete:false});
+});
+
+test("超时与完成任务的耗时不会随轮询继续增长", () => {
+  const task = {type:"preparation",status:"timeout",createdAt:"2026-11-04T10:00:00Z",startedAt:"2026-11-04T10:01:00Z",updatedAt:"2026-11-04T10:04:00Z"};
+  assert.equal(taskDuration(task,Date.parse("2026-11-04T12:00:00Z")),"3 分 0 秒");
+  assert.equal(taskDuration({...task,status:"completed",completedAt:"2026-11-04T10:02:30Z"},Date.parse("2026-11-04T12:00:00Z")),"1 分 30 秒");
 });

@@ -1,14 +1,20 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createLocalWorkerPool } from './worker-pool.mjs';
 
 const python = fileURLToPath(new URL("../../.venv-mangaocr/bin/python", import.meta.url));
 const worker = fileURLToPath(new URL("./manga-worker.py", import.meta.url));
 const failure = (message, status = 502) => Object.assign(new Error(message), { status, expose: true });
 
-export function createMangaOcr({
+export function createMangaOcr(options={}) {
+  return createLocalWorkerPool({create:()=>createMangaOcrWorker(options),method:'recognize',
+    workers:options.workers??process.env.LOCAL_OCR_WORKERS??1,label:options.label||'MangaOCR'});
+}
+
+function createMangaOcrWorker({
   pythonPath = process.env.MANGA_OCR_PYTHON || python,
   workerPath = worker,
-  timeoutMs = 180000,
+  timeoutMs = 120000,
   label = "MangaOCR",
 } = {}) {
   let child = null, pending = null, sequence = 0, closed = false;
@@ -22,6 +28,8 @@ export function createMangaOcr({
       pending = null;
     }
     process.kill("SIGTERM");
+    const timer=setTimeout(()=>{if(process.exitCode===null&&process.signalCode===null)process.kill('SIGKILL');},1000);
+    timer.unref();process.once('exit',()=>clearTimeout(timer));
   }
 
   function start() {
@@ -54,7 +62,7 @@ export function createMangaOcr({
         pending = null;
         clearTimeout(request.timer);
         if (reply.error) request.reject(failure(reply.error.message || `${label} 本地识别失败。`));
-        else if (!Array.isArray(reply.result?.regions) || !reply.result.regions.length)
+        else if (!Array.isArray(reply.result?.regions) || (!reply.result.regions.length && !request.allowEmpty))
           request.reject(failure(`${label} 没有返回文字区域。`));
         else request.resolve(reply.result);
       }
@@ -68,7 +76,7 @@ export function createMangaOcr({
   }
 
   return {
-    recognize(path) {
+    recognize(path, { allowEmpty = false } = {}) {
       if (closed) return Promise.reject(failure(`${label} 服务已关闭。`, 503));
       if (pending) return Promise.reject(failure(`${label} 正在处理另一张图片，请稍后重试。`, 409));
       if (typeof path !== "string" || !path) return Promise.reject(failure("需要有效的本地图片。", 400));
@@ -76,8 +84,8 @@ export function createMangaOcr({
       return new Promise((resolve, reject) => {
         const id = ++sequence;
         const timer = setTimeout(() => stop(process, failure(`${label} 本地识别超时，请重试。`, 504)), timeoutMs);
-        pending = { id, resolve, reject, timer };
-        process.stdin.write(`${JSON.stringify({ id, path })}\n`);
+        pending = { id, resolve, reject, timer, allowEmpty: allowEmpty === true };
+        process.stdin.write(`${JSON.stringify({ id, path, ...(allowEmpty === true ? { allowEmpty: true } : {}) })}\n`);
       });
     },
     status: () => ({ running: !!child, busy: !!pending }),

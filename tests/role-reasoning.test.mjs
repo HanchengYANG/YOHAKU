@@ -120,7 +120,8 @@ test("角色推理设置精确校验、原子保存、版本冲突及重启保�
   for (const role of Object.keys(roles)) { delete roles[role].reasoning; roles[role].model = "plain"; }
   await check("ocr"); await check("chat");
   const defaults = await save(1); assert.equal(defaults.status, 200);
-  for (const selected of Object.values(defaults.data.roles)) assert.equal(selected.reasoning, undefined);
+  for (const role of Object.keys(roles)) assert.equal(defaults.data.roles[role].reasoning, undefined);
+  assert.deepEqual(defaults.data.roles.correction.reasoning, { effort: "low" }, "旧客户端不覆盖已经独立保存的正文校正角色");
   await h.restart();
   const reopened = (await request("/api/ai/roles")).data;
   assert.equal(reopened.version, 2); assert.deepEqual(reopened.roles, defaults.data.roles);

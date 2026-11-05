@@ -1,3 +1,4 @@
+import { raceWithSignal } from "../abort.mjs";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createModelTests } from "./model-tests.mjs";
 import { effortOptions, validateModelReasoning } from "../reasoning.mjs";
 import { normalizeReasoning, reasoningKey } from "../../../shared/ai-roles.mjs";
+import { diagnosticForError } from '../../ai/diagnostics.mjs';
 
 // Exact deployed model IDs covered by the service's published reasoning tiers.
 const documentedEfforts = Object.freeze({
@@ -58,24 +60,27 @@ function validateConfiguration(input, previous, requireKey = true) {
 }
 
 // Never expose SDK errors verbatim: they can contain request headers or bodies.
-function publicError(cause, signal, image) {
-  if (signal?.aborted) return fail(409, "API 请求已取消或超时，请重试。");
-  if (cause?.expose) return cause;
+function publicError(cause, signal, image, timeoutSignal) {
+  const details = diagnosticForError(cause,{signal,timeoutSignal});
+  const attach = (error) => Object.assign(error,{diagnostic:details});
+  if (signal?.aborted) return attach(fail(409, "API 请求已取消或超时，请重试。"));
+  if (cause?.expose) return attach(cause);
   const status = cause?.statusCode;
-  if (status === 401 || status === 403) return fail(status, "API key 无效、已失效或无权使用所选模型，请在 AI 设置中检查。");
-  if (status === 429) return fail(429, "API 请求达到服务的用量或频率限制，请稍后重试或检查配额。");
-  if (status === 404) return fail(502, "iliad codix 未找到此模型，请刷新模型列表并检查模型 ID。");
-  if (status === 400 || status === 422) return fail(502, image
+  if (status === 401 || status === 403) return attach(fail(status, "API key 无效、已失效或无权使用所选模型，请在 AI 设置中检查。"));
+  if (status === 429) return attach(fail(429, "API 请求达到服务的用量或频率限制，请稍后重试或检查配额。"));
+  if (status === 404) return attach(fail(502, "iliad codix 未找到此模型，请刷新模型列表并检查模型 ID。"));
+  if (status === 400 || status === 422) return attach(fail(502, image
     ? "API 拒绝了图片请求，请确认所选模型支持图片输入和 JSON 输出。"
-    : "API 拒绝了请求，请确认模型 ID 及其 JSON 输出支持。");
-  return fail(502, "API 调用失败或返回格式无效，请检查服务状态、模型能力和网络后重试。");
+    : "API 拒绝了请求，请确认模型 ID 及其 JSON 输出支持。"));
+  return attach(fail(502, "API 调用失败或返回格式无效，请检查服务状态、模型能力和网络后重试。"));
 }
 
 export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fetch, timeoutMs = 180000 } = {}) {
   if (typeof storageDir !== "string" || !storageDir) throw fail(400, "需要指定 AI 提供方的本地存储目录。");
   const directory = join(storageDir, "api_base"), filename = join(directory, "connection.json");
   let configuration = { ...API_BASE_DEFAULTS, apiKey: "", id: randomUUID() };
-  let initialized, busy = false, controller = null, lastError = null, catalog = null, testing = false, activeModel = null;
+  const requests = new Set();
+  let initialized, controller = null, lastError = null, catalog = null, testing = false, activeModel = null;
   const modelTests = createModelTests({ directory, fetchImpl, timeoutMs: Math.min(timeoutMs, 60000) });
   const load = () => initialized ||= (async () => {
     try {
@@ -188,15 +193,17 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
     },
   };
   const runtime = {
-    status: () => ({ busy: busy || testing, testing, running: busy || testing, ready: !!configuration.apiKey && !!activeModel,
+    status: () => ({ busy: requests.size > 0 || testing, testing, running: requests.size > 0 || testing, activeCount: requests.size, ready: !!configuration.apiKey && !!activeModel,
       model: activeModel, transport: "ai-sdk", lastError }),
-    stop: () => controller?.abort(),
+    stop: () => { controller?.abort(); for (const request of requests) request.abort(); },
     async run({ prompt, image, schema, model, reasoning, webSearch = false, expectedAccountId, expectedSubject, signal, onEvent } = {}) {
-      if (busy || testing) throw fail(409, "AI 正在处理另一项请求，请稍后重试。");
-      busy = true;
-      controller = new AbortController();
-      const abortSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])]);
+      if (testing) throw fail(409, "AI 正在测试模型，请稍后重试。");
+      const requestController = new AbortController();
+      requests.add(requestController);
+      const timeoutSignal = AbortSignal.timeout(timeoutMs);
+      const abortSignal = AbortSignal.any([requestController.signal, timeoutSignal, ...(signal ? [signal] : [])]);
       try {
+        return await raceWithSignal(async () => {
         const account = await (model ? credentialStatus() : auth.status());
         abortSignal.throwIfAborted();
         if (!account.connected) throw fail(503, configuration.apiKey
@@ -231,25 +238,32 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
             if (event.type === "error") throw event.error;
             if (event.type === "text-delta") {
               text += event.text;
+              abortSignal.throwIfAborted();
               await onEvent({ type: "delta", delta: event.text });
             }
           }
         } else {
           result = await generateText(options);
+          const finishReason = await result.finishReason;
+          if(finishReason !== 'stop' || !result.text?.trim())throw Object.assign(fail(502, "AI 输出为空、被截断或未完整完成，未保存部分结果，请重试。"),{
+            diagnostic:{code:'AI_INCOMPLETE_OUTPUT',category:'incomplete_output',...(typeof finishReason==='string'?{finishReason}:{})},
+          });
           text = schema ? JSON.stringify(result.output) : result.text;
         }
         abortSignal.throwIfAborted();
         if (await result.finishReason !== "stop" || !text?.trim())
-          throw fail(502, "AI 输出为空、被截断或未完整完成，未保存部分结果，请重试。");
+          throw Object.assign(fail(502, "AI 输出为空、被截断或未完整完成，未保存部分结果，请重试。"),{diagnostic:{code:'AI_INCOMPLETE_OUTPUT',category:'incomplete_output',finishReason:await result.finishReason}});
         const response = await result.response;
+        abortSignal.throwIfAborted();
         lastError = null;
         return { text, completed: true, threadId: null, model: response.modelId || selectedModel,
           reasoningEffort: selectedReasoning?.effort ?? null, sources: [], webSearch: { enabled: false, performed: false } };
+        }, abortSignal);
       } catch (cause) {
-        const error = publicError(cause, abortSignal, image);
+        const error = publicError(cause, abortSignal, image, timeoutSignal);
         lastError = error.message;
         throw error;
-      } finally { busy = false; controller = null; }
+      } finally { requests.delete(requestController); }
     },
   };
   async function validateReasoning(model, input) {
@@ -261,7 +275,7 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
     knownModels, credentialStatus, validateReasoning,
     async testReports() { await load(); return modelTests.reports(configuration); },
     async configure(input) {
-      if (busy || testing) throw fail(409, "AI 正在处理请求，请完成后再修改 API 配置。");
+      if (requests.size > 0 || testing) throw fail(409, "AI 正在处理请求，请完成后再修改 API 配置。");
       await load();
       const next = validateConfiguration({ ...input, model: configuration.model,
         modelSelected: configuration.modelSelected }, configuration);
@@ -270,7 +284,7 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
       return settings();
     },
     async testModel(model, { signal, role, referenceImage = false, reasoning } = {}) {
-      if (busy || testing) throw fail(409, "AI 正在处理请求，请完成后再测试模型。");
+      if (requests.size > 0 || testing) throw fail(409, "AI 正在处理请求，请完成后再测试模型。");
       if (typeof model !== "string" || !model || model.length > 300 || /\s/.test(model)) throw fail(400, "请填写有效的待测试模型 ID。");
       await load();
       if (!configuration.apiKey) throw fail(503, "请先保存 API key，再测试模型。");
@@ -289,7 +303,7 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
       } finally { testing = false; controller = null; }
     },
     async selectModel(model) {
-      if (busy || testing) throw fail(409, "AI 正在处理请求，请完成后再切换模型。");
+      if (requests.size > 0 || testing) throw fail(409, "AI 正在处理请求，请完成后再切换模型。");
       await load();
       const reports = await modelTests.reports(configuration);
       if (!reports.some((report) => report.model === model && reasoningKey(report.reasoning) === "{}" && report.passed))

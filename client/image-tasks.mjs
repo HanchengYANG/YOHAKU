@@ -2,6 +2,30 @@ const labels = {
   draft: "待提交", queued: "排队中", running: "处理中", blocked: "等待恢复",
   needs_attention: "有图片待处理", ready: "待校对", paused: "已暂停", cancelled: "已停止",
 };
+const unifiedLabels = {draft:"待确认导入",dependency_wait:"等待依赖",retry_wait:"等待自动重试",resource_wait:"资源排队中",waiting:"等待依赖",queued:"资源排队中",running:"执行中",requires_review:"待人工核对",needs_attention:"待人工处理",failed:"失败",timeout:"已超时",completed:"已完成",succeeded:"已完成",done:"已完成",ready:"待人工核对",interrupted:"执行已中断",cancelled:"已停止",blocked:"等待恢复"};
+export const taskStatus = (task) => task?.status || task?.state;
+export const isImageTask = (task) => !task?.type || task.type === "image";
+export const taskManualAnnotationStep = (task) => task?.steps?.find(step=>String(step.id || "").startsWith("manual:") && ["queued","running"].includes(taskStatus(step)));
+export function taskTypeLabel(task) {
+  return {image:"图片导入",import:"文件与文字导入",preparation:"正文准备"}[task?.type] || "图片导入";
+}
+export function taskActions(task) {
+  const executing = ["queued","running","dependency_wait","waiting","retry_wait"].includes(taskStatus(task));
+  const finished = task?.archived || task?.appliedDocumentId || ["completed","succeeded"].includes(taskStatus(task));
+  return {retry:!!task?.canRetry && !executing && !finished,delete:!!task?.canDelete && !executing && !finished};
+}
+export function taskStepState(step) {
+  const state = taskStatus(step);
+  return {status:unifiedLabels[state] || labels[state] || "等待处理",statusKind:["failed","timeout","interrupted"].includes(state) ? "error" : ["completed","succeeded","done"].includes(state) ? "done" : ["running","queued","retry_wait","resource_wait"].includes(state) ? "working" : ["requires_review","ready"].includes(state) ? "review" : "pending"};
+}
+export function taskSummary(task) {
+  if (!isImageTask(task)) {
+    const {completed = 0,total = 0,unit}=task?.progress || {};
+    return total ? `已完成 ${completed} / ${total} ${unit === "page" ? "页" : "个步骤"}` : task?.message || "原始资料与成功结果已保存";
+  }
+  const counts=taskCounts(task);
+  return task.state === "draft" ? `已上传 ${counts.uploaded} / ${counts.total} 张` : `共 ${counts.total} 张 · 识别与注音完成 ${counts.completed} 张${counts.failed ? ` · ${counts.failed} 张待处理` : ""}`;
+}
 
 export const imageTasksChangedEvent = "image-tasks-changed";
 
@@ -21,7 +45,13 @@ export function taskDisplayName(task) {
 }
 
 export function taskStateLabel(task) {
+  if (!isImageTask(task)) {
+    const label = unifiedLabels[taskStatus(task)] || "等待处理";
+    return task?.archived ? `${label} · 已归档` : label;
+  }
   if (task?.appliedDocumentId) return "已保存";
+  const manual=taskManualAnnotationStep(task);
+  if(manual)return taskStatus(manual)==="queued" ? "手动注音排队中" : "手动注音中";
   if (task?.phase === "segment") {
     if (task.state === "needs_attention") return "分句待处理";
     if (task.state === "blocked") return "分句等待恢复";
@@ -67,7 +97,7 @@ export function taskCounts(task) {
 export function taskDuration(task, now = Date.now()) {
   const start = Date.parse(task?.startedAt || task?.submittedAt || task?.createdAt);
   if (!Number.isFinite(start)) return "";
-  const end = ["ready", "needs_attention", "paused", "cancelled"].includes(task?.state) ? Date.parse(task.completedAt || task.updatedAt) : now;
+  const end = task?.archived || ["ready", "needs_attention", "paused", "cancelled", "failed", "timeout", "completed", "succeeded", "requires_review", "interrupted"].includes(taskStatus(task)) ? Date.parse(task.completedAt || task.updatedAt) : now;
   const seconds = Math.max(0, Math.floor(((Number.isFinite(end) ? end : now) - start) / 1000));
   return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
 }

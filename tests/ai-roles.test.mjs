@@ -10,7 +10,7 @@ import { ensureSession, cookieFromResponse } from "./helpers/session.mjs";
 import { requiredCapabilities, roleReport } from "../shared/ai-roles.mjs";
 import { bodyRanges, bodyText } from "../shared/article-html.mjs";
 
-async function harness(t) {
+async function harness(t,{capacity}={}) {
   const dataDir = await mkdtemp(join(tmpdir(), "yohaku-roles-"));
   const states = new Map(["openai", "api_base"].map((id) => [id, { connected: true, credential: "grant-1", reports: [], calls: [], tests: [], wait: null }]));
   let running;
@@ -44,7 +44,15 @@ async function harness(t) {
     };
   }
   async function start() {
-    const { app, close } = createApp({ dataDir, aiServices: service, imageTaskOptions: { enabled: false } });
+    const previous=process.env.OPENAI_CLI_WORKERS;
+    let instance;
+    try {
+      if(capacity!==undefined)process.env.OPENAI_CLI_WORKERS=String(capacity);
+      instance=createApp({ dataDir, aiServices: service, imageTaskOptions: { enabled: false } });
+    } finally {
+      if(previous===undefined)delete process.env.OPENAI_CLI_WORKERS;else process.env.OPENAI_CLI_WORKERS=previous;
+    }
+    const {app,close}=instance;
     const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
     running = { server, close, url: `http://127.0.0.1:${server.address().port}` };
   }
@@ -130,7 +138,7 @@ test("混合路由与纯文字注音：正文和标记保留、图片可选、�
 });
 
 test("排队步骤在开始时读取最新提供方与模型，已开始调用固定配置", async (t) => {
-  const h = await harness(t), { request, testRole, save, states, roles } = h;
+  const h = await harness(t,{capacity:1}), { request, testRole, save, states, roles } = h;
   for (const role of ["ocr", "annotation", "chat"]) await testRole(role);
   await save(); const image = await h.upload();
   let release; states.get("openai").wait = new Promise((r) => release = r);
@@ -138,6 +146,7 @@ test("排队步骤在开始时读取最新提供方与模型，已开始调用�
   while (!states.get("openai").calls.length) await new Promise((r) => setTimeout(r, 5));
   const second = request(`/api/images/${image.id}/recognize`, "POST", {});
   await new Promise((r) => setTimeout(r, 25));
+  assert.equal(states.get("openai").calls.length,1,"显式占满唯一CLI名额时，第二步不能提前执行");
   roles.ocr = { providerId: "api_base", model: "vision" }; await testRole("ocr");
   assert.equal((await save(1)).status, 200);
   release();

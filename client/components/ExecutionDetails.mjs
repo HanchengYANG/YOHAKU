@@ -1,6 +1,6 @@
 import { createElement as h } from "react";
 
-const roles = { ocr: "OCR", annotation: "注音", segmentation: "分句", chat: "问答" };
+const roles = { ocr: "OCR", correction: "正文校正", annotation: "注音", segmentation: "分句", chat: "问答" };
 const providers = { openai: "OpenAI", api_base: "iliad codix" };
 
 export default function ExecutionDetails({ execution, detailId, label }) {

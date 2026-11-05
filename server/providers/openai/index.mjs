@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { createChatGPTAuth } from "./auth.mjs";
 import { createWebRuntime } from "./web-runtime.mjs";
-import { createCodexRuntime } from "./runtime.mjs";
+import { createCodexPool } from "./pool.mjs";
 import { createOpenAIModelTests } from "./model-tests.mjs";
 import { validateModelReasoning } from "../reasoning.mjs";
 import { normalizeReasoning } from "../../../shared/ai-roles.mjs";
@@ -34,28 +34,33 @@ export function createOpenAIConnection({
     storageDir: directory,
     callbackUri,
   });
-  const cli = createCodexRuntime({
+  const availabilityListeners=new Set();
+  const createPool=()=>{const pool=createCodexPool({
     ...runtimeOptions,
     auth,
     storageDir: join(directory, "runtime"),
-  });
+  });pool.onAvailable(()=>{for(const listener of availabilityListeners)listener();});return pool;};
+  let cli = createPool();
   const web = createWebRuntime({ ...webRuntimeOptions, auth });
-  let busy = false, testing = false, lastTransport = "cli", generation = 0;
-  const runtime = {
-    async run(input = {}) {
-      if (busy) throw Object.assign(new Error("AI 正在处理另一项请求，请稍后重试。"), { status: 409, expose: true });
-      busy = true;
+  let active = 0, testing = false, lastTransport = "cli", generation = 0;
+  const run=async(input = {},lease)=>{
+      active++;
       const currentGeneration = generation;
       try {
-        if (!input.webSearch) { lastTransport = "cli"; return await cli.run(input); }
+        if (!input.webSearch) { lastTransport = "cli"; return await (lease || cli).run(input); }
         lastTransport = "responses";
         const { model } = await cli.prepare(input);
         if (generation !== currentGeneration) throw Object.assign(new Error("AI 请求已停止，请重试。"), { status: 409, expose: true });
         return await web.run({ ...input, model });
-      } finally { busy = false; }
-    },
-    stop: () => { generation++; cli.stop(); web.stop(); },
-    status: () => ({ ...cli.status(), busy: busy || testing, testing, ...(lastTransport === "responses" ? { ...web.status(), busy: busy || testing } : {}), transport: lastTransport }),
+      } finally { active--; }
+  };
+  const runtime = {
+    run,
+    cliAvailable:input=>cli.available(input),
+    onCLIAvailable(listener){availabilityListeners.add(listener);return()=>availabilityListeners.delete(listener);},
+    reserveCLI(input){const lease=cli.reserve(input);return lease&&{run:input=>run(input,lease),release:()=>lease.release()};},
+    stop: () => { generation++; cli.stop(); web.stop(); cli = createPool(); },
+    status: () => ({ ...cli.status(), busy: active > 0 || testing, testing, ...(lastTransport === "responses" ? { ...web.status(), busy: active > 0 || testing } : {}), transport: lastTransport, activeCount: active }),
   };
   const credentialStatus = () => auth.credentialStatus();
   const modelTests = createOpenAIModelTests({ directory, credentialStatus, runtime });
@@ -70,7 +75,7 @@ export function createOpenAIConnection({
     return catalog?.credentialId === credential.credentialId ? catalog.value : { models: [], source: "subscription" };
   }
   async function models({ signal, refresh = true } = {}) {
-    if (busy || testing) throw Object.assign(new Error("AI 正在处理请求，请稍后刷新模型目录。"), { status: 409, expose: true });
+    if (active > 0 || testing) throw Object.assign(new Error("AI 正在处理请求，请稍后刷新模型目录。"), { status: 409, expose: true });
     signal?.throwIfAborted();
     const credential = await credentialStatus();
     const value = await cli.models({ refresh, expectedAccountId: credential.activeAccountId, expectedSubject: credential.subject });
@@ -100,7 +105,7 @@ export function createOpenAIConnection({
     models, knownModels, validateReasoning,
     testReports: () => modelTests.reports(),
     async testModel(model, options = {}) {
-      if (busy || testing) throw Object.assign(new Error("AI 正在处理请求，请稍后测试。"), { status: 409, expose: true });
+      if (active > 0 || testing) throw Object.assign(new Error("AI 正在处理请求，请稍后测试。"), { status: 409, expose: true });
       testing = true;
       try { await validateReasoning(model, options.reasoning); return await modelTests.test(model, options); }
       finally { testing = false; }

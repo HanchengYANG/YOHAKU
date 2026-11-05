@@ -1,6 +1,7 @@
 node_modules/
 .venv-mangaocr/
 .venv-ndlocr/
+.venv-documents/
 __pycache__/
 # Local test images are not published.
 /fixtures/

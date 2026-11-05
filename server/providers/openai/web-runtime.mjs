@@ -1,3 +1,4 @@
+import { raceWithSignal } from "../abort.mjs";
 import { randomUUID } from "node:crypto";
 import { CHAT_INSTRUCTIONS } from "./runtime.mjs";
 import { readEventStream } from "../../../shared/event-stream.mjs";
@@ -48,23 +49,24 @@ export function presentWebResponse(response) {
 // Hosted Responses web_search accepts the same subscription token. Only this
 // one hosted tool is offered; no local tools, files or execution are available.
 export function createWebRuntime({ auth, fetchImpl = fetch, turnTimeoutMs = 180000 } = {}) {
-  let controller = null, lastError = null, lastSuccessfulAt = null;
+  const controllers = new Set();
+  let lastError = null, lastSuccessfulAt = null;
   const accountId = (account) => account.activeAccountId || account.id;
   function check(account, expected) {
     if (!account.connected) throw failure("请先连接网站共享 ChatGPT 订阅授权。", 401);
     if ((expected.expectedAccountId && accountId(account) !== expected.expectedAccountId) || (expected.expectedSubject && account.subject !== expected.expectedSubject)) throw failure("AI 授权身份已变化，请重新发起请求。", 409);
   }
   async function run({ prompt, model, threadId, reasoning, expectedAccountId, expectedSubject, signal, onEvent } = {}) {
-    if (controller) throw failure("AI 正在处理请求，请稍后重试。", 409);
     if (typeof prompt !== "string" || !prompt.trim() || typeof model !== "string" || !model.trim()) throw failure("联网问答缺少问题或有效模型。", 400);
     const selectedReasoning = normalizeReasoning(reasoning);
     if (selectedReasoning && (selectedReasoning.enabled !== undefined || selectedReasoning.budgetTokens !== undefined)) throw failure("此连接仅支持模型目录中的推理强度。", 400);
-    const active = new AbortController(); controller = active;
+    const active = new AbortController(); controllers.add(active);
     const abort = () => active.abort(signal.reason);
     if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, {once:true});
     const timer = setTimeout(() => active.abort(), turnTimeoutMs);
     let token;
     try {
+      return await raceWithSignal(async () => {
       active.signal.throwIfAborted();
       const expected = { expectedAccountId, expectedSubject }, first = await auth.status(); check(first, expected);
       token = await auth.accessToken();
@@ -79,6 +81,7 @@ export function createWebRuntime({ auth, fetchImpl = fetch, turnTimeoutMs = 1800
           tools: [{ type: "web_search", external_web_access: true }],
           include: ["web_search_call.action.sources"], store: false, stream: true }),
       });
+      active.signal.throwIfAborted();
       if (!response.ok) throw failure(response.status === 401 ? "联网问答授权失败，请重新连接共享订阅后重试。" : `联网问答服务返回 ${response.status}，请重试。`, response.status === 429 ? 429 : 502);
       if (!response.body) throw failure("联网问答没有返回事件流，请重试。");
       const items = new Map(), previews = new Map(); let completed = null, visible = "";
@@ -91,6 +94,7 @@ export function createWebRuntime({ auth, fetchImpl = fetch, turnTimeoutMs = 1800
           .join("\n").replace(/[^]*/g, "").replace(/[^]*$/, "");
         if (text === visible) return;
         const event = text.startsWith(visible) ? {type:"delta",delta:text.slice(visible.length)} : {type:"text",text};
+        active.signal.throwIfAborted();
         visible = text; await onEvent?.(event);
       };
       for await (const frame of readEventStream(response.body)) {
@@ -124,11 +128,12 @@ export function createWebRuntime({ auth, fetchImpl = fetch, turnTimeoutMs = 1800
       const result = presentWebResponse(completed && { ...completed, output: completed.output?.length ? completed.output : [...items.values()] });
       lastError = null; lastSuccessfulAt = new Date().toISOString();
       return { ...result, threadId: threadId?.startsWith("responses:") ? threadId : `responses:${randomUUID()}` };
+      }, active.signal);
     } catch (cause) {
       const safe = String(cause.message || "联网问答失败").replaceAll(token || "\u0000", "[已隐藏]").replace(/Bearer\s+\S+/gi, "Bearer [已隐藏]").slice(0, 700);
       lastError = active.signal.aborted ? "联网问答已停止或超时，未保存部分输出，请重试。" : safe;
       throw failure(lastError, cause.status || 502);
-    } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); if (controller === active) controller = null; }
+    } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); controllers.delete(active); }
   }
-  return { run, stop: () => controller?.abort(), status: () => ({ busy: !!controller, lastError, lastSuccessfulAt }) };
+  return { run, stop: () => { for (const controller of controllers) controller.abort(); }, status: () => ({ busy: controllers.size > 0, activeCount: controllers.size, lastError, lastSuccessfulAt }) };
 }

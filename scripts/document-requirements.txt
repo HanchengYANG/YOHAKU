@@ -1,0 +1,4 @@
+# PDF text extraction, actual page labels/bookmarks and page rendering.
+pypdfium2==4.30.0
+Pillow==11.3.0
+# EPUB parsing uses Python's standard-library zipfile and ElementTree.

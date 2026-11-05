@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, stat, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, readFile, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 import {
   OCR_SCHEMA, OCR_PROMPT, OCR_BODY_SCHEMA, OCR_TRANSCRIPTION_PROMPT,
@@ -10,6 +12,59 @@ import {
 } from "../shared/ocr.mjs";
 import { plainText, serializeBlocks } from "../shared/document.mjs";
 import { createImageStore } from "../server/ai/images.mjs";
+import { createNdlOcr } from "../server/ocr/ndl.mjs";
+
+test("本地OCR仅在当前请求显式allowEmpty时接收空白页，仍拒绝格式错误", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "yohaku-empty-ocr-"));
+  const pythonPath = join(directory, "fake-python");
+  await writeFile(pythonPath, `#!${process.execPath}\nconst readline=require('node:readline');
+readline.createInterface({input:process.stdin}).on('line',line=>{
+  const request=JSON.parse(line);
+  console.log(JSON.stringify({id:request.id,result:{regions:request.path==='malformed'?null:[],allowEmpty:request.allowEmpty}}));
+});\n`);
+  await chmod(pythonPath, 0o700);
+  const ocr = createNdlOcr({ pythonPath, workerPath: "unused", timeoutMs: 5000 });
+  t.after(async () => { ocr.close(); await rm(directory, { recursive: true, force: true }); });
+  await assert.rejects(ocr.recognize("blank"), /没有返回文字区域/);
+  const result = await ocr.recognize("blank", { allowEmpty: true });
+  assert.deepEqual(result.regions, []);
+  assert.equal(result.allowEmpty, true);
+  await assert.rejects(ocr.recognize("blank"), /没有返回文字区域/);
+  await assert.rejects(ocr.recognize("blank", { allowEmpty: "true" }), /没有返回文字区域/);
+  await assert.rejects(ocr.recognize("malformed", { allowEmpty: true }), /没有返回文字区域/);
+});
+
+test("NDLOCR worker只为显式允许的空白页保存空结果和识别元数据", () => {
+  const workerPath = fileURLToPath(new URL("../server/ocr/ndl-worker.py", import.meta.url));
+  execFileSync("python3", ["-c", `
+import importlib.util, io, os, sys, types
+sys.stdin = io.StringIO("")
+os.environ["NDLOCR_PREPROCESS"] = "0"
+spec = importlib.util.spec_from_file_location("ndl_worker_test", sys.argv[1])
+worker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(worker)
+class Original:
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+    def convert(self, mode): return self
+sys.modules["numpy"] = types.SimpleNamespace(array=lambda image: types.SimpleNamespace(shape=(12,20,3)))
+sys.modules["PIL"] = types.SimpleNamespace(Image=types.SimpleNamespace(open=lambda path: Original()), ImageOps=types.SimpleNamespace(exif_transpose=lambda image: image))
+fake_ocr = types.SimpleNamespace(_run_ocr_on_image_array=lambda *args, **kwargs: {"page_xml":"<PAGE/>","json_lines":[]})
+worker.engine = (fake_ocr, None, None, None, None)
+worker.importlib.metadata.version = lambda package: "test"
+try:
+    worker.recognize("blank.png")
+except RuntimeError as error:
+    assert "did not recognize body text" in str(error)
+else:
+    raise AssertionError("default request must reject empty text")
+result = worker.recognize("blank.png", allow_empty=True)
+assert result["regions"] == []
+assert result["width"] == 20 and result["height"] == 12
+assert result["model"] == "ndl-lab/ndlocr-lite"
+assert result["elapsedMs"] >= 0
+`, workerPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+});
 
 const result = () => ({
   title: "识别草稿",

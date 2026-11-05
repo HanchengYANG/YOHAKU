@@ -24,14 +24,14 @@ import SourceImageSorter from "./SourceImageSorter.jsx";
 
 const annotationSteps = [{ id: "annotate", label: "生成注音", copy: "正在按正文语境补全缺失读音，正文和已有读音保持不变。" }];
 
-export default function Editor({ initial, chatSession, onSave, onDelete, onCancel, onDirty, onDocumentChanged, saving, saveError = null, books = [], onCreateBook }) {
+export default function Editor({ initial, chatSession, onSave, onDelete, onCancel, onDirty, onDocumentChanged, saving, saveError = null, books = [], onCreateBook, sourceScope = null }) {
   const [value, setValue] = useState(() => ({
     ...initial,
     orientation: "horizontal",
   }));
   const [contentDirty, setContentDirty] = useState(
     () =>
-      !!initial.appendedImageId || !!initial.initializeSentences || (!initial.id &&
+      sourceScope?.initialDirty === true || !!initial.appendedImageId || !!initial.initializeSentences || (!initial.id &&
       !!(
         initial.content?.trim() ||
         initial.sourceImageId ||
@@ -43,6 +43,7 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
   const [viewGroupIds, setViewGroupIds] = useState(null);
   const [chatNavigation, setChatNavigation] = useState(null);
   const viewChatGroups = (ids) => {
+    if (sourceScope) {sourceScope.onGroup?.(ids);return;}
     setViewGroupIds(ids);
     setChatNavigation({key:crypto.randomUUID(),documentId:initial.id,groupIds:ids});
   };
@@ -272,7 +273,7 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
   const taskUnavailable = saveError?.code === "TASK_UNAVAILABLE";
   const usesDraftAnnotation = !!sourceImageId && (initial.taskId
     ? activeSource?.taskId === initial.taskId : !initial.id);
-  const canGenerateReadings = !taskResultStale && !taskUnavailable && (!initial.taskId || usesDraftAnnotation);
+  const canGenerateReadings = !sourceScope && !taskResultStale && !taskUnavailable && (!initial.taskId || usesDraftAnnotation);
   const emptySourceIds = useMemo(() => {
     const filled = new Set(bodyRanges(bodyHtml).sources.filter((source) => source.text.trim()).map((source) => source.id));
     return new Set(imageSources.filter((image) => !filled.has(image.id)).map((image) => image.id));
@@ -613,6 +614,10 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
     } finally { setChatBusy(false); }
   };
   const askEditor = async (operation) => {
+    if (sourceScope) {
+      if (contentDirty) {setMessage("正文尚未保存，请先保存当前来源后提问。");return;}
+      await sourceScope.onAsk?.({selection,operation,question:operation === "custom" ? customQuestion.trim() : undefined});return;
+    }
     if (!selection || !initial.id || busy || answering || compositionActive.current) return;
     setChatBusy(true); setMessage("");
     try {
@@ -629,6 +634,7 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
     } catch (error) { setMessage(error.message); setChatBusy(false); }
   };
 
+  useEffect(() => {sourceScope?.onBodyChange?.(bodyHtml);},[bodyHtml]);
   const metadataFields = <>
         {(!initial.id || !initial.bookId) && (
           <div className="book-target">
@@ -789,14 +795,14 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
         <div className="editor-heading">
           <div>
             <span className="eyebrow">
-              {initial.id ? "校对材料" : value.bookId ? "加入书籍" : "放进书架"}
+              {sourceScope ? "当前来源" : initial.id ? "校对材料" : value.bookId ? "加入书籍" : "放进书架"}
             </span>
-            <h1>{sourceImageId ? "逐图校对正文" : initial.id ? "留住准确的每一行" : value.bookId ? "添加一篇阅读文章" : "导入一篇新材料"}</h1>
+            {sourceScope ? <h2>校对正文与注音</h2> : <h1>{sourceImageId ? "逐图校对正文" : initial.id ? "留住准确的每一行" : value.bookId ? "添加一篇阅读文章" : "导入一篇新材料"}</h1>}
           </div>
           <div className="editor-actions">
-            <button type="button" className="button secondary" disabled={busy} onClick={() => { setViewGroupIds(null); setFullPreview(true); }}>
+            {!sourceScope && <button type="button" className="button secondary" disabled={busy} onClick={() => { setViewGroupIds(null); setFullPreview(true); }}>
               全文检查
-            </button>
+            </button>}
             {canDeleteArticle && <button type="button" className="button subtle editor-delete-article" disabled={busy} onClick={deleteArticle}>删除整篇文章</button>}
             <button
               type="button"
@@ -812,11 +818,11 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
               type="submit"
               className="button primary"
               disabled={
-                busy || !value.title.trim() || !body.trim() || incompleteRuby
+                busy || !value.title.trim() || (!sourceScope && !body.trim()) || incompleteRuby
               }
             >
               <Icon name="check" size={17} />
-              {annotating ? "正在生成注音…" : chatBusy ? "正在整理问答…" : busy ? "正在保存…" : "保存并阅读"}
+              {annotating ? "正在生成注音…" : chatBusy ? "正在整理问答…" : busy ? "正在保存…" : sourceScope ? "保存正文" : "保存并阅读"}
             </button>
           </div>
         </div>
@@ -824,7 +830,7 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
         {canSaveAsNew && <p className="editor-message" role="status">保存未完成，当前校对内容已保留。可继续修改后另存为新文章，原文章和原问答记录保留。</p>}
         {taskResultStale && <p className="editor-message" role="status">当前编辑内容仍保留在本页。请先手动复制留存，再重新打开任务的最新结果；这份旧稿无法保存。</p>}
         {taskUnavailable && <p className="editor-message" role="status">任务已删除或无法访问，当前编辑内容仍保留在本页。请手动复制留存，或通过导入文字新建文章。</p>}
-        {sourceImageId ? <details className="editor-meta-details"><summary>{value.title || "文章信息"} · {books.find((item) => item.id === value.bookId)?.title || "独立材料"}<span>修改文章信息</span></summary>{metadataFields}</details> : metadataFields}
+        {!sourceScope && (sourceImageId ? <details className="editor-meta-details"><summary>{value.title || "文章信息"} · {books.find((item) => item.id === value.bookId)?.title || "独立材料"}<span>修改文章信息</span></summary>{metadataFields}</details> : metadataFields)}
         {sourceImageId && (
           <details className="ocr-review-overview"><summary>识别记录 · {warnings.length ? `${warnings.length} 条待核对提示` : "无待核对提示"}{nonBody.length ? ` · ${nonBody.length} 条非正文` : ""}</summary>
             <strong>
@@ -1000,7 +1006,7 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
                   key={activeSourceId || "text"}
                   html={editingHtml}
                   textareaRef={textarea}
-                  aria-label="日语正文"
+                  aria-label={sourceScope ? "来源正文" : "日语正文"}
                   lang="ja"
                   placeholder={
                     "把想读的日语放在这里。\n\n可以是一段歌词、一篇文章，\n或教材中还没读懂的那一页。"
@@ -1025,7 +1031,7 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
                 <div className="sentence-actions">
                   <button type="button" className="text-button" disabled={!undoHistory.current.length} onClick={() => undo()}>撤销</button>
                   <button type="button" className="text-button" disabled={!redoHistory.current.length} onClick={() => undo(true)}>重做</button>
-                  {initial.id ? <button type="button" className="text-button" disabled={busy || incompleteRuby} onClick={resegment}>{segmenting ? "正在重新分句…" : "重新分句"}</button> : <small>首次保存后初始化分句；普通校对保留现有句子。</small>}
+                  {initial.id && !sourceScope ? <button type="button" className="text-button" disabled={busy || incompleteRuby} onClick={resegment}>{segmenting ? "正在重新分句…" : "重新分句"}</button> : <small>{sourceScope ? "保存后仅补齐当前来源受影响的分句和注音。" : "首次保存后初始化分句；普通校对保留现有句子。"}</small>}
                 </div>
                 {!sourceImageId && annotationTask}
                 {orphanedIds.length > 0 && <p role="status" className="qa-orphan-warning">{orphanedIds.length} 组讨论对应的文字已移除。记录会保留，保存后解除正文关联；撤销或取消校对可恢复。</p>}
@@ -1445,7 +1451,7 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
         <header><h2>全文检查</h2><button type="button" className="text-button" onClick={() => setFullPreview(false)}>关闭全文检查</button></header>
         <div className="editor-full-content"><ArticleBody html={bodyHtml} fontSize={23} onGroup={(ids) => { setFullPreview(false); viewChatGroups(ids); }} /></div>
       </aside>, window.document.body)}
-      {initial.id && createPortal(<div className={`editor-chat-overlay ${viewGroupIds !== null ? "is-open" : ""}`}>
+      {initial.id && !sourceScope && createPortal(<div className={`editor-chat-overlay ${viewGroupIds !== null ? "is-open" : ""}`}>
         <DocumentChat document={{...initial,revision:value.revision}} session={chatSession}
           onBusyChange={setAnswering}
           open={viewGroupIds !== null} onOpen={() => setViewGroupIds([])} navigation={chatNavigation}

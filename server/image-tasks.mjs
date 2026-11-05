@@ -59,7 +59,8 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   if (!taskColumns.includes("deleted_at")) database.exec("ALTER TABLE image_tasks ADD COLUMN deleted_at TEXT");
   if (!taskColumns.includes("segmentation_json")) database.exec("ALTER TABLE image_tasks ADD COLUMN segmentation_json TEXT");
   if (!taskColumns.includes("segmentation_token")) database.exec("ALTER TABLE image_tasks ADD COLUMN segmentation_token TEXT");
-  let closed = false, timer = null, active = null;
+  let closed = false, timer = null;
+  const active = new Map(), concurrency = Math.max(1, Number(runnerOptions.concurrency || process.env.IMAGE_TASK_CONCURRENCY) || 4);
   const submittingImages = new Map();
   let queueOrder = database.prepare("SELECT coalesce(max(queue_order),0) AS value FROM image_tasks").get().value;
   const iso = () => new Date(now()).toISOString();
@@ -134,7 +135,8 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
       segmentation: { ...segmentationStatus, hasResult: !!result },
       resultVersion: row.result_version, appliedDocumentId: row.applied_document_id, appliedAt: row.applied_at,
       canPause: false, canDelete: canDeleteTask(row),
-      canReview: !row.applied_document_id && items.some((item) => item.image_id) && ["ready", "blocked", "needs_attention", "paused", "cancelled"].includes(row.state),
+      canReview: !row.applied_document_id && items.some((item) => item.image_id) && ["ready", "blocked", "needs_attention", "paused", "cancelled"].includes(row.state)
+        && !(row.state==='blocked'&&row.next_run_at>0),
       items: described, counts: { total: items.length, uploaded: items.filter((item) => item.image_id).length,
         recognized: items.filter((item) => item.recognition_json).length,
         completed: items.filter((item) => item.annotation_json).length,
@@ -142,8 +144,10 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
         pending: described.filter((item) => ["pending", "running"].includes(item.status)).length } };
   }
   function canDeleteTask(row) {
-    return !row.applied_document_id && ["blocked", "needs_attention"].includes(row.state);
+    return !row.applied_document_id && !active.has(row.id) && !annotatingItems(row.id).length && ["blocked", "needs_attention"].includes(row.state)
+      && !(row.state === 'blocked' && row.next_run_at > 0);
   }
+  function annotatingItems(taskId){return active.has(taskId)?[]:getItems.all(taskId).filter(item=>item.image_id&&ai.isImageAnnotating?.(item.image_id));}
   function segmentationStep(row) { return parse(row?.segmentation_json) || initialStep(); }
   function imagesComplete(items) {
     return items.length > 0 && items.every((item) => phases.every((phase) => parse(item.steps_json)[phase].state === "succeeded"));
@@ -201,7 +205,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
       segmentation.state = "pending"; segmentation.attempts = Math.max(0, segmentation.attempts - 1);
       database.prepare("UPDATE image_tasks SET segmentation_json=?,segmentation_token=NULL WHERE id=?").run(json(segmentation), taskId);
     } else database.prepare("UPDATE image_tasks SET segmentation_token=NULL WHERE id=?").run(taskId);
-    if (active?.taskId === taskId) active.controller.abort();
+    active.get(taskId)?.controller.abort();
   }
   function freezeResult(userId, id, version) {
     return transaction(() => {
@@ -241,7 +245,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
     return null;
   }
   function schedule(delay = 0) {
-    if (!enabled || closed || timer || active) return;
+    if (!enabled || closed || timer || active.size >= concurrency) return;
     timer = setTimeout(() => { timer = null; void runNext(); }, delay);
     timer.unref?.();
   }
@@ -250,10 +254,10 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
     const task = database.prepare("SELECT state,deleted_at,segmentation_token FROM image_tasks WHERE id=?").get(taskId);
     return task?.state === "running" && !task.deleted_at && (itemId ? getItem.get(taskId, itemId)?.attempt_token : task.segmentation_token) === token;
   }
-  async function perform(task, item, phase, signal) {
+  async function perform(task, item, phase, signal, onStatus) {
     if (phase === "segment") {
       const bodyHtml = mergedBody(getItems.all(task.id));
-      const result = await ai.segmentHtml(task.user_id, { bodyHtml, priority: "background", signal });
+      const result = await ai.segmentHtml(task.user_id, { bodyHtml, priority: "background", signal,onStatus });
       if (typeof result?.bodyHtml !== "string" || bodyText(result.bodyHtml) !== bodyText(bodyHtml) || !hasCompleteSentenceBoundaries(result.bodyHtml))
         throw fail(502, "分句未完整覆盖原正文，识别和注音结果已保留，请重试分句。");
       return result;
@@ -268,30 +272,44 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
         { quarterTurns: item.quarter_turns, revision: item.base_revision }, { internal: true, taskId: task.id }));
     }
     if (phase === "recognize") return ai.recognizeImage(task.user_id, item.image_id,
-      { engine: "llm", priority: "background", persist: false, expectedRevision: item.prepared_revision, signal });
+      { engine: "llm", priority: "background", persist: false, expectedRevision: item.prepared_revision, signal,onStatus });
     const draft = parse(item.recognition_json);
     const result = await ai.annotateImage(task.user_id, item.image_id,
       { content: draft.content, manualReadings: [], priority: "background", persist: false,
-        draft, expectedRevision: item.prepared_revision, signal });
+        draft, expectedRevision: item.prepared_revision, signal,onStatus });
     if (!Array.isArray(result?.blocks) || plainText(result.blocks) !== plainText(draft.blocks))
       throw fail(502, "注音结果改变了正文，原识别结果已保留，请重试或手动注音。");
     return result;
   }
   async function execute(task, item, phase, token, controller) {
     try {
-      const output = await perform(task, item, phase, controller.signal);
+      const onStatus=event=>{
+        if(!validAttempt(task.id,item?.id,token))return;
+        const {state,...execution}=event||{};
+        if(!state)return;
+        transaction(()=>{
+          const current=phase==='segment'?requireTask(task.user_id,task.id):getItem.get(task.id,item.id);
+          const steps=phase==='segment'?null:parse(current.steps_json),step=steps?steps[phase]:segmentationStep(current);
+          const next={...step,resourceState:state,execution:{...step.execution,...execution},
+            ...(execution.queuedAt?{queuedAt:execution.queuedAt}:{}),...(execution.startedAt?{startedAt:execution.startedAt}:{})};
+          if(steps){steps[phase]=next;setSteps(current,steps);}else database.prepare('UPDATE image_tasks SET segmentation_json=? WHERE id=?').run(json(next),task.id);
+          changeTask(task.id);
+        });
+      };
+      const output = await perform(task, item, phase, controller.signal,onStatus);
       if (!validAttempt(task.id, item?.id, token)) return;
       transaction(() => {
         if (phase === "segment") {
           const current = requireTask(task.user_id, task.id), step = segmentationStep(current);
-          changeTask(task.id, { state: "ready", segmentation_json: json({ ...step, state: "succeeded", error: null, nextRunAt: 0, execution: output.execution, result: output }),
+          changeTask(task.id, { state: "ready", segmentation_json: json({ ...step, state: "succeeded", resourceState:'completed',error: null, nextRunAt: 0, finishedAt:iso(),execution: {...step.execution,...output.execution}, result: output }),
             segmentation_token: null, blocked_reason: null, next_run_at: 0,
             result_version: current.version + 1, completed_at: iso() });
           return;
         }
         const current = getItem.get(task.id, item.id), steps = parse(current.steps_json);
-        steps[phase] = { ...steps[phase], state: "succeeded", error: null, nextRunAt: 0,
-          execution: phase === "annotate" ? output.annotation?.execution : output.execution };
+        const execution=phase === "annotate" ? output.annotation?.execution : output.execution;
+        steps[phase] = { ...steps[phase], state: "succeeded",resourceState:'completed', error: null, nextRunAt: 0,finishedAt:iso(),
+          execution: {...steps[phase].execution,...execution,...(!execution?.elapsedMs&&output.annotation?.elapsedMs!==undefined?{elapsedMs:output.annotation.elapsedMs}:{})} };
         const patch = { attempt_token: null };
         if (phase === "prepare") { patch.image_json = json(output); patch.prepared_revision = output.revision; }
         else if (phase === "recognize") {
@@ -311,7 +329,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
         const transient = error.name === "TypeError" || [408, 429, 500, 502, 503, 504].includes(error.status) || ["ETIMEDOUT", "ECONNRESET", "ENETUNREACH"].includes(error.code);
         const retry = authRequired || busy || transient && step.attempts <= maxAutomaticRetries;
         const message = authRequired ? "网站 AI 授权需要恢复，请联系网站拥有者；已上传图片和已完成结果均已保留。" : String(error.message || "处理失败，请重试或手动处理。").slice(0, 1000);
-        const failed = { ...step, ...(error.execution ? { execution: error.execution } : {}), state: retry ? "pending" : "failed", error: message,
+        const failed = { ...step, ...(error.execution ? { execution: {...step.execution,...error.execution} } : {}), state: retry ? "pending" : "failed",resourceState:retry?'retry_wait':error.status===504?'timeout':'failed',finishedAt:iso(),error: message,
           attempts: authRequired || busy ? Math.max(0, step.attempts - 1) : step.attempts,
           nextRunAt: retry ? now() + (authRequired ? blockedRetryMs : retryDelayMs * Math.max(1, step.attempts)) : 0 };
         if (steps) { steps[phase] = failed; setSteps(current, steps, { attempt_token: null }); }
@@ -324,7 +342,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   }
   function runNext() {
     if (closed) return Promise.resolve(false);
-    if (active) return active.promise;
+    if (active.size >= concurrency) return Promise.resolve(false);
     let selected;
     transaction(() => {
       const tasks = database.prepare("SELECT * FROM image_tasks WHERE state IN ('queued','blocked') AND next_run_at<=? AND applied_document_id IS NULL AND deleted_at IS NULL ORDER BY queue_order,id LIMIT 100").all(now());
@@ -342,7 +360,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
               const token = randomUUID(), controller = new AbortController();
               changeTask(task.id, { state: "running", blocked_reason: null, next_run_at: 0,
                 started_at: task.started_at || iso(), queue_order: ++queueOrder, segmentation_token: token,
-                segmentation_json: json({ ...segmentation, state: "running", attempts: segmentation.attempts + 1, error: null }) });
+                segmentation_json: json({ ...segmentation, state: "running",resourceState:'queued',queuedAt:iso(),startedAt:null,finishedAt:null,attempts: segmentation.attempts + 1, error: null }) });
               selected = { task: requireTask(task.user_id, task.id), item: null, phase: "segment", token, controller };
               break;
             }
@@ -350,7 +368,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
           continue;
         }
         const { item, next } = candidate, token = randomUUID(), controller = new AbortController();
-        next.steps[next.phase] = { ...next.step, state: "running", attempts: next.step.attempts + 1, error: null };
+        next.steps[next.phase] = { ...next.step, state: "running",resourceState:next.phase==='prepare'?'running':'queued',queuedAt:iso(),startedAt:null,finishedAt:null, attempts: next.step.attempts + 1, error: null };
         setSteps(item, next.steps, { attempt_token: token });
         changeTask(task.id, { state: "running", blocked_reason: null, next_run_at: 0,
           started_at: task.started_at || iso(), queue_order: ++queueOrder });
@@ -360,12 +378,14 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
     });
     if (!selected) { schedule(pollIntervalMs); return Promise.resolve(false); }
     const { task, item, phase, token, controller } = selected;
-    active = { taskId: task.id, itemId: item?.id || null, token, controller, promise: null };
-    active.promise = execute(task, item, phase, token, controller).finally(() => {
-      active = null;
+    const execution = { taskId: task.id, itemId: item?.id || null, token, controller, promise: null };
+    active.set(task.id, execution);
+    execution.promise = execute(task, item, phase, token, controller).finally(() => {
+      active.delete(task.id);
       schedule(0);
     });
-    return active.promise;
+    schedule(0);
+    return execution.promise;
   }
   function assertImageMutable({ userId, imageId }) {
     if (submittingImages.has(imageId)) throw fail(409, "这张图片正在提交任务，方向暂时已固定，请稍后重试。");
@@ -543,6 +563,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
   app.post("/api/image-tasks/:id/pause", (req) => rejectManualPause(req));
   async function resume(req, res, allowedStates) {
     const initial = requireTask(req.user.id, req.params.id), snapshots = getItems.all(initial.id);
+    if(annotatingItems(initial.id).length)throw fail(409,'注音仍在排队或执行，请等待完成后再重试任务。');
     const imageIds = snapshots.filter((item) => item.image_id).map((item) => item.image_id);
     if (imageIds.some((id) => ai.isImageMutating?.(id))) throw fail(409, "图片方向正在保存，请完成后再恢复任务。");
     for (const id of imageIds) submittingImages.set(id, (submittingImages.get(id) || 0) + 1);
@@ -551,6 +572,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
       if (closed) throw fail(503, "服务正在停止，请重新连接确认任务状态。");
       const result = transaction(() => {
         const row = requireTask(req.user.id, req.params.id);
+        if(annotatingItems(row.id).length)throw fail(409,'注音仍在排队或执行，请等待完成后再重试任务。');
         if (row.applied_document_id || !allowedStates.includes(row.state)) throw fail(409, "任务当前不需要恢复或重试。");
         expectVersion(row, req.body?.version);
         if (snapshots.some((item) => item.image_id && (ai.isImageMutating?.(item.image_id) ||
@@ -666,15 +688,66 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
     if (closed) return;
     clearTimeout(timer); timer = null;
     transaction(() => {
-      if (active) {
-        const task = database.prepare("SELECT * FROM image_tasks WHERE id=?").get(active.taskId);
+      for (const execution of active.values()) {
+        const task = database.prepare("SELECT * FROM image_tasks WHERE id=?").get(execution.taskId);
         if (task?.state === "running" && !task.deleted_at) { invalidateAttempt(task.id); changeTask(task.id, { state: "queued", queue_order: ++queueOrder }); }
       }
     });
     closed = true;
-    active?.controller.abort();
+    for (const execution of active.values()) execution.controller.abort();
   }
+  const phaseTitles={prepare:'图片准备',recognize:'文字识别',annotate:'注音',segment:'分句'};
+  function unifiedStepStatus(step){
+    if(step.state==='succeeded')return 'completed';
+    if(step.state==='running')return step.resourceState==='queued'?'resource_wait':step.resourceState==='retry_wait'?'retry_wait':'running';
+    if(step.state==='failed')return step.resourceState==='timeout'?'timeout':'failed';
+    return step.error&&step.nextRunAt>now()?'retry_wait':'dependency_wait';
+  }
+  function unifiedTask(userId,id){
+    const row=requireTask(userId,id),task=present(row);
+    const steps=task.items.flatMap(item=>Object.entries(item.steps).map(([step,value])=>({
+      ...value,id:`${item.id}:${step}`,step,title:`${item.name} · ${phaseTitles[step]}`,itemId:item.id,
+      status:unifiedStepStatus(value),
+    })));
+    steps.push({...task.segmentation,id:'segment',step:'segment',title:phaseTitles.segment,
+      status:unifiedStepStatus(task.segmentation)});
+    const annotating=annotatingItems(id);
+    for(const item of annotating)steps.push({id:`manual:${item.id}`,step:'annotate',title:`${item.name} · 手动注音`,itemId:item.id,status:ai.imageAnnotationStatus?.(item.image_id)||'running'});
+    for(const item of getItems.all(id))for(const [index,review] of (parse(item.review_annotations_json)||[]).entries())steps.push({
+      id:`manual:${item.id}:${index}`,step:'annotate',title:`${item.name} · 手动注音记录 ${index+1}`,itemId:item.id,status:'completed',
+      execution:review.annotation?.execution||review.execution,finishedAt:review.annotation?.createdAt});
+    const retrying=row.state==='blocked'&&row.next_run_at>0||row.state==='queued'&&steps.some(step=>step.status==='retry_wait');
+    const status=annotating.length?(annotating.some(item=>ai.imageAnnotationStatus?.(item.image_id)!=='queued')?'running':'queued'):row.applied_document_id?'completed':
+      row.state==='running'?(steps.some(step=>step.status==='running')?'running':'resource_wait'):retrying?'retry_wait':row.state==='needs_attention'?(steps.some(step=>step.status==='timeout')?'timeout':'failed'):row.state==='ready'?'needs_review':row.state;
+    return {...task,type:'image',status,steps,archived:!!row.applied_document_id&&!annotating.length,
+      documentId:row.applied_document_id,canRetry:!active.has(id)&&!annotating.length&&!row.applied_document_id&&!retrying&&['needs_attention','blocked','paused','cancelled'].includes(row.state),
+      canOpenResult:task.canReview||!!row.applied_document_id,
+      progress:{completed:steps.filter(step=>step.status==='completed').length,total:steps.length}};
+  }
+  function retryTask(userId,id,{version}){
+    const row=requireTask(userId,id);expectVersion(row,version);
+    if(!unifiedTask(userId,id).canRetry)throw fail(409,'任务当前不需要重试。');
+    for(const item of getItems.all(id)){
+      if(item.image_id&&ai.isImageMutating?.(item.image_id))throw fail(409,'图片方向正在保存，请稍后重试。');
+      const steps=parse(item.steps_json);
+      for(const step of Object.values(steps))if(step.state==='failed'||step.state==='pending')Object.assign(step,{state:'pending',attempts:0,error:null,nextRunAt:0});
+      setSteps(item,steps,{attempt_token:null});
+    }
+    const segmentation=segmentationStep(row);
+    changeTask(id,{state:row.submitted_at?'queued':'draft',result_version:null,completed_at:null,
+      blocked_reason:null,next_run_at:0,queue_order:++queueOrder,segmentation_token:null,
+      ...(segmentation.state==='succeeded'?{}:{segmentation_json:json(initialStep())})});
+    schedule(0);return unifiedTask(userId,id);
+  }
+  const taskAdapter={type:'image',
+    list:userId=>database.prepare('SELECT id FROM image_tasks WHERE user_id=? AND deleted_at IS NULL').all(userId).map(row=>unifiedTask(userId,row.id)),
+    get:unifiedTask,retry:retryTask,
+    delete(userId,id,{version}){
+      const row=requireTask(userId,id);expectVersion(row,version);
+      if(!canDeleteTask(row))throw fail(409,'只有已经停止执行的失败任务可以删除。');
+      changeTask(id,{deleted_at:iso()});
+    }};
   schedule(0);
   return { getTask: taskFor, getResult: resultFor, freezeResult, assertImageMutable, runNext,
-    close, stop: close, drain: () => active?.promise || Promise.resolve() };
+    close, stop: close, drain: () => Promise.allSettled([...active.values()].map(execution=>execution.promise)), taskAdapter };
 }

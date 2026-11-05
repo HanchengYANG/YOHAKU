@@ -1601,7 +1601,7 @@ test("共享AI：成员可使用拥有者授权，但不能配置AI或访问别�
   );
 });
 
-test("共享AI全站互斥：成员读图时拥有者不能切换授权，回调可在任务后重试", async (t) => {
+test("共享AI并发推理时仍禁止切换授权，回调可在任务后重试", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "yohaku-identity-race-"));
   const connections = new Map();
   let ownerId,
@@ -1746,28 +1746,27 @@ test("共享AI全站互斥：成员读图时拥有者不能切换授权，回调
         .status,
       409,
     );
-  // Inference from another website user waits for the same execution slot.
-  // Credential-changing requests above still fail while the slot is occupied.
+  // Independent inference can use another resource slot. Credential-changing
+  // requests above still fail while a resource is occupied.
   const ownerDocument = await createDocument(running.url);
   const ownerQuestion = await prepareChatBody(running.url, ownerCookie,
     `/api/documents/${ownerDocument.id}/conversations`, "POST",
-    { question: "拥有者的提问也等待共享运行时" });
+    { question: "拥有者的提问独立执行" });
   let questionSettled = false;
   const queuedQuestion = fetch(`${running.url}/api/documents/${ownerDocument.id}/conversations`, {
     method: "POST", headers: { Cookie: ownerCookie, "Content-Type": "application/json" },
     body: JSON.stringify(ownerQuestion), signal: AbortSignal.timeout(5000),
   }).then(async (response) => { questionSettled = true; return { status: response.status, data: await response.json() }; });
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(questionSettled, false);
-  assert.equal(connections.get(owner.id).state.calls.length, 0);
+  assert.equal((await queuedQuestion).status, 201);
+  assert.equal(questionSettled, true);
+  assert.equal(connections.get(owner.id).state.calls.length, 1);
+  assert.equal(connections.get(owner.id).state.calls[0].webSearch, true);
   releaseRead();
   assert.equal((await recognition).status, 200);
-  assert.equal((await queuedQuestion).status, 201);
   assert.equal(connections.get(owner.id).state.calls.length, 2);
-  assert.deepEqual(connections.get(owner.id).state.calls[0].schema, OCR_BODY_SCHEMA);
-  assert.equal(connections.get(owner.id).state.calls[1].webSearch, true);
+  assert.deepEqual(connections.get(owner.id).state.calls[1].schema, OCR_BODY_SCHEMA);
   assert.equal(wrongRuns, 0);
-  const pinned = connections.get(owner.id).state.calls[0];
+  const pinned = connections.get(owner.id).state.calls[1];
   assert.equal(pinned.expectedAccountId, "account-a");
   assert.equal(pinned.expectedSubject, `${owner.id}:test-a`);
   fsPromises.readFile = originalRead;

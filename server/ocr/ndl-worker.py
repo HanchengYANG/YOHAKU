@@ -104,7 +104,7 @@ def line_preprocessing(ocr, image, metadata):
         ocr.process_cascade = original_cascade
 
 
-def recognize(path):
+def recognize(path, *, allow_empty=False):
     global engine
     started = time.perf_counter()
     cold = engine is None
@@ -151,7 +151,7 @@ def recognize(path):
             "confidence": item["confidence"],
         }
         (ruby_regions if is_ruby else regions).append(region)
-    if not regions:
+    if not regions and not allow_empty:
         raise RuntimeError("NDLOCR-Lite did not recognize body text")
     try:
         version = importlib.metadata.version("ndlocr-lite")
@@ -176,7 +176,7 @@ for line in sys.stdin:
     try:
         request = json.loads(line)
         with contextlib.redirect_stdout(sys.stderr):
-            result = recognize(request["path"])
+            result = recognize(request["path"], allow_empty=request.get("allowEmpty") is True)
         reply = {"id": request["id"], "result": result}
     except Exception as error:
         traceback.print_exc(file=sys.stderr)

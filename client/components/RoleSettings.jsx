@@ -4,6 +4,7 @@ import { requiredCapabilities, normalizeReasoning, reasoningKey } from "../../sh
 
 const ROLES = [
   { id: "ocr", name: "OCR" },
+  { id: "correction", name: "正文校正" },
   { id: "annotation", name: "注音" },
   { id: "segmentation", name: "分句" },
   { id: "chat", name: "问答" },
@@ -57,7 +58,7 @@ export default function RoleSettings({ onClose }) {
   const saveController = useRef(null);
   const accept = (value) => {
     setConfiguration(value);
-    setDraft(value.roles);
+    setDraft({ ...value.roles, correction:value.roles.correction || value.roles.ocr });
     setReferenceImage(value.annotationReferenceImage === true);
     setProviders(value.providers.filter((provider) => provider.enabled !== false));
     setRowErrors({});
@@ -235,6 +236,9 @@ export default function RoleSettings({ onClose }) {
                   setNotice("");
                 }} />参考原图
             </label>}
+            {role.id === "annotation" && <small className="ai-role-note">
+              新导入正文先本地注音，再由此角色查错；未指定推理强度时，查错优先使用模型支持的快速模式。显式推理设置会照常执行。
+            </small>}
             {role.id === "chat" && <small className="ai-role-note">
               {selection.providerId === "openai" ? "使用网页工具" : "未联网"}
             </small>}

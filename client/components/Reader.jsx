@@ -75,7 +75,7 @@ export default function Reader({
         <div className="reader-toolbar-actions">
           <button className="button subtle edit-action" onClick={onEdit}>
             <Icon name="edit" size={16} />
-            校对文字与注音
+            校对正文
           </button>
           {onDiscuss && (
             <button
@@ -92,7 +92,7 @@ export default function Reader({
         <button type="button" className="text-button" disabled={segmentationBusy} onClick={onSegment}>
           {segmentationBusy ? "正在分句…" : bodyRanges(html).sentences.length ? "重新分句" : "初始化分句"}
         </button>
-        {onAppendImage && <button type="button" className="text-button" onClick={onAppendImage}>继续添加图片</button>}
+        {onAppendImage && <button type="button" className="text-button" onClick={onAppendImage}>继续导入资料</button>}
         {segmentationError && <span role="alert">{segmentationError}</span>}
       </div>}
       <article

@@ -231,12 +231,52 @@ test("请求取消或停止能释放运行时，忙碌时拒绝改密钥，过�
   await ready;
   assert.equal(fixture.connection.runtime.status().busy, true);
   await assert.rejects(fixture.configure(), (error) => error.status === 409);
-  await assert.rejects(fixture.connection.runtime.run({ prompt: "同时请求" }), (error) => error.status === 409);
+  const concurrent = fixture.connection.runtime.run({ prompt: "同时请求" });
+  const concurrentRejected = assert.rejects(concurrent, /取消或超时/);
+  await new Promise(setImmediate);
+  assert.equal(fixture.requests.length, 2);
   fixture.connection.runtime.stop();
-  await rejection;
+  await Promise.all([rejection, concurrentRejected]);
   assert.equal(fixture.connection.runtime.status().busy, false);
   await assert.rejects(fixture.connection.runtime.run({ prompt: "过期身份", expectedSubject: "old-subject" }), /配置已变化/);
-  assert.equal(fixture.requests.length, 1);
+  assert.equal(fixture.requests.length, 2);
+});
+
+test("处理诊断区分上游HTTP、网络与JSON错误，只保存安全字段", async (t) => {
+  const f = await setup(t); await f.configure(); await f.enable();
+  for (const [status, category, code] of [[503, 'upstream_http', 'AI_UPSTREAM_HTTP'], [429, 'rate_limit', 'AI_RATE_LIMIT'], [401, 'auth', 'AI_AUTH_ERROR']]) {
+    f.reply(() => Response.json({error:{message:key}}, {status,headers:{Authorization:key,'x-request-id':key}}));
+    await assert.rejects(f.connection.runtime.run({prompt:'正文校正'}), error => {
+      assert.equal(error.diagnostic?.category,category); assert.equal(error.diagnostic?.code,code);
+      assert.equal(error.diagnostic.httpStatus,status); assert.doesNotMatch(JSON.stringify(error.diagnostic),new RegExp(key)); return true;
+    });
+  }
+  f.reply(() => { throw new TypeError(key,{cause:Object.assign(new Error(key),{code:'ECONNRESET',headers:{Authorization:key}})}); });
+  await assert.rejects(f.connection.runtime.run({prompt:'正文校正'}), error => {
+    assert.equal(error.diagnostic?.code,'AI_NETWORK_ERROR');assert.equal(error.diagnostic?.networkCode,'ECONNRESET');
+    assert.doesNotMatch(JSON.stringify(error.diagnostic),new RegExp(key));return true;
+  });
+  f.reply(() => complete('not JSON'));
+  await assert.rejects(f.connection.runtime.run({prompt:'正文校正',schema:{type:'object'}}), error => {
+    assert.equal(error.diagnostic?.category,'invalid_json');assert.equal(error.diagnostic?.code,'AI_INVALID_JSON');return true;
+  });
+  f.reply(() => Response.json({choices:[{invalid:key}]}));
+  await assert.rejects(f.connection.runtime.run({prompt:'正文校正'}), error => {
+    assert.equal(error.diagnostic?.category,'invalid_response');assert.doesNotMatch(JSON.stringify(error.diagnostic),new RegExp(key));return true;
+  });
+});
+
+test("诊断区分请求超时和主动取消，截断输出保留finishReason", async (t) => {
+  const f = await setup(t,{timeoutMs:60}); await f.configure(); await f.enable();
+  f.reply((_url,init) => new Promise((_resolve,reject) => init.signal.addEventListener('abort',()=>reject(init.signal.reason),{once:true})));
+  const keepAlive=setInterval(()=>{},100);t.after(()=>clearInterval(keepAlive));
+  await assert.rejects(f.connection.runtime.run({prompt:'等超时'}), error => {assert.equal(error.diagnostic?.code,'AI_TIMEOUT');return true;});
+  const controller=new AbortController(); const pending=f.connection.runtime.run({prompt:'主动取消',signal:controller.signal});controller.abort();
+  await assert.rejects(pending,error=>{assert.equal(error.diagnostic?.code,'AI_CANCELLED');return true;});
+  f.reply(() => complete('截断内容','length'));
+  await assert.rejects(f.connection.runtime.run({prompt:'截断JSON',schema:{type:'object'}}),error=>{
+    assert.equal(error.diagnostic?.code,'AI_INCOMPLETE_OUTPUT');assert.equal(error.diagnostic?.finishReason,'length');return true;
+  });
 });
 
 test("保存key不启用模型，测试通过后仍需明确选用；服务端拦截未通过模型且绑定地址和key", async (t) => {
@@ -420,4 +460,21 @@ test("旧远端目录补充已知强度、未知模型不伪造支持；刷新�
   assert.deepEqual(catalog.models.find((entry) => entry.id === "Qwen/Qwen3.6-35B").reasoningOptions, { efforts: ["none", "low", "medium", "high"] });
   assert.equal(catalog.models.find((entry) => entry.id === "unknown-model").reasoningOptions, undefined);
   assert.deepEqual(catalog.models.find((entry) => entry.id === "declared-model").reasoningOptions, { efforts: ["none", "low"] });
+});
+
+
+test('一个HTTP请求取消不会中断另一个并发请求', async t => {
+  const f=await setup(t); await f.configure(); await f.enable();
+  const waiting=[];
+  f.reply((_url,init)=>new Promise((resolve,reject)=> { waiting.push({resolve,signal:init.signal}); init.signal.addEventListener('abort',()=>reject(init.signal.reason),{once:true}); }));
+  const controller=new AbortController();
+  const first=f.connection.runtime.run({prompt:'第一章',signal:controller.signal});
+  const rejected=assert.rejects(first,/取消或超时/);
+  const second=f.connection.runtime.run({prompt:'第二章'});
+  await new Promise(setImmediate);
+  assert.equal(waiting.length,2); controller.abort(); await rejected;
+  assert.equal(waiting[1].signal.aborted,false);
+  assert.equal(f.connection.runtime.status().activeCount,1);
+  waiting[1].resolve(complete('独立完成'));
+  assert.equal((await second).text,'独立完成');
 });

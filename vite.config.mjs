@@ -85,6 +85,7 @@ export default defineConfig({
     host: process.env.HOST || "127.0.0.1",
     port: 5173,
     strictPort: true,
+    watch: { ignored: ["**/artifacts/**", "**/test-results/**", "**/data/**"] },
     proxy: { "/api": `http://127.0.0.1:${process.env.PORT || 4317}` },
     https,
   },

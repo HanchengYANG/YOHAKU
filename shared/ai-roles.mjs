@@ -1,4 +1,4 @@
-export const ROLE_IDS = Object.freeze(["ocr", "annotation", "segmentation", "chat"]);
+export const ROLE_IDS = Object.freeze(["ocr", "correction", "annotation", "segmentation", "chat"]);
 
 // Persist only explicit controls. Empty settings retain the provider default
 // and remain compatible with checks/configuration written before this feature.
@@ -30,6 +30,7 @@ export const reasoningKey = (input) => JSON.stringify(normalizeReasoning(input) 
 
 export function requiredCapabilities(role, referenceImage = false) {
   if (role === "ocr") return ["json", "image"];
+  if (role === "correction") return ["json"];
   if (role === "annotation") return referenceImage ? ["json", "image"] : ["json"];
   if (role === "segmentation") return ["json"];
   if (role === "chat") return ["streaming"];

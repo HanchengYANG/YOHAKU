@@ -66,7 +66,7 @@ export default function BookNavigation({
           disabled={disabled}
           onClick={onAddImage}
         >
-          添加图片文章
+          导入阅读资料
         </button>
       </div>
     </nav>

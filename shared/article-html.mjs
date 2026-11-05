@@ -10,7 +10,7 @@ const decodeHtml = (text) => text.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos
 });
 const identifier = (value) => typeof value === "string" && /^[\w.:-]{1,160}$/.test(value);
 const tags = new Set(["p", "span", "mark", "ruby", "rt", "rp", "br"]);
-const attrs = new Set(["data-paragraph-id", "data-sentence-id", "data-source-image-id", "data-qa-group-ids", "data-origin", "data-block-type"]);
+const attrs = new Set(["data-paragraph-id", "data-sentence-id", "data-source-id", "data-source-image-id", "data-qa-group-ids", "data-origin", "data-block-type"]);
 const error = (message) => Object.assign(new Error(message), { status: 400 });
 
 // This is deliberately a closed HTML grammar, rather than a general browser HTML
@@ -88,6 +88,7 @@ function parseBody(html) {
       const next = { ...metadata };
       if (node.attrs["data-sentence-id"]) next.sentenceId = node.attrs["data-sentence-id"];
       if (node.attrs["data-source-image-id"]) next.sourceImageId = node.attrs["data-source-image-id"];
+      if (node.attrs["data-source-id"]) next.sourceId = node.attrs["data-source-id"];
       if (node.attrs["data-qa-group-ids"]) next.qaGroupIds = [...new Set([...(next.qaGroupIds || []), ...node.attrs["data-qa-group-ids"].split(" ")])];
       if (node.tag === "ruby") {
         const readings = node.children.filter((child) => child.tag === "rt");
@@ -107,11 +108,12 @@ function parseBody(html) {
   });
 }
 
-const metadataKey = (atom) => JSON.stringify([atom.sentenceId, atom.sourceImageId, atom.qaGroupIds]);
+const metadataKey = (atom) => JSON.stringify([atom.sentenceId, atom.sourceId, atom.sourceImageId, atom.qaGroupIds]);
 function inline(atom) {
   let text = escapeHtml(atom.text).replaceAll("\n", "<br>");
   if (atom.qaGroupIds?.length) text = `<mark data-qa-group-ids="${atom.qaGroupIds.join(" ")}">${text}</mark>`;
   if (atom.sourceImageId) text = `<span data-source-image-id="${atom.sourceImageId}">${text}</span>`;
+  if (atom.sourceId) text = `<span data-source-id="${atom.sourceId}">${text}</span>`;
   if (atom.sentenceId) text = `<span data-sentence-id="${atom.sentenceId}">${text}</span>`;
   return text;
 }
@@ -174,7 +176,7 @@ export function bodyRanges(html) {
   let offset = 0;
   for (const p of paragraphs) {
     for (const atom of p.atoms) {
-      for (const [key, ids] of [["sentences", atom.sentenceId ? [atom.sentenceId] : []], ["sources", atom.sourceImageId ? [atom.sourceImageId] : []], ["qa", atom.qaGroupIds || []]]) {
+      for (const [key, ids] of [["sentences", atom.sentenceId ? [atom.sentenceId] : []], ["sources", atom.sourceId || atom.sourceImageId ? [atom.sourceId || atom.sourceImageId] : []], ["qa", atom.qaGroupIds || []]]) {
         for (const id of ids) {
           const previous = latest[key].get(id);
           const newlineGap = previous && key === "sentences" && previous.end < offset && /^\n+$/.test(documentText.slice(previous.end, offset)) ? documentText.slice(previous.end, offset) : "";
@@ -228,6 +230,18 @@ function sentenceBoundaries(html, fragments, preserveExisting) {
 }
 export const applySentenceBoundaries = (html, fragments) => sentenceBoundaries(html, fragments, false);
 export const initializeSentenceBoundaries = (html, fragments) => sentenceBoundaries(html, fragments, true);
+export function setBodySource(html, sourceId) {
+  if (!identifier(sourceId)) throw error("来源标识无效。");
+  return mapRanges(html, [], (atom) => ({ ...atom, sourceId }));
+}
+export function invalidateBodySentences(html, start, end) {
+  const sentences = bodyRanges(html).sentences;
+  const affected = new Set(sentences.filter((s) => start === end ? s.start <= start && s.end >= end : s.start < end && s.end > start).map((s) => s.id));
+  return mapRanges(html, [], (atom) => {
+    if (!affected.has(atom.sentenceId)) return atom;
+    const next = { ...atom }; delete next.sentenceId; return next;
+  });
+}
 export function markBodyRange(html, start, end, groupId) {
   const text = bodyText(html);
   if (!identifier(groupId) || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= end || end > text.length) throw error("问答选区无效。");

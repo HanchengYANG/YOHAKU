@@ -7,6 +7,9 @@ import Icon from "./components/Icon.jsx";
 import Welcome from "./components/Welcome.jsx";
 import Reader from "./components/Reader.jsx";
 import ReadingPreparation from "./components/ReadingPreparation.jsx";
+import PagedReader from "./components/PagedReader.jsx";
+import SourceCorrection from "./components/SourceCorrection.jsx";
+import UnifiedImport from "./components/UnifiedImport.jsx";
 import Editor from "./components/Editor.jsx";
 import AISettings from "./components/AISettings.jsx";
 import RoleSettings from "./components/RoleSettings.jsx";
@@ -20,6 +23,7 @@ import UserMenu from "./components/UserMenu.jsx";
 import BookView from "./components/BookView.jsx";
 import BookNavigation from "./components/BookNavigation.jsx";
 import PWAManager from "./PWAManager.jsx";
+import { useConfirmation } from "./components/ConfirmDialog.jsx";
 
 export default function App() {
   const [session, setSession] = useState(null);
@@ -99,6 +103,7 @@ function BookCreate({ initialTitle, promoting, busy, onSave, onCancel, onDirty }
 }
 
 function Workspace({ user, onLoggedOut }) {
+  const { confirm, confirmationDialog } = useConfirmation();
   const [documents, setDocuments] = useState([]);
   const [articleTargets, setArticleTargets] = useState([]);
   const [libraryDocuments, setLibraryDocuments] = useState([]);
@@ -109,6 +114,8 @@ function Workspace({ user, onLoggedOut }) {
   const [book, setBook] = useState(null);
   const [importBookId, setImportBookId] = useState(null);
   const [importSession, setImportSession] = useState(0);
+  const [importText, setImportText] = useState(false);
+  const [correctionSourceIds, setCorrectionSourceIds] = useState([]);
   const [importTask, setImportTask] = useState(null);
   const [chatRequest, setChatRequest] = useState(null);
   const [chatNavigation, setChatNavigation] = useState(null);
@@ -133,6 +140,7 @@ function Workspace({ user, onLoggedOut }) {
   const [notice, setNotice] = useState("");
   const [taskCounts, setTaskCounts] = useState({});
   const [activeTaskCount, setActiveTaskCount] = useState(0);
+  const [importDraftId,setImportDraftId]=useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem("yohaku.sidebarCollapsed") === "1"; }
@@ -147,11 +155,11 @@ function Workspace({ user, onLoggedOut }) {
   );
   const savedDetail = useRef(null);
   const deletingArticle = useRef(false);
-  const editRequest = useRef(0);
   const importRequest = useRef(0);
   const segmentationRequest = useRef(0);
   const pendingSegmentations = useRef(new Map());
   const automaticSegmentationAttempt = useRef(null);
+  const readingSummaryVersion = useRef(null);
   const currentView = useRef(null);
   const chatSessions = useRef(new Map());
   const chatSessionFor = (id) => {
@@ -164,7 +172,7 @@ function Workspace({ user, onLoggedOut }) {
   const sidebarExpandButton = useRef(null);
   const focusSidebarToggle = useRef(false);
   const currentReadingDocument = document?.id === activeId ? document : null;
-  const readingReady = !!currentReadingDocument && hasCompleteSentenceBoundaries(currentReadingDocument.bodyHtml || blocksToHtml(currentReadingDocument.blocks));
+  const readingReady = !!currentReadingDocument && (currentReadingDocument.sourceWorkflow || hasCompleteSentenceBoundaries(currentReadingDocument.bodyHtml || blocksToHtml(currentReadingDocument.blocks)));
   const rememberReadingPosition = () => {
     if (!window.matchMedia("(min-width: 761px)").matches) return;
     const anchor = Array.from(readerMain.current?.querySelectorAll(".article-body [data-sentence-id]") || [])
@@ -195,7 +203,7 @@ function Workspace({ user, onLoggedOut }) {
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
-    return () => { mounted.current = false; importRequest.current++; editRequest.current++; };
+    return () => { mounted.current = false; importRequest.current++; };
   }, []);
   currentView.current = {activeId, panel, editorSession};
 
@@ -207,8 +215,8 @@ function Workspace({ user, onLoggedOut }) {
       const current = ++sequence;
       controller?.abort(); controller = new AbortController();
       try {
-        const result = await api("/image-tasks?scope=active&limit=1", { signal:controller.signal });
-        if (!stopped && current === sequence) { setTaskCounts(result.counts || {}); setActiveTaskCount(result.activeCount || 0); }
+        const result = await api("/tasks?scope=active&limit=1", { signal:controller.signal });
+        if (!stopped && current === sequence) { setTaskCounts(result.counts || {}); setActiveTaskCount(result.counts?.active ?? result.activeCount ?? result.total ?? 0); }
       } catch { /* Task views display connection errors without interrupting reading. */ }
       finally { if (!stopped && current === sequence) timer = setTimeout(poll, 5000); }
     };
@@ -233,6 +241,7 @@ function Workspace({ user, onLoggedOut }) {
           api("/documents?all=1", {signal:controller.signal}),
         ])
           .then(([data, shelf, all, allDocuments, targets]) => {
+            if (controller.signal.aborted) return;
             setArticleTargets(targets.documents);
             setDocuments(data.documents);
             setLibraryDocuments(allDocuments?.documents || data.documents);
@@ -272,19 +281,22 @@ function Workspace({ user, onLoggedOut }) {
       return;
     }
     const controller = new AbortController();
+    const isBook = activeId.startsWith("book/");
     setDocument(null);
-    setBook(null);
+    setBook((current) => current && (isBook
+      ? current.id === activeId.slice(5)
+      : current.pages.some((page) => page.id === activeId)) ? current : null);
     setDetailLoading(true);
     setDetailFailed(false);
-    const isBook = activeId.startsWith("book/");
     api(isBook
       ? `/books/${encodeURIComponent(activeId.slice(5))}`
       : `/documents/${encodeURIComponent(activeId)}`, { signal: controller.signal })
       .then(async (result) => {
+        if (controller.signal.aborted) return;
         if (isBook) setBook(result);
         else {
-          if (controller.signal.aborted) return;
           setDocument(result);
+          setBook((current) => current?.id === result.bookId ? current : null);
           const parent = result.bookId
             ? await api(`/books/${encodeURIComponent(result.bookId)}`, { signal: controller.signal })
             : null;
@@ -352,7 +364,7 @@ function Workspace({ user, onLoggedOut }) {
   }, [notice]);
 
   useEffect(() => {
-    if (!document || activeId !== document.id || draft || saving || (panel && panel !== "chat")) return;
+    if (!document || document.sourceWorkflow || activeId !== document.id || draft || saving || (panel && panel !== "chat")) return;
     const html = document.bodyHtml || blocksToHtml(document.blocks);
     if (hasCompleteSentenceBoundaries(html)) return;
     const attempt = `${document.id}:${document.revision}:${detailRefresh}`;
@@ -374,46 +386,12 @@ function Workspace({ user, onLoggedOut }) {
     history.replaceState(null, "", `#${id}`);
     setDetailRefresh((n) => n + 1);
   };
-  const beginNew = (value) => {
-    if (!mayLeave()) return;
+  const beginEdit = () => {
+    if (!mayLeave() || !document?.id) return;
+    setCorrectionSourceIds([]);
+    setPanel("correction");
+    setDirty(false);
     setError("");
-    setPanel(null);
-    setSidebarOpen(false);
-    setDraft(
-      value || {
-        title: "",
-        kind: "lyrics",
-        orientation: "horizontal",
-        content: "",
-      },
-    );
-    setEditorSession((n) => n + 1);
-    setDirty(!!value);
-  };
-  const beginEdit = async () => {
-    if (!mayLeave()) return;
-    const id = document.id;
-    const request = ++editRequest.current;
-    const view = currentView.current;
-    const isCurrent = () => request === editRequest.current && currentView.current.activeId === view.activeId && currentView.current.panel === view.panel && currentView.current.editorSession === view.editorSession;
-    setError("");
-    try {
-      const attempt = `${document.id}:${document.revision}:${detailRefresh}`;
-      if (!hasCompleteSentenceBoundaries(document.bodyHtml || blocksToHtml(document.blocks)) && automaticSegmentationAttempt.current !== attempt) {
-        await segmentDocument(document, false);
-      } else {
-        // Initialization persists a new revision. Wait before opening a draft,
-        // but keep editing available when automatic initialization failed.
-        await pendingSegmentations.current.get(id)?.catch(() => {});
-      }
-      if (!isCurrent()) return;
-      // A submitted question can already have attached marks while its answer
-      // is still being generated. Start the draft from that saved revision.
-      const latest = await api(`/documents/${encodeURIComponent(id)}`);
-      if (!isCurrent()) return;
-      setPanel(null); setDocument(latest); setDraft({...latest});
-      setEditorSession((n) => n + 1); setDirty(false);
-    } catch (cause) { if (isCurrent()) setError(cause.message); }
   };
   const cancelEdit = () => {
     if (mayLeave()) {
@@ -427,9 +405,11 @@ function Workspace({ user, onLoggedOut }) {
     if (!mayLeave()) return;
     if (name === "chat" && panel !== "chat") rememberReadingPosition();
     importRequest.current++;
-    if (name === "image") {
+    if (name === "image" || name === "import") {
       setImportSession((current) => current + 1);
       setImportTask(null);
+      setImportText(false);
+      setImportDraftId(null);
     }
     setDraft(null);
     setPanel(name);
@@ -439,6 +419,27 @@ function Workspace({ user, onLoggedOut }) {
     setImportBookId(null);
     setPromotion(null);
     setAppendTargetId(null);
+  };
+  const openUnifiedImport = (text = false) => {
+    openPanel("import"); setImportText(text);
+  };
+  const resumeImportDraft = async (task) => {
+    const request=++importRequest.current,view=currentView.current.activeId;
+    const next=await api(`/imports/${encodeURIComponent(task.importId)}`);
+    if(!mounted.current || request!==importRequest.current || currentView.current.activeId!==view)return;
+    if (!mayLeave()) return;
+    openPanel("import");setImportDraftId(next.id);setImportBookId(next.context?.bookId || null);setAppendTargetId(next.context?.targetId || null);
+  };
+  const imported = (result) => {
+    setDirty(false); setRefresh((current) => current + 1);
+    setNotice("已保存原始资料，按阅读进度准备正文");
+    const id = result.firstDocumentId || result.documents?.[0]?.id || (result.bookId ? `book/${result.bookId}` : "");
+    setPanel(null);setDraft(null);setError("");setSidebarOpen(false);setActiveId(id);
+    history.replaceState(null,"",id ? `#${id}` : window.location.pathname);setDetailRefresh((current) => current + 1);
+  };
+  const editSources = (ids = []) => {
+    if (!mayLeave()) return;
+    setCorrectionSourceIds(ids);setPanel("correction");setDirty(false);
   };
   const closePanel = () => {
     if (!mayLeave()) return;
@@ -524,6 +525,15 @@ function Workspace({ user, onLoggedOut }) {
     if (!document?.id) return;
     const updated = await api(`/documents/${encodeURIComponent(document.id)}`);
     setDocument((current) => current?.id === updated.id ? updated : current);
+  };
+  const readingPageChanged = (page, snapshot) => {
+    if (!mounted.current || !snapshot || currentView.current.activeId !== document?.id) return;
+    const pages = snapshot.pages || (page ? [page] : []);
+    if (!snapshot.complete && !pages.some((item) => item.ready)) return;
+    const signature = JSON.stringify([snapshot.bodyHash, pages.map((item) => [item.id,item.ready,item.bodyHtml])]);
+    if (readingSummaryVersion.current?.documentId === document.id && readingSummaryVersion.current.signature === signature) return;
+    readingSummaryVersion.current = {documentId:document.id,signature};
+    setRefresh((value) => value + 1);
   };
   const segmentDocument = async (target, force = true) => {
     automaticSegmentationAttempt.current = `${target.id}:${target.revision}:${detailRefresh}`;
@@ -614,7 +624,10 @@ function Workspace({ user, onLoggedOut }) {
   };
   const remove = async (target) => {
     if (deletingArticle.current || saving || bookBusy || !target?.id) return false;
-    if (!window.confirm(`删除整篇文章《${target.title}》？正文和讨论将一起删除。`)) return false;
+    const view = currentView.current;
+    if (!await confirm({ title: "删除整篇文章", confirmLabel: "删除整篇文章",
+      description: `删除《${target.title}》？正文和讨论将一起删除，删除后无法撤销。` })) return false;
+    if (!mounted.current || currentView.current.activeId !== view.activeId || currentView.current.editorSession !== view.editorSession) return false;
     deletingArticle.current = true;
     setSaving(true);
     setError("");
@@ -648,12 +661,9 @@ function Workspace({ user, onLoggedOut }) {
   const beginBookPage = (imagePage) => {
     if (!book || !mayLeave()) return;
     if (imagePage) {
-      openPanel("image");
+      openUnifiedImport();
       setImportBookId(book.id);
-    } else beginNew({
-      title: `文章 ${book.pages.length + 1}`, kind: "book", orientation: "horizontal",
-      content: "", bookId: book.id,
-    });
+    } else { openUnifiedImport(true);setImportBookId(book.id); }
   };
   const createBook = async (title) => {
     const created = await api("/books", {
@@ -702,11 +712,15 @@ function Workspace({ user, onLoggedOut }) {
     } finally { setBookBusy(false); }
   };
   const deleteBook = async () => {
-    if (bookBusy || !window.confirm(`删除《${book.title}》及其中全部${book.pages.length}篇文章？删除后无法撤销。`)) return;
+    if (bookBusy || !book) return;
+    const target = book, viewId = activeId;
+    if (!await confirm({ title: "删除书籍", confirmLabel: "删除书籍",
+      description: `删除《${target.title}》及其中全部 ${target.pages.length} 篇文章？正文和讨论将一起删除，删除后无法撤销。` })) return;
+    if (!mounted.current || currentView.current.activeId !== viewId) return;
     setBookBusy(true);
     try {
-      await api(`/books/${encodeURIComponent(book.id)}`, {
-        method: "DELETE", body: JSON.stringify({ revision: book.revision }),
+      await api(`/books/${encodeURIComponent(target.id)}`, {
+        method: "DELETE", body: JSON.stringify({ revision: target.revision }),
       });
       setActiveId("");
       setBook(null);
@@ -719,6 +733,10 @@ function Workspace({ user, onLoggedOut }) {
       setDetailRefresh((n) => n + 1);
     } finally { setBookBusy(false); }
   };
+  const bookNavigation = book && book.pages.some((page) => page.id === activeId)
+    && (!currentReadingDocument || currentReadingDocument.bookId === book.id) ? <BookNavigation
+      book={book} currentPageId={activeId} onOpenBook={() => openBook(book.id)} onOpenPage={openDocument}
+      onAddImage={() => beginBookPage(true)} disabled={saving || bookBusy} /> : null;
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
@@ -767,16 +785,16 @@ function Workspace({ user, onLoggedOut }) {
           <button
             className="button primary sidebar-primary-action"
             disabled={saving}
-            onClick={() => openPanel("image")}
+            onClick={() => openUnifiedImport()}
           >
             <Icon name="plus" size={16} />
-            导入图片
+            导入资料
           </button>
           <div className="sidebar-secondary-actions">
             <button
               className="button secondary"
               disabled={saving}
-              onClick={() => beginNew()}
+              onClick={() => openUnifiedImport(true)}
             >
               导入文字
             </button>
@@ -788,14 +806,11 @@ function Workspace({ user, onLoggedOut }) {
               新建书籍
             </button>
           </div>
-          {activeTaskCount > 0 && <button className="button secondary sidebar-task-link" disabled={saving || bookBusy}
+          <button className="button secondary sidebar-task-link" disabled={saving || bookBusy}
             onClick={() => openDocument("tasks")}>
             <Icon name="menu" size={16} />任务与导入草稿
-            {!!(taskCounts.queued || taskCounts.running) &&
-              <span className="count">处理中 {(taskCounts.queued || 0) + (taskCounts.running || 0)}</span>}
-            {activeTaskCount > (taskCounts.queued || 0) + (taskCounts.running || 0) &&
-              <span className="count">待处理 {activeTaskCount - (taskCounts.queued || 0) - (taskCounts.running || 0)}</span>}
-          </button>}
+            {activeTaskCount > 0 && <span className="count">当前 {activeTaskCount}</span>}
+          </button>
         </div>
         <div className="shelf-heading">
           <span>
@@ -926,6 +941,13 @@ function Workspace({ user, onLoggedOut }) {
           <AISettings onClose={closePanel} />
         ) : panel === "roles" && user.isAdmin ? (
           <RoleSettings onClose={closePanel} />
+        ) : panel === "import" ? (
+          <UnifiedImport key={importSession} initialText={importText} initialBookId={importBookId} initialTargetId={appendTargetId} initialImportId={importDraftId}
+            onCancel={closePanel} onDirty={setDirty} onImported={imported} />
+        ) : panel === "correction" && document ? (
+          <SourceCorrection key={document.id} document={document} sourceIds={correctionSourceIds}
+            chatSession={chatSessionFor(document.id)} onDirty={setDirty} onDocumentChanged={refreshCurrentDocument}
+            onClose={() => { if (!mayLeave()) return;setPanel(null);setDirty(false);void refreshCurrentDocument(); }} />
         ) : panel === "image" ? (
           <ImageImport
             key={importSession}
@@ -958,30 +980,36 @@ function Workspace({ user, onLoggedOut }) {
           />
         ) : activeId === "tasks" ? (
           <TaskList onOpen={(task) => openDocument(`tasks/${typeof task === "string" ? task : task.id}`)}
-            onNew={() => openPanel("image")} onDocumentOpen={openDocument} />
+            onNew={() => openUnifiedImport()} onDocumentOpen={openDocument} />
         ) : activeId.startsWith("tasks/") ? (
           <TaskDetail key={activeId} taskId={activeId.slice(6)}
-            onOpenDraft={resumeTaskDraft} onReady={imageReady}
+            onOpenDraft={resumeTaskDraft} onImportOpen={resumeImportDraft} onReady={imageReady}
             onBack={() => openDocument("tasks")} onDocumentOpen={openDocument} />
-        ) : document ? (
+        ) : currentReadingDocument ? (
           <div className={`reader-workspace ${readingReady && panel === "chat" ? "has-chat" : ""}`}>
             <div className="reader-main-column" ref={readerMain}>
-              {currentReadingDocument && book ? (
-                <BookNavigation
-                  book={book}
-                  currentPageId={document.id}
-                  onOpenBook={() => openBook(book.id)}
-                  onOpenPage={openDocument}
-                  onAddImage={() => beginBookPage(true)}
-                  disabled={saving || bookBusy}
-                />
-              ) : currentReadingDocument?.bookId ? (
+              {bookNavigation || (currentReadingDocument?.bookId ? (
                 <div className="book-promotion">
                   <button className="text-button" onClick={() => openBook(document.bookId)}>打开所属书籍</button>
-                  <span>目录暂未加载，正文已保存，可重新打开书籍。</span>
+                  <span role="status">{detailLoading ? "正在加载目录…" : "目录暂未加载，正文已保存，可重新打开书籍。"}</span>
                 </div>
-              ) : null}
-              {readingReady ? <Reader
+              ) : null)}
+              {document.sourceWorkflow ? <PagedReader
+                key={document.id} document={document} active={!panel || panel === "chat"}
+                onPageChange={readingPageChanged}
+                onEditSources={editSources} onDelete={() => remove(document)}
+                onDiscuss={() => {setChatRequest(null);setPanel(panel === "chat" ? null : "chat");}}
+                onAsk={(request) => {if(answering)return;setChatRequest({...request,key:crypto.randomUUID()});setPanel("chat");}}
+                onGroup={(ids) => {setChatNavigation({key:crypto.randomUUID(),documentId:document.id,groupIds:ids});setPanel("chat");}}
+                answering={answering} chatOpen={panel === "chat"} showRuby={showRuby} setShowRuby={setShowRuby}
+                fontSize={fontSize} setFontSize={setFontSize}
+                onPromoteBook={!document.bookId ? () => {
+                  if (!mayLeave()) return;
+                  openPanel("newBook");
+                  setPromotion(document);
+                } : null}
+                onAppendImage={() => {openUnifiedImport();setAppendTargetId(document.id);setImportBookId(document.bookId || null);}}
+              /> : readingReady ? <Reader
                 document={document}
                 onEdit={beginEdit}
                 onDelete={() => remove(document)}
@@ -992,7 +1020,7 @@ function Workspace({ user, onLoggedOut }) {
                 onAsk={(request) => { if (answering) return; if (panel !== "chat") rememberReadingPosition(); setChatRequest({...request,key:crypto.randomUUID()}); setPanel("chat"); }}
                 answering={answering}
                 onGroup={(ids) => { if (panel !== "chat") rememberReadingPosition(); setChatNavigation({key:crypto.randomUUID(),documentId:document.id,groupIds:ids}); setChatRequest(null); setPanel("chat"); }}
-                onAppendImage={() => { openPanel("image"); setAppendTargetId(document.id); setImportBookId(document.bookId || null); }}
+                onAppendImage={() => { openUnifiedImport(); setAppendTargetId(document.id); setImportBookId(document.bookId || null); }}
                 onSegment={() => segmentDocument(document, true)}
                 segmentationBusy={segmentation.id === document.id && segmentation.busy}
                 segmentationError={segmentation.id === document.id ? segmentation.error : ""}
@@ -1047,7 +1075,8 @@ function Workspace({ user, onLoggedOut }) {
             onDelete={deleteBook}
             busy={bookBusy}
           />
-        ) : activeId ? (
+        ) : activeId ? (<>
+          {bookNavigation}
           <div className="loading-page">
             {detailLoading ? (
               "正在打开材料…"
@@ -1071,7 +1100,7 @@ function Workspace({ user, onLoggedOut }) {
               </>
             )}
           </div>
-        ) : (
+        </>) : (
           <Welcome
             onOpenBook={openBook}
             onOpenDocument={openDocument}
@@ -1090,6 +1119,7 @@ function Workspace({ user, onLoggedOut }) {
           {notice}
         </div>
       )}
+      {confirmationDialog}
     </div>
   );
 }

@@ -222,9 +222,9 @@ test("运行中禁止暂停和删除，只有出错暂停后才能人工处理�
   try { await page.getByRole("button", { name: "取消", exact: true }).click(); }
   finally { page.off("dialog", leaveEditor); }
   await expect(page.getByRole("region", { name: "任务状态", exact: true })).toBeVisible();
-  page.once("dialog", (dialog) => { expect(dialog.message()).toContain("删除任务"); return dialog.accept(); });
   await page.getByRole("button", { name: "删除任务", exact: true }).click();
-  await expect(page.getByRole("region", { name: "图片任务", exact: true })).toBeVisible();
+  await page.getByRole("dialog",{name:"删除任务",exact:true}).getByRole("button",{name:"删除任务",exact:true}).click();
+  await expect(page.getByRole("region", { name: "任务与导入草稿", exact: true })).toBeVisible();
   expect((await page.request.get(`/api/image-tasks/${id}`)).status()).toBe(404);
 });
 

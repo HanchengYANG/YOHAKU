@@ -30,7 +30,7 @@ async function fixture(page, suffix, withQuestion = true) {
     document = await (await page.request.get(`/api/documents/${document.id}`)).json();
   }
   await page.goto(`/#${document.id}`);
-  await page.getByRole("button", {name:"校对文字与注音",exact:true}).click();
+  await page.getByRole("button", {name:"校对正文",exact:true}).click();
   await expect(page.getByRole("textbox", {name:"日语正文",exact:true})).toBeVisible();
   return document;
 }
@@ -226,7 +226,7 @@ test("编辑器新增与删除问答后取消，阅读面立即同步已保存�
     await page.getByRole("button",{name:"取消",exact:true}).click();
     const article=page.getByRole("article",{name:"日语原文",exact:true});
     await expect(article.locator("mark[data-qa-group-ids]")).toHaveCount(1);
-    await page.getByRole("button",{name:"校对文字与注音",exact:true}).click();
+    await page.getByRole("button",{name:"校对正文",exact:true}).click();
     await input.evaluate(element=>{element.focus();element.setSelectionRange(0,0);});
     await input.press("Shift");
     await page.getByRole("button",{name:/查看此处记录/}).click();
@@ -275,7 +275,7 @@ test("图片按钮排序保持当前图文配对，首尾禁用并适配手机�
     document=await(await page.request.get(`/api/documents/${document.id}`)).json();
     const secondText=bodyText(sourceBodyHtml(document.bodyHtml,imageIds[1]));
     await page.goto(`/#${document.id}`);
-    await page.getByRole("button",{name:"校对文字与注音",exact:true}).click();
+    await page.getByRole("button",{name:"校对正文",exact:true}).click();
     const input=inputFor(page), sorter=page.locator(".source-image-sorter");
     const card=id=>sorter.locator(`[data-sort-image-id="${id}"]`);
     const moveBefore=sorter.getByRole("button",{name:"前移当前照片",exact:true});
@@ -382,7 +382,7 @@ test("删除图片与正文可撤销重做及取消，保护旋转并保留其�
     const imageMutations=[];
     page.on("request",request=>{if(request.method()!=="GET"&&/\/api\/images\/[^/]+(?:\/rotate)?$/.test(new URL(request.url()).pathname))imageMutations.push(request.method());});
     await page.goto(`/#${document.id}`);
-    await page.getByRole("button",{name:"校对文字与注音",exact:true}).click();
+    await page.getByRole("button",{name:"校对正文",exact:true}).click();
     const sorter=page.locator(".source-image-sorter"), input=inputFor(page);
     const card=id=>sorter.locator(`button[data-sort-image-id="${id}"]`);
     const removeImage=id=>sorter.locator(`[data-sort-item-id="${id}"]`).getByRole("button",{name:/^移除/});
@@ -444,7 +444,7 @@ test("删除图片与正文可撤销重做及取消，保护旋转并保留其�
     expect(await(await page.request.get(`/api/images/${imageIds[1]}`)).json()).toEqual(originalImage);
     expect(await(await page.request.get(`/api/images/${imageIds[1]}/raw`)).body()).toEqual(buffers[1]);
     expect(imageMutations).toEqual([]);
-    await page.getByRole("button",{name:"校对文字与注音",exact:true}).click();
+    await page.getByRole("button",{name:"校对正文",exact:true}).click();
     await card(imageIds[1]).click();await removeImage(imageIds[1]).click();
     await expect(card(imageIds[2])).toHaveAttribute("aria-pressed","true");
     await removeImage(imageIds[2]).click();
@@ -491,7 +491,7 @@ test("唯一图片可移除并撤销重做或取消，补正文保存后保持�
     const removeImage=()=>sorter.getByRole("button",{name:/^移除/});
     const undo=page.getByRole("button",{name:"撤销",exact:true}), redo=page.getByRole("button",{name:"重做",exact:true});
     const edit=async()=>{
-      await page.getByRole("button",{name:"校对文字与注音",exact:true}).click();
+      await page.getByRole("button",{name:"校对正文",exact:true}).click();
       await expect(removeImage()).toBeEnabled();
       await expect(removeImage()).toHaveAttribute("title","移除此图片及对应正文");
     };
@@ -536,7 +536,7 @@ test("唯一图片可移除并撤销重做或取消，补正文保存后保持�
     const history=await(await page.request.get(`/api/documents/${document.id}/conversations`)).json();
     expect(history.conversations.flatMap(item=>item.messages).length).toBe(records.conversations.flatMap(item=>item.messages).length);
     expect(history.conversations.flatMap(item=>item.groups).every(group=>group.orphaned)).toBe(true);
-    await page.getByRole("button",{name:"校对文字与注音",exact:true}).click();
+    await page.getByRole("button",{name:"校对正文",exact:true}).click();
     await expect(sorter).toHaveCount(0);
     await expect(input).toHaveValue(replacement);
     await expect(page.getByRole("img",{name:"用于校对正文和注音的日语原图",exact:true})).toHaveCount(0);
@@ -553,7 +553,7 @@ test("校对页删空唯一图片及标题后可直接删除整篇文章，取�
   });
   try {
     await page.goto(`/#${original.id}`);
-    await page.getByRole("button",{name:"校对文字与注音",exact:true}).click();
+    await page.getByRole("button",{name:"校对正文",exact:true}).click();
     const editor=page.locator(".editor-page"), input=inputFor(page);
     await editor.locator(".source-image-sorter").getByRole("button",{name:/^移除/}).click();
     await expect(input).toHaveValue("");
@@ -562,8 +562,10 @@ test("校对页删空唯一图片及标题后可直接删除整篇文章，取�
     const deleteArticle=editor.getByRole("button",{name:"删除整篇文章",exact:true});
     await expect(deleteArticle).toBeEnabled();
     await expect(editor).toContainText(/正文已清空.*删除整篇文章/);
-    page.once("dialog",dialog=>{expect(dialog.message()).toContain(original.title);return dialog.dismiss();});
     await deleteArticle.click();
+    const confirmation=page.getByRole("dialog",{name:"删除整篇文章",exact:true});
+    await expect(confirmation).toContainText(original.title);
+    await confirmation.getByRole("button",{name:"取消",exact:true}).click();
     expect(deletes).toEqual([]);
     await expect(editor).toBeVisible();
     await expect(input).toHaveValue("");
@@ -571,8 +573,8 @@ test("校对页删空唯一图片及标题后可直接删除整篇文章，取�
     expect(retained.bodyHtml).toBe(original.bodyHtml);
     expect(retained.sourceImages.map(image=>image.id)).toEqual(created.imageIds);
     const deleted=page.waitForResponse(response=>response.request().method()==="DELETE"&&new URL(response.url()).pathname===`/api/documents/${original.id}`);
-    page.once("dialog",dialog=>dialog.accept());
     await deleteArticle.click();
+    await confirmation.getByRole("button",{name:"删除整篇文章",exact:true}).click();
     expect((await deleted).status()).toBe(204);
     await expect(editor).toHaveCount(0);
     await expect(page.getByRole("region",{name:"阅读首页",exact:true})).toBeVisible();
@@ -596,8 +598,8 @@ test("校对页删除遇到其他设备的新版本时只请求一次并保留�
     expect(updated.ok()).toBe(true);
     const other=await updated.json();
     const failed=page.waitForResponse(response=>response.request().method()==="DELETE"&&new URL(response.url()).pathname===`/api/documents/${original.id}`);
-    page.once("dialog",dialog=>dialog.accept());
     await page.getByRole("button",{name:"删除整篇文章",exact:true}).click();
+    await page.getByRole("dialog",{name:"删除整篇文章",exact:true}).getByRole("button",{name:"删除整篇文章",exact:true}).click();
     expect((await failed).status()).toBe(409);
     await expect(page.getByRole("alert")).toContainText("其他页面修改");
     await expect(page.locator(".editor-page")).toBeVisible();
@@ -642,8 +644,8 @@ test("追加任务的校对页能删除目标整篇文章并返回书籍，其�
     const deleteArticle=page.getByRole("button",{name:"删除整篇文章",exact:true});
     await expect(deleteArticle).toBeEnabled();
     const deleted=page.waitForResponse(result=>result.request().method()==="DELETE"&&new URL(result.url()).pathname===`/api/documents/${articles[0].id}`);
-    page.once("dialog",dialog=>dialog.accept());
     await deleteArticle.click();
+    await page.getByRole("dialog",{name:"删除整篇文章",exact:true}).getByRole("button",{name:"删除整篇文章",exact:true}).click();
     expect((await deleted).status()).toBe(204);
     await expect(page.locator(".editor-page")).toHaveCount(0);
     await expect(page).toHaveURL(new RegExp(`#book/${book.id}$`));

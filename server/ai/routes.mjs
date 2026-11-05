@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { mkdir, rename } from "node:fs/promises";
 import { randomUUID, createHash } from "node:crypto";
+import { setTimeout as wait } from "node:timers/promises";
 import multer from "multer";
 import { PROVIDERS, createProviderConnection } from "../providers/index.mjs";
 import { createImageStore } from "./images.mjs";
@@ -9,9 +10,13 @@ import { createOperationQueue } from "./operation-queue.mjs";
 import { respondToChat } from "./chat-stream.mjs";
 import { createRoleConfiguration } from "./roles.mjs";
 import { prepareBodyAnnotation, applyBodyAnnotation } from "./annotation.mjs";
+import { createSourceProcessor } from "./source-processing.mjs";
 import { ROLE_IDS, normalizeReasoning, reasoningKey } from "../../shared/ai-roles.mjs";
 import { createMangaOcr } from "../ocr/manga.mjs";
 import { createNdlOcr } from "../ocr/ndl.mjs";
+import { createLocalRuby } from "../ocr/ruby.mjs";
+import { createHybridAnnotation } from "./hybrid-annotation.mjs";
+import { diagnosticForError } from "./diagnostics.mjs";
 import {
   CORRECTION_SCHEMA,
   expandOcrCorrection,
@@ -49,12 +54,22 @@ export function attachAIRoutes({
   services,
   mangaOcr = createMangaOcr(),
   ndlOcr = createNdlOcr(),
+  localRuby = createLocalRuby(),
+  httpConcurrency = Number(process.env.AI_HTTP_CONCURRENCY) || 4,
+  cliConcurrency = Number(process.env.OPENAI_CLI_WORKERS) || 2,
+  executionTimeoutMs = Number(process.env.AI_EXECUTION_TIMEOUT_MS) || 180000,
+  sourceRateLimitRetries = Number(process.env.AI_RATE_LIMIT_RETRIES ?? 2),
+  sourceRetryDelayMs = Number(process.env.AI_RATE_LIMIT_BACKOFF_MS ?? 1000),
 } = {}) {
   const connections = new Map(),
     pendingLogins = new Map(),
-    operations = new Set(), queues = new Map(), imageMutations = new Map(), answeringDocuments = new Set();
+    queues = new Map(), imageMutations = new Map(), imageAnnotations = new Map(), answeringDocuments = new Set();
+  const managementProviders = new Set();
+  const stopping = new AbortController(), sourceOperations = new Set();
+  const rateLimitRetries = Math.min(10, Math.max(0, Math.floor(Number.isFinite(sourceRateLimitRetries) ? sourceRateLimitRetries : 2)));
+  const retryDelayMs = Math.min(30000, Math.max(0, Number.isFinite(sourceRetryDelayMs) ? sourceRetryDelayMs : 1000));
   let managementEpoch = 0, activeManagement = 0;
-  let closed = false, imageMutationGuard = () => {}, imageAnnotationGuard = () => {};
+  let closed = false, imageMutationGuard = () => {}, imageAnnotationGuard = () => {}, sourceScopeValidator = () => ({}), sourceMarksWriter = () => {}, managedDocument = () => false;
   function assertOpen(signal) {
     if (closed) throw Object.assign(fail(503, "AI 服务正在停止，请稍后重试。"), { code: "AI_STOPPED" });
     signal?.throwIfAborted();
@@ -138,6 +153,7 @@ export function attachAIRoutes({
               providerId,
               storageDir: join(storageDir, "users", ownerId, "providers"),
               callbackUri,
+              openAIOptions: { runtimeOptions: { size: cliConcurrency } },
             }),
       );
     }
@@ -145,55 +161,106 @@ export function attachAIRoutes({
   }
   async function withProvider(userId, providerId, work, options = {}) {
     assertOpen(options.signal);
-    const key = `${siteOwner()}:${providerId}`;
-    if (!queues.has(key)) queues.set(key, createOperationQueue());
-    if (options.wait === false && (operations.has(key) || connection(userId, providerId).runtime.status().busy))
+    if (options.wait !== false && managementProviders.has(providerId))
+      throw Object.assign(fail(409, "AI 配置正在更新，请稍后重试。"), {code:"AI_BUSY"});
+    const ownerKey = `${siteOwner()}:${providerId}`;
+    const transport = providerId === 'openai' && options.transport !== 'http' ? 'cli' : 'http';
+    const key = `${ownerKey}:${transport}`;
+    if (!queues.has(key)) {
+      const queue=createOperationQueue({concurrency: transport === 'cli' ? cliConcurrency : httpConcurrency,
+        maxPerGroup: transport === 'cli' ? 1 : 2, timeoutMs: executionTimeoutMs});
+      queues.set(key,queue);
+      if(transport==='cli')connection(userId,providerId).runtime.onCLIAvailable?.(()=>queue.refresh());
+    }
+    if (options.wait === false && ([...queues].some(([name,queue]) => name.startsWith(`${ownerKey}:`) && (queue.status().active || queue.status().waiting)) || connection(userId, providerId).runtime.status().busy))
       throw Object.assign(fail(409, "AI 正在处理请求，请完成后重试。"), { code: "AI_BUSY" });
-    return queues.get(key).run(async () => {
-      assertOpen(options.signal);
+    const runtime=transport==='cli'&&options.wait!==false ? connection(userId,providerId).runtime : null;
+    let lease;
+    const resource=runtime?.reserveCLI ? {
+      canStart:()=>runtime.cliAvailable({threadId:options.threadId}),
+      acquire:()=>{lease=runtime.reserveCLI({threadId:options.threadId});return lease?()=>lease.release():false;},
+    } : {};
+    return queues.get(key).run(async ({signal}) => {
+      assertOpen(signal);
       const provider = connection(userId, providerId);
-      if (provider.runtime.status().busy)
-        throw Object.assign(fail(409, "AI 正在处理请求，请完成后重试。"), { code: "AI_BUSY" });
-      operations.add(key);
-      try { return await work(provider); }
+      const selected=lease?{...provider,runtime:{...provider.runtime,run:input=>lease.run(input)}}:provider;
+      try { return await work(selected, signal); }
       catch (error) {
         if ([401, 403].includes(error.status)) error.code = "AI_AUTH_REQUIRED";
         throw error;
-      } finally { operations.delete(key); }
-    }, options);
+      }
+    }, {...options,...resource});
   }
   const roleConfiguration = createRoleConfiguration({ database, ownerId: siteOwner, connection, preferred, managementRevision: () => activeManagement ? null : managementEpoch });
   const execution = (route, result) => ({ role: route.role, providerId: route.providerId,
     model: result?.model || route.model || null, configurationVersion: route.configurationVersion,
-    ...(route.reasoning ? { reasoning: route.reasoning } : {}) });
+    ...(route.timing?.() || {}),
+    ...(route.reasoning ? { reasoning: route.reasoning } : {}),
+    ...(route.annotationMode ? { annotationMode: route.annotationMode } : {}) });
   // A queued step resolves again when its provider slot opens. If its provider
   // changed while waiting, release that slot and join the new provider queue.
   async function withRole(userId, role, work, options = {}) {
-    while (true) {
+    const queuedAt = new Date().toISOString();
+    let startedAt, queueMs = 0, elapsedMs = 0, phase = "queued", phaseAt = performance.now(), latestRoute = { role };
+    const transition = (next) => {
+      const now = performance.now(), duration = now - phaseAt;
+      if (phase === "queued") queueMs += duration;
+      if (phase === "running") elapsedMs += duration;
+      phase = next; phaseAt = now;
+    };
+    const timing = () => ({ queuedAt, ...(startedAt ? { startedAt } : {}),
+      queueMs: Math.round(queueMs + (phase === "queued" ? performance.now() - phaseAt : 0)),
+      elapsedMs: Math.round(elapsedMs + (phase === "running" ? performance.now() - phaseAt : 0)) });
+    const notify = (state, route) => {
+      try { Promise.resolve(options.onStatus?.({ state, ...execution(route), ...timing() })).catch(() => {}); } catch {}
+    };
+    try { while (true) {
       const candidate = roleConfiguration.current();
       const providerId = candidate?.roles[role].providerId || preferred();
-      const result = await withProvider(userId, providerId, async (provider) => {
+      latestRoute = { ...candidate?.roles[role], providerId, role, configurationVersion: candidate?.version || 0 };
+      notify("queued", latestRoute);
+      const result = await withProvider(userId, providerId, async (provider, signal) => {
         const configuration = roleConfiguration.current();
         const selected = configuration?.roles[role] || { providerId: preferred() };
         if (selected.providerId !== providerId) return { redirected: true };
-        const route = { ...selected, role, configurationVersion: configuration?.version || 0,
+        const route = { ...selected, signal, role, configurationVersion: configuration?.version || 0,
           referenceImage: role === "annotation" && (configuration ? configuration.annotationReferenceImage : true) };
-        if (configuration) {
-          const ready = await roleConfiguration.readiness(role, selected, route.referenceImage);
-          if (!ready.ready) throw Object.assign(fail(503, `${{ocr:"OCR",annotation:"注音",segmentation:"分句",chat:"问答"}[role]}角色不可用：${ready.message}`),
-            { code: ready.credentialsReady ? "AI_ROLE_NOT_READY" : "AI_AUTH_REQUIRED" });
+        if (options.onStatus) {
+          startedAt = new Date().toISOString(); transition("running");
+          route.timing = timing;
+          latestRoute = route;
+          notify("running", route);
         }
-        if ((roleConfiguration.current()?.version || 0) !== route.configurationVersion) return { redirected: true };
-        try { return { value: await work(provider, route) }; }
+        try {
+          if (configuration) {
+            const ready = await roleConfiguration.readiness(role, selected, route.referenceImage);
+            if (!ready.ready) throw Object.assign(fail(503, `${{ocr:"OCR",correction:"正文校正",annotation:"注音",segmentation:"分句",chat:"问答"}[role]}角色不可用：${ready.message}`),
+              { code: ready.credentialsReady ? "AI_ROLE_NOT_READY" : "AI_AUTH_REQUIRED" });
+          }
+          if ((roleConfiguration.current()?.version || 0) !== route.configurationVersion) return { redirected: true };
+          assertOpen(signal);
+          const value = await work(provider, route);
+          assertOpen(signal);
+          return { value };
+        }
         catch (error) { error.execution = execution(route); throw error; }
       }, options);
-      if (!result.redirected) return result.value;
+      if (!result.redirected) { transition("idle"); return result.value; }
+      transition("queued"); startedAt = undefined;
+    } } catch (error) {
+      if (options.onStatus) {
+        transition("idle");
+        error.execution = { ...execution(latestRoute), ...error.execution, ...timing() };
+      }
+      throw error;
     }
   }
   const withManagementProvider = async (userId, providerId, work) => {
+    if (managementProviders.has(providerId)) throw Object.assign(fail(409, "AI 配置正在更新，请稍后重试。"), {code:"AI_BUSY"});
+    managementProviders.add(providerId);
     managementEpoch++; activeManagement++;
     try { return await withProvider(userId, providerId, work, { wait: false }); }
-    finally { managementEpoch++; activeManagement--; }
+    finally { managementEpoch++; activeManagement--; managementProviders.delete(providerId); }
   };
   function forgetPending(userId, providerId) {
     for (const [state, attempt] of pendingLogins) {
@@ -255,7 +322,7 @@ export function attachAIRoutes({
       ready: Object.values(roleStates).every((role) => role.ready),
       requiresLogin: !Object.values(roleStates).some((role) => role.credentialsReady),
       lastError: Object.entries(roleStates).filter(([, state]) => !state.ready)
-        .map(([role, state]) => `${{ocr:"OCR",annotation:"注音",segmentation:"分句",chat:"问答"}[role]}：${state.message}`).join("；") || null,
+        .map(([role, state]) => `${{ocr:"OCR",correction:"正文校正",annotation:"注音",segmentation:"分句",chat:"问答"}[role]}：${state.message}`).join("；") || null,
     } : null;
     if (!canManageAI) return {
       ...roleStatus,
@@ -624,7 +691,7 @@ export function attachAIRoutes({
     }));
   });
   async function recognizeImage(userId, id, {
-    engine = "llm", priority = "interactive", persist = true, expectedRevision, signal,
+    engine = "llm", priority = "interactive", persist = true, expectedRevision, signal, onStatus,
   } = {}) {
     assertOpen(signal);
     if (!["llm", "manga", "ndl"].includes(engine))
@@ -633,25 +700,26 @@ export function attachAIRoutes({
     assertOpen(signal);
     if (expectedRevision !== undefined && expectedRevision !== image.revision)
       throw fail(409, "图片方向已变化，请重新打开任务后再识别。");
-    return withRole(
+    return withSourceRole(
       userId,
       "ocr",
+      { priority, signal, onStatus },
       async (provider, route) => {
         const { accountId, expectedSubject } = await identity(provider, route);
         const started = performance.now();
         let localResult;
         let pixels;
         if (engine !== "llm") {
-          localResult = await (engine === "ndl" ? ndlOcr : mangaOcr).recognize(image.path);
+          localResult = await (engine === "ndl" ? ndlOcr : mangaOcr).recognize(image.path,{signal:route.signal});
         } else {
           pixels = await images.read(image.id, {
             normalizeOrientation: true,
             revision: image.revision,
           });
         }
-        assertOpen(signal);
+        assertOpen(route.signal);
         const llmStarted = performance.now();
-        const result = await provider.runtime.run({ model: route.model, reasoning: route.reasoning, signal,
+        const result = await provider.runtime.run({ model: route.model, reasoning: route.reasoning, signal: route.signal,
           prompt: localResult ? buildOcrCorrectionPrompt(localResult) : OCR_TRANSCRIPTION_PROMPT,
           ...(!route.configurationVersion ? { reasoningEffort: OCR_REASONING_EFFORT } : {}),
           ...(pixels ? { image: `data:${image.mimeType};base64,${pixels.toString("base64")}` } : {}),
@@ -659,10 +727,10 @@ export function attachAIRoutes({
           expectedAccountId: accountId,
           expectedSubject,
         });
-        assertOpen(signal);
+        assertOpen(route.signal);
         const llmMs = Math.round(performance.now() - llmStarted);
         if (result.completed !== true)
-          throw fail(502, "AI 识别未完成，未保存部分输出。");
+          throw Object.assign(fail(502, "AI 识别未完成，未保存部分输出。"), { diagnostic: { code: 'AI_INCOMPLETE_OUTPUT', category: 'incomplete_output' } });
         if ((await getImage(userId, image.id)).revision !== image.revision)
           throw fail(409, "识别期间原图方向已变化，请按当前方向重新识别。");
         let draft;
@@ -676,8 +744,10 @@ export function attachAIRoutes({
             for (const warning of localResult.warnings || [])
               draft.warnings.push({ blockIndex: null, message: warning });
           }
-        } catch {
-          throw fail(502, "AI 返回的识别草稿格式不完整，请重试；原图仍保留。");
+        } catch (cause) {
+          const diagnostic = diagnosticForError(cause);
+          throw Object.assign(fail(502, "AI 返回的识别草稿格式不完整，请重试；原图仍保留。"),
+            { diagnostic: diagnostic.category === 'unknown' ? { code: 'AI_INVALID_RESPONSE', category: 'invalid_response' } : diagnostic });
         }
         draft = {
           ...draft,
@@ -704,7 +774,7 @@ export function attachAIRoutes({
           reasoningEffort: result.reasoningEffort ?? null,
           providerId: provider.id, role: "ocr", execution: execution(route, result),
         };
-        assertOpen(signal);
+        assertOpen(route.signal);
         if (persist) database
           .prepare(
             "INSERT INTO image_drafts(image_id,draft_json,user_id) VALUES(?,?,?) ON CONFLICT(image_id) DO UPDATE SET draft_json=excluded.draft_json,user_id=excluded.user_id",
@@ -712,23 +782,27 @@ export function attachAIRoutes({
           .run(image.id, JSON.stringify(draft), userId);
         return draft;
       },
-      { priority, signal },
     );
   }
   async function annotateImage(userId, id, {
     content, manualReadings = [], priority = "interactive", persist = true,
-    draft: suppliedDraft, expectedRevision, signal, validate = () => {},
+    draft: suppliedDraft, expectedRevision, signal, onStatus, validate = () => {},
   } = {}) {
     assertOpen(signal);
     const checkAllowed = () => {
       if (priority !== "background") { validate(); imageAnnotationGuard({ userId, imageId: id }); }
     };
     checkAllowed();
+    const annotationActivity={state:'queued'};
+    if(!imageAnnotations.has(id))imageAnnotations.set(id,new Set());
+    imageAnnotations.get(id).add(annotationActivity);
+    try {
     const image = await getImage(userId, id);
     assertOpen(signal);
     if (expectedRevision !== undefined && expectedRevision !== image.revision)
       throw fail(409, "图片方向已变化，请重新打开任务后再注音。");
-    return withRole(userId, "annotation", async (provider, route) => {
+    return await withRole(userId, "annotation", async (provider, route) => {
+      annotationActivity.state='running';
       checkAllowed();
       const { accountId, expectedSubject } = await identity(provider, route);
       const row = database.prepare("SELECT draft_json FROM image_drafts WHERE image_id=? AND user_id=?")
@@ -775,16 +849,16 @@ export function attachAIRoutes({
           normalizeOrientation: true,
           revision: image.revision,
         }) : null;
-        assertOpen(signal);
+        assertOpen(route.signal);
         checkAllowed();
         result = await provider.runtime.run({
           prompt: buildOcrAnnotationPrompt(blocks, { referenceImage: !!pixels }), schema: ANNOTATION_SCHEMA,
           ...(pixels ? { image: `data:${image.mimeType};base64,${pixels.toString("base64")}` } : {}),
-          model: route.model, reasoning: route.reasoning, signal,
+          model: route.model, reasoning: route.reasoning, signal: route.signal,
           ...(!route.configurationVersion ? { reasoningEffort: OCR_REASONING_EFFORT } : {}),
           expectedAccountId: accountId, expectedSubject,
         });
-        assertOpen(signal);
+        assertOpen(route.signal);
         if (result.completed !== true) throw fail(502, "注音未完成，正文和已有读音保持原样。");
         if ((await getImage(userId, image.id)).revision !== image.revision)
           throw fail(409, "注音期间原图方向已变化，请按当前图片重试；正文和已有读音保持原样。");
@@ -805,7 +879,7 @@ export function attachAIRoutes({
       const annotated = { ...draft, annotation,
         processing: { ...draft.processing, annotationMs: elapsedMs },
       };
-      assertOpen(signal);
+      assertOpen(route.signal);
       checkAllowed();
       if (persist) {
         const changed = database.prepare("UPDATE image_drafts SET draft_json=? WHERE image_id=? AND user_id=? AND draft_json=?")
@@ -816,7 +890,11 @@ export function attachAIRoutes({
         annotationElapsedMs: elapsedMs, annotationModel: annotation.model,
         annotationReasoningEffort: annotation.reasoningEffort,
       };
-    }, { priority, signal });
+    }, { priority, signal, onStatus });
+    } finally {
+      const active=imageAnnotations.get(id);active.delete(annotationActivity);
+      if(!active.size)imageAnnotations.delete(id);
+    }
   }
   app.post("/api/ai/annotate", async (req, res) => {
     if (typeof req.body?.bodyHtml !== "string" || req.body.bodyHtml.length > 1500000) throw fail(400, "请提供有效的待注音正文。");
@@ -832,7 +910,7 @@ export function attachAIRoutes({
       if (prepared.targetCount) {
         const { accountId, expectedSubject } = await identity(provider, route);
         const pixels = referenceImage ? await images.read(sourceImage.id, { normalizeOrientation: true, revision: sourceImage.revision }) : null;
-        result = await provider.runtime.run({ model: route.model, reasoning: route.reasoning, signal: req.aiSignal,
+        result = await provider.runtime.run({ model: route.model, reasoning: route.reasoning, signal: route.signal,
           prompt: prepared.prompt, schema: ANNOTATION_SCHEMA,
           ...(pixels ? { image: `data:${sourceImage.mimeType};base64,${pixels.toString("base64")}` } : {}),
           expectedAccountId: accountId, expectedSubject });
@@ -873,13 +951,16 @@ export function attachAIRoutes({
   }
   function selectionInput(row, selection) {
     const html = rowHtml(row), text = bodyText(html), hash = bodyHash(html);
+    const scope = selection && typeof selection === "object" ? sourceScopeValidator(row.owner_id, row.id, selection) : {};
+    if (scope.scopeValidated) selection = { ...selection, start: scope.start ?? selection.start, end: scope.end ?? selection.end };
     if (!selection || typeof selection !== "object" || !Number.isSafeInteger(selection.start) || !Number.isSafeInteger(selection.end) || selection.start < 0 || selection.start >= selection.end || selection.end > text.length || selection.end - selection.start > 6000) throw fail(400, "请在正文中选择要提问的文字，最多 6000 字。");
-    if (selection.bodyHash !== hash || selection.text !== text.slice(selection.start, selection.end)) throw fail(409, "正文或选区已变化，请重新选择文字。");
+    if ((!scope.scopeValidated && selection.bodyHash !== hash) || selection.text !== text.slice(selection.start, selection.end)) throw fail(409, "正文或选区已变化，请重新选择文字。");
     const sentences = bodyRanges(html).sentences.filter((item) => item.end > selection.start && item.start < selection.end);
-    if (!sentences.length || !Array.isArray(selection.sentenceIds) || JSON.stringify(selection.sentenceIds) !== JSON.stringify(sentences.map((item) => item.id))) throw fail(409, "句子结构已变化，请先初始化分句后重新选择。");
+    if (!sentences.length || (!scope.scopeValidated && (!Array.isArray(selection.sentenceIds) || JSON.stringify(selection.sentenceIds) !== JSON.stringify(sentences.map((item) => item.id))))) throw fail(409, "句子结构已变化，请先初始化分句后重新选择。");
     // Every non-newline selected character must belong to an explicit sentence.
     for (let at = selection.start; at < selection.end; at++) if (text[at] !== "\n" && !sentences.some((item) => item.start <= at && item.end > at)) throw fail(409, "选区含有尚未分句的正文，请先完成分句。");
-    return { start: selection.start, end: selection.end, text: selection.text, bodyHash: hash, sentenceIds: sentences.map((item) => item.id), sentences: sentences.map(({ id, text, start, end }) => ({ id, text, start, end })) };
+    const { scopeValidated, ...reference } = scope;
+    return { start: selection.start, end: selection.end, text: selection.text, bodyHash: hash, sentenceIds: sentences.map((item) => item.id), sentences: sentences.map(({ id, text, start, end }) => ({ id, text, start, end })), ...reference };
   }
   function canonicalConversation(row, userId) {
     const records = database.prepare("SELECT * FROM conversations WHERE document_id=? AND user_id=? ORDER BY created_at,id").all(row.id, userId);
@@ -912,7 +993,7 @@ export function attachAIRoutes({
     const row = getDocument(req.user.id, req.params.id), record = canonicalConversation(row, req.user.id);
     res.json({ conversations: record ? [presentConversation(record)] : [] });
   });
-  async function segmentHtml(userId, { bodyHtml, force = false, priority = "background", signal } = {}) {
+  async function segmentHtml(userId, { bodyHtml, force = false, priority = "background", signal, onStatus } = {}) {
     assertOpen(signal);
     const html = normalizeBodyHtml(bodyHtml), text = bodyText(html), hash = bodyHash(html), ranges = bodyRanges(html);
     if (text.length > 200000 || !text.trim()) throw fail(400, "正文长度无效。");
@@ -929,9 +1010,9 @@ export function attachAIRoutes({
       const { accountId, expectedSubject } = await identity(provider, route);
       const split = async (part) => {
         if (!part.trim()) return [part];
-        const result = await provider.runtime.run({ model: route.model, reasoning: route.reasoning, signal, prompt: sentencePrompt(part), schema: SENTENCE_SCHEMA,
+        const result = await provider.runtime.run({ model: route.model, reasoning: route.reasoning, signal: route.signal, prompt: sentencePrompt(part), schema: SENTENCE_SCHEMA,
           expectedAccountId: accountId, expectedSubject, webSearch: false });
-        assertOpen(signal);
+        assertOpen(route.signal);
         usedExecution = execution(route, result);
         if (result.completed !== true) throw fail(502, "分句未完成，现有正文已保留。");
         try { return validateSentences(JSON.parse(result.text), part); }
@@ -946,15 +1027,16 @@ export function attachAIRoutes({
         }
         if (offset < text.length) fragments.push(...await split(text.slice(offset)));
       }
-      assertOpen(signal);
+      assertOpen(route.signal);
       database.prepare("INSERT INTO sentence_cache VALUES(?,?) ON CONFLICT(body_hash) DO UPDATE SET fragments_json=excluded.fragments_json").run(hash, JSON.stringify(fragments));
-    }, { priority, signal });
+    }, { priority, signal, onStatus });
     assertOpen(signal);
     const next = force ? applySentenceBoundaries(html, fragments) : initializeSentenceBoundaries(html, fragments);
     if (bodyText(next) !== text || !hasCompleteSentenceBoundaries(next)) throw fail(502, "分句尚未覆盖全部正文，请重试。");
     return { bodyHtml: next, bodyHash: hash, sentences: bodyRanges(next).sentences, execution: usedExecution };
   }
   app.post("/api/documents/:id/sentences", async (req, res) => {
+    if (managedDocument(req.user.id, req.params.id)) throw fail(409, "请按阅读页或来源准备分句，来源正文将在当前范围内更新。");
     const row = getDocument(req.user.id, req.params.id), supplied = typeof req.body?.bodyHtml === "string", html = supplied ? normalizeBodyHtml(req.body.bodyHtml) : rowHtml(row), hash = bodyHash(html);
     if (req.body?.revision !== row.revision || req.body?.bodyHash !== hash) throw fail(409, "正文版本已变化，请重试分句。");
     if (bodyText(html).length > 200000 || !bodyText(html).trim()) throw fail(400, "正文长度无效。");
@@ -1006,8 +1088,8 @@ export function attachAIRoutes({
       await emit?.({type:"start",conversation:presentConversation(record),groupId:group.id,question:input.question,operation:input.operation});
       await emit?.({type:"status",phase:"preparing"});
       const result = await provider.runtime.run({ model: route.model, reasoning: route.reasoning, prompt: promptFor(row, selection, input.question, activeRecord), threadId: activeRecord.thread_id, webSearch: true, ...expected,
-        ...(emit ? {onEvent:emit,signal:req.aiSignal} : {}) });
-      assertOpen(req.aiSignal);
+        signal:route.signal, ...(emit ? {onEvent:emit} : {}) });
+      assertOpen(route.signal);
       if (result.completed !== true) throw fail(502, "AI 回答未完成，未把部分输出存成答案。");
       const current = database.prepare("SELECT * FROM conversations WHERE id=? AND user_id=?").get(record.id, req.user.id);
       if (!current || !database.prepare("SELECT id FROM qa_groups WHERE id=? AND conversation_id=? AND user_id=?").get(group.id, record.id, req.user.id)) throw fail(409, "对话已删除，本次迟到结果未恢复对话。");
@@ -1038,6 +1120,7 @@ export function attachAIRoutes({
         database.prepare("INSERT INTO qa_groups VALUES(?,?,?,?,?,?)").run(groupId, req.user.id, row.id, id, JSON.stringify(selection), now);
         const html = markBodyRange(rowHtml(row), selection.start, selection.end, groupId);
         database.prepare("UPDATE documents SET body_html=?,body_hash=?,revision=revision+1,updated_at=? WHERE id=? AND owner_id=?").run(html, selection.bodyHash, now, row.id, req.user.id);
+        sourceMarksWriter(req.user.id, row.id, html);
         database.exec("COMMIT");
       } catch (error) { database.exec("ROLLBACK"); throw error; }
       row = getDocument(req.user.id, row.id);
@@ -1045,7 +1128,7 @@ export function attachAIRoutes({
       const group = database.prepare("SELECT * FROM qa_groups WHERE id=?").get(groupId);
       const conversation = await answer(req, row, record, group, input, provider, { expectedAccountId: accountId, expectedSubject },emit, route);
       return {status:created ? 201 : 200,conversation};
-    }, { signal: req.aiSignal })));
+    }, { signal: req.aiSignal, priority: "foreground", transport:"http", groupKey:JSON.stringify([req.user.id,documentId]) })));
   });
   app.post("/api/conversations/:id/messages", async (req, res) => {
     const existing = database.prepare("SELECT document_id FROM conversations WHERE id=? AND user_id=?").get(req.params.id, req.user.id);
@@ -1058,7 +1141,7 @@ export function attachAIRoutes({
       const { accountId, expectedSubject } = await identity(provider, route), input = questionInput({ ...req.body, operation: req.body?.operation || "followup" });
       const conversation = await answer(req, getDocument(req.user.id, record.document_id), record, group, input, provider, { expectedAccountId: accountId, expectedSubject },emit, route);
       return {status:200,conversation};
-    }, { signal: req.aiSignal })));
+    }, { signal: req.aiSignal, priority: "foreground", transport:"http", groupKey:JSON.stringify([req.user.id,existing.document_id]) })));
   });
   app.delete("/api/conversations/:id", (req, res) => {
     const record = database.prepare("SELECT * FROM conversations WHERE id=? AND user_id=?").get(req.params.id, req.user.id);
@@ -1068,28 +1151,164 @@ export function attachAIRoutes({
     database.exec("BEGIN IMMEDIATE");
     try {
       database.prepare("UPDATE documents SET body_html=?,revision=revision+1,updated_at=? WHERE id=? AND owner_id=?").run(html, new Date().toISOString(), row.id, req.user.id);
+      sourceMarksWriter(req.user.id, row.id, html);
       database.prepare("DELETE FROM qa_groups WHERE conversation_id=? AND user_id=?").run(record.id, req.user.id);
       database.prepare("DELETE FROM conversations WHERE id=? AND user_id=?").run(record.id, req.user.id);
       database.exec("COMMIT");
     } catch (error) { database.exec("ROLLBACK"); throw error; }
     res.status(204).end();
   });
+  const withSourceRole = async (userId, role, input, work) => {
+    const operationId = randomUUID(), queuedAt = new Date().toISOString();
+    const signal = AbortSignal.any([stopping.signal, ...(input.signal ? [input.signal] : [])]);
+    let complete;
+    const completed = new Promise(resolve => { complete = resolve; });
+    sourceOperations.add(completed);
+    let route = { role }, startedAt, phase = 'queued', phaseAt = performance.now();
+    let queueMs = 0, elapsedMs = 0, retryWaitMs = 0, retryCount = 0;
+    const transition = next => {
+      const now = performance.now(), duration = now - phaseAt;
+      if (phase === 'queued') queueMs += duration;
+      if (phase === 'running') elapsedMs += duration;
+      if (phase === 'retry_wait') retryWaitMs += duration;
+      phase = next; phaseAt = now;
+    };
+    const timing = () => {
+      const duration = performance.now() - phaseAt;
+      return { operationId, queuedAt, ...(startedAt ? { startedAt } : {}), retryCount,
+        queueMs: Math.round(queueMs + (phase === 'queued' ? duration : 0)),
+        elapsedMs: Math.round(elapsedMs + (phase === 'running' ? duration : 0)),
+        retryWaitMs: Math.round(retryWaitMs + (phase === 'retry_wait' ? duration : 0)) };
+    };
+    const notify = (state, details = {}) => {
+      // Observers may close with their article, or fail to persist on shutdown.
+      // They must never cancel otherwise independent provider work.
+      const { annotationMode, ...selected } = execution(route);
+      try { Promise.resolve(input.onStatus?.({ state, ...selected, ...timing(), ...details })).catch(() => {}); } catch {}
+    };
+    try {
+      const configuration = roleConfiguration.current();
+      route = { ...(configuration?.roles[role] || { providerId: preferred() }), role, configurationVersion: configuration?.version || 0 };
+      while (true) {
+        assertOpen(signal);
+        notify('queued');
+        try {
+          const result = await withRole(userId, role, async (provider, selected) => {
+            route = selected; transition('running'); startedAt = new Date().toISOString();
+            if (role === 'annotation' && input.annotationMode === 'proofread') {
+              route.annotationMode = 'proofread';
+              // The local pass supplies candidates. Default proofreading requests use
+              // the model's advertised fast mode; explicit owner settings still win.
+              if (!route.reasoning) {
+                const known = await provider.knownModels?.(), models = Array.isArray(known) ? known : known?.models || [];
+                if (models.find(model => model.id === route.model)?.reasoningOptions?.efforts?.includes('none'))
+                  route.reasoning = { effort: 'none' };
+              }
+            }
+            notify('running');
+            return work(provider, route);
+          }, { priority: input.priority || "foreground", getPriority: input.getPriority, groupKey: input.groupKey, signal, threadId: input.threadId });
+          transition('idle');
+          return { ...result, execution: { ...(result.execution || execution(route)), ...timing() } };
+        } catch (cause) {
+          transition('idle');
+          assertOpen(signal);
+          const diagnostic = diagnosticForError(cause, { signal });
+          if ((cause?.execution?.providerId || route.providerId) !== 'api_base' ||
+              !(cause?.status === 429 || diagnostic.category === 'rate_limit') || retryCount >= rateLimitRetries) throw cause;
+          const retryDelay = Math.min(30000, retryDelayMs * 2 ** retryCount++);
+          // Re-enter the provider queue only after backoff. No execution slot,
+          // chapter allowance or execution timeout belongs to this waiting phase.
+          transition('retry_wait');
+          notify('retry_wait', { retryDelayMs: retryDelay, nextRetryAt: new Date(Date.now() + retryDelay).toISOString(), diagnostic });
+          assertOpen(signal);
+          await wait(retryDelay, undefined, { signal });
+          assertOpen(signal);
+          transition('queued'); startedAt = undefined;
+        }
+      }
+    } catch (cause) {
+      transition('idle');
+      const cancelled = signal.aborted && signal.reason instanceof Error ? signal.reason : cause;
+      const error = cancelled && typeof cancelled === 'object' ? cancelled : fail(502, "AI 步骤失败，请重试当前步骤。");
+      error.diagnostic = diagnosticForError(error, { signal });
+      error.execution = { ...execution({ ...route, ...error.execution }), ...timing() };
+      throw error;
+    } finally {
+      sourceOperations.delete(completed);
+      complete();
+    }
+  };
+  const executeSourceStep = (userId, role, input = {}) => withSourceRole(userId, role, input, async (provider, route) => {
+    const { accountId, expectedSubject } = await identity(provider, route);
+    const image = input.imageId && route.referenceImage ? await getImage(userId, input.imageId) : null;
+    const pixels = image ? await images.read(image.id, { normalizeOrientation: true, revision: image.revision }) : null;
+    const prompt = role === "annotation" && input.annotationHtml
+      ? prepareBodyAnnotation(input.annotationHtml, { referenceImage: !!image }).prompt + (input.contextText || "") : input.prompt;
+    const result = await provider.runtime.run({ model: route.model, reasoning: route.reasoning,
+      prompt, schema: input.schema, expectedAccountId: accountId, expectedSubject, webSearch: false, signal: route.signal,threadId:input.threadId,
+      ...(pixels ? { image: `data:${image.mimeType};base64,${pixels.toString("base64")}` } : input.image ? { image: input.image } : {}) });
+    assertOpen(route.signal);
+    if (result.completed !== true) throw Object.assign(fail(502, "AI 步骤未完成，已保存的正文和处理结果保留。"),
+      { diagnostic: { code: 'AI_INCOMPLETE_OUTPUT', category: 'incomplete_output' } });
+    let value;
+    try { value = JSON.parse(result.text); }
+    catch (cause) { throw Object.assign(fail(502, "AI 返回格式不完整，请重试当前步骤。"), { diagnostic: diagnosticForError(cause) }); }
+    return { value, execution: execution(route, result) };
+  });
+  const hybridAnnotation = createHybridAnnotation({ localRuby, execute: executeSourceStep });
+  const sourceProcessor = createSourceProcessor({
+    annotateBodies: hybridAnnotation.annotateBodies,
+    recognizePhoto: recognizeImage,
+    extractSource: async (source, userId,{signal,onStatus}={}) => {
+      assertOpen(signal);
+      // Local recognition deliberately precedes provider authorization and never
+      // occupies an AI execution slot.
+      if (source.type === "screenshot") {
+        const image = source.original?.imageId ? await getImage(userId, source.original.imageId) : null;
+        const result = await ndlOcr.recognize(source.original?.filePath || image?.path,{signal,onStatus});
+        const text = result.text ?? result.regions?.map((region) => region.text).join("\n") ?? "";
+        return { ...result, text, bodyHtml: blocksToHtml(result.blocks || parseText(text)) };
+      }
+      const parsers = await import("../import-parsers.mjs");
+      if (["scan_pdf", "pdf_scan"].includes(source.type)) {
+        const rendered = await parsers.renderImportedSource(source,{signal});
+        try {
+          const result = await ndlOcr.recognize(rendered.path,{signal,onStatus});
+          const text = result.text ?? result.regions?.map((region) => region.text).join("\n") ?? "";
+          return { ...result, text, bodyHtml: blocksToHtml(result.blocks || parseText(text)) };
+        } finally { await rendered.cleanup?.(); }
+      }
+      return parsers.extractImportedSource(source,{signal});
+    },
+    execute: executeSourceStep,
+  });
   return {
     getImage, saveImage, rotateImage, recognizeImage, annotateImage, segmentHtml,
+    ...sourceProcessor,
+    prepareAnnotationBodies: hybridAnnotation.prepareBodies,
+    proofreadAnnotationBodies: hybridAnnotation.proofreadPrepared,
+    annotateBodies: hybridAnnotation.annotateBodies,
+    setSourceScopeValidator: (validator) => { sourceScopeValidator = validator; },
+    setSourceMarksWriter: (writer) => { sourceMarksWriter = writer; },
+    setManagedDocument: (check) => { managedDocument = check; },
     setImageMutationGuard: (guard) => { imageMutationGuard = guard; },
     setImageAnnotationGuard: (guard) => { imageAnnotationGuard = guard; },
     isImageMutating: (id) => imageMutations.has(id),
+    isImageAnnotating: (id) => imageAnnotations.has(id),
+    imageAnnotationStatus: (id) => [...(imageAnnotations.get(id)||[])].some(item=>item.state==='running')?'running':imageAnnotations.has(id)?'queued':null,
     statusForUser,
-    whenIdle: () => Promise.all([...queues.values()].map((queue) => queue.whenIdle())),
+    whenIdle: () => Promise.all([...sourceOperations, ...[...queues.values()].map((queue) => queue.whenIdle())]),
     close: () => {
       if (closed) return;
       closed = true;
+      stopping.abort(Object.assign(fail(503, "AI 服务正在停止，请稍后重试。"), { code: "AI_STOPPED" }));
       for (const queue of queues.values()) queue.close();
       pendingLogins.clear();
-      operations.clear();
       for (const provider of connections.values()) provider.close();
       mangaOcr.close();
       ndlOcr.close();
+      localRuby.close();
       connections.clear();
     },
   };

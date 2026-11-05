@@ -889,7 +889,7 @@ test("出错任务固定人工稿后跨重启保留checkpoint，恢复后旧编�
   f.state.connected = false;
   task = await f.runUntil(task.id, "blocked");
   f.state.connected = true;
-  assert.equal(task.canDelete, true);
+  assert.equal(task.canDelete, false);
   assert.equal(task.canPause, false);
   assert.equal(task.resultVersion, null);
   assert.equal((await f.request(`/images/${task.items[0].imageId}/rotate`, "POST", { quarterTurns: 1, revision: 1 })).status, 409);
@@ -989,7 +989,7 @@ test("草稿及正常处理中不能转人工，授权出错后可固定结果�
   assert.equal((await f.runUntil(task.id, "ready")).counts.completed, 1);
 });
 
-test("人工注音执行中恢复或删除任务，迟到回复不会写入任何校对缓存", async (t) => {
+test("人工注音执行期间任务禁止恢复或删除，完成后保留结果并允许操作", async (t) => {
   for (const operation of ["resume", "delete"]) {
     for (const legacy of [false, true]) {
       await t.test(`${operation} ${legacy ? "旧单图接口" : "任务接口"}`, async (t) => {
@@ -1007,11 +1007,16 @@ test("人工注音执行中恢复或删除任务，迟到回复不会写入任�
         await started;
         const changed = await f.request(operation === "resume" ? `/image-tasks/${task.id}/resume` : `/image-tasks/${task.id}`,
           operation === "resume" ? "POST" : "DELETE", { version: task.version });
-        assert.equal(changed.status, operation === "resume" ? 202 : 204);
+        assert.equal(changed.status,409);
+        const inFlight=(await f.request(`/tasks/${task.id}`)).data;
+        assert.equal(inFlight.canDelete,false);assert.equal(inFlight.canRetry,false);
+        assert.ok(inFlight.steps.some(step=>step.status==='running'));
         release();
-        assert.equal((await pending).status, operation === "resume" ? 409 : 404);
-        assert.equal(f.inspect((db) => db.prepare("SELECT review_annotations_json FROM image_task_items WHERE task_id=?").get(task.id).review_annotations_json), "[]");
-        assert.equal(f.inspect((db) => db.prepare("SELECT draft_json FROM image_drafts WHERE image_id=?").get(item.imageId).draft_json), JSON.stringify(draft));
+        assert.equal((await pending).status,200);
+        const latest=await f.get(task.id);
+        const finished=await f.request(operation === "resume" ? `/image-tasks/${task.id}/resume` : `/image-tasks/${task.id}`,
+          operation === "resume" ? "POST" : "DELETE", { version: latest.version });
+        assert.equal(finished.status,operation==='resume'?202:204);
       });
     }
   }
@@ -1191,12 +1196,15 @@ test("正常任务、旧手动暂停及已归档任务均不能手动暂停或�
   for (const state of ["paused", "cancelled"]) await assertProtected(await f.legacyPause(await f.prepared(), state));
 });
 
-test("授权出错允许按版本删除，恢复后即使使用最新版本也不再允许删除", async (t) => {
+test("授权自动重试期间不能删除，停止后按版本删除，恢复后不能删除", async (t) => {
   const f = await fixture(t);
   f.state.connected = false;
   let task = await f.runUntil((await f.submit(await f.prepared())).id, "blocked");
-  assert.equal(task.canDelete, true);
+  assert.equal(task.canDelete, false);
   assert.equal(task.canPause, false);
+  assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 409);
+  task=(await f.freeze(task)).data;
+  assert.equal(task.canDelete,true);
   assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version - 1 })).status, 409);
   assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
   assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
@@ -1385,7 +1393,7 @@ test("分句授权出错可继续或删除，删除后的最后步骤不能重�
   assert.equal(task.segmentation.state, "pending");
   assert.equal(task.segmentation.attempts, 0);
   assert.equal(task.counts.completed, 1);
-  assert.equal(task.canDelete, true);
+  assert.equal(task.canDelete, false);
   assert.match(task.lastError, /授权/);
   const fixed = (await f.freeze(task)).data;
   assert.equal(fixed.state, "needs_attention");
@@ -1406,6 +1414,8 @@ test("分句授权出错可继续或删除，删除后的最后步骤不能重�
   f.state.connected = false; await f.app.imageTasks.runNext();
   task = await f.get(task.id);
   assert.equal(task.phase, "segment");
+  assert.equal(task.canDelete,false);
+  task=(await f.freeze(task)).data;
   assert.equal(task.canDelete, true);
   assert.equal((await f.request(`/image-tasks/${task.id}`, "DELETE", { version: task.version })).status, 204);
   const calls = f.state.calls.length;
@@ -1476,4 +1486,59 @@ test("重启后分句出错被删除，旧进程迟到的分句结果不能写�
   assert.equal(f.state.calls.filter((call) => call.phase === "recognize").length, 1);
   assert.equal(f.state.calls.filter((call) => call.phase === "annotate").length, 1);
   assert.equal(f.state.calls.filter((call) => call.phase === "segment").length, 2);
+});
+
+test('统一目录保留图片任务 ID，执行中拒绝删除，失败重试复用成功检查点',async t=>{
+  const f=await fixture(t);let task=await f.submit(await f.prepared());
+  let listed=await f.request('/tasks');assert.equal(listed.status,200);assert.equal(listed.data.tasks[0].id,task.id);assert.equal(listed.data.tasks[0].type,'image');
+  assert.equal((await f.request(`/tasks/${task.id}`,'DELETE',{version:task.version})).status,409);
+  f.state.onRun=async phase=>{if(phase==='annotate')throw Object.assign(new Error('annotation failed'),{status:400});};
+  task=await f.runUntil(task.id,'needs_attention');
+  let detail=(await f.request(`/tasks/${task.id}`)).data;assert.equal(detail.canRetry,true);assert.equal(detail.canDelete,true);
+  f.state.onRun=null;
+  assert.equal((await f.request(`/tasks/${task.id}/retry`,'POST',{version:detail.version})).status,200);
+  task=await f.runUntil(task.id,'ready');
+  assert.equal(f.state.calls.filter(x=>x.phase==='recognize').length,1);
+  assert.equal(f.state.calls.filter(x=>x.phase==='annotate').length,2);
+});
+
+test('a slow image batch does not hold another batch behind it',{timeout:4000},async t=>{
+  const f=await fixture(t);const first=await f.submit(await f.prepared()),second=await f.submit(await f.prepared());
+  await f.app.imageTasks.runNext();await f.app.imageTasks.runNext();
+  let release,entered;const gate=new Promise(resolve=>{release=resolve;}),started=new Promise(resolve=>{entered=resolve;});
+  f.state.onRun=async phase=>{if(phase==='recognize'&&!entered.done){entered.done=true;entered();await gate;}};
+  t.after(()=>release());
+  const slow=f.app.imageTasks.runNext();await started;
+  await f.app.imageTasks.runNext();
+  assert.equal((await f.get(first.id)).state,'running');
+  assert.equal((await f.get(second.id)).counts.recognized,1);
+  release();await slow;
+});
+
+test('image tasks expose real provider queue wait separately from execution',{timeout:20000},async t=>{
+  const previous=process.env.OPENAI_CLI_WORKERS;let f;
+  try{process.env.OPENAI_CLI_WORKERS='1';f=await fixture(t);}finally{if(previous===undefined)delete process.env.OPENAI_CLI_WORKERS;else process.env.OPENAI_CLI_WORKERS=previous;}
+  const first=await f.submit(await f.prepared()),second=await f.submit(await f.prepared());
+  await f.app.imageTasks.runNext();await f.app.imageTasks.runNext();
+  let releaseFirst,releaseSecond,enteredFirst,enteredSecond,count=0;
+  const firstGate=new Promise(resolve=>{releaseFirst=resolve;}),secondGate=new Promise(resolve=>{releaseSecond=resolve;}),firstStart=new Promise(resolve=>{enteredFirst=resolve;}),secondStart=new Promise(resolve=>{enteredSecond=resolve;});
+  f.state.stop=()=>{releaseFirst();releaseSecond();};
+  f.state.onRun=async phase=>{if(phase==='recognize'){if(!count++){enteredFirst();await firstGate;}else{enteredSecond();await secondGate;}}};
+  const running=f.app.imageTasks.runNext();await firstStart;const waiting=f.app.imageTasks.runNext();
+  let queued;for(let index=0;index<100;index++){queued=(await f.request(`/tasks/${second.id}`)).data;if(queued.status==='resource_wait'&&queued.steps.find(step=>step.step==='recognize')?.execution?.operationId)break;await new Promise(resolve=>setTimeout(resolve,5));}
+  assert.equal(queued.status,'resource_wait');assert.ok(queued.steps.some(step=>step.step==='recognize'&&step.status==='resource_wait'));assert.equal(queued.canDelete,false);assert.equal(count,1);
+  await new Promise(resolve=>setTimeout(resolve,30));releaseFirst();await running;await secondStart;
+  const started=(await f.request(`/tasks/${second.id}`)).data,step=started.steps.find(step=>step.step==='recognize');
+  assert.equal(started.status,'running');assert.equal(step.status,'running');assert.ok(step.execution.queueMs>=20);assert.ok(step.execution.startedAt);
+  releaseSecond();await waiting;
+});
+
+test('image automatic backoff is a retry wait and cannot be deleted',async t=>{
+  const f=await fixture(t,{runnerOptions:{retryDelayMs:100000,maxAutomaticRetries:1}}),task=await f.submit(await f.prepared());
+  f.state.onRun=async phase=>{if(phase==='recognize')throw Object.assign(new Error('controlled transient failure'),{status:503,expose:true});};
+  await f.app.imageTasks.runNext();await f.app.imageTasks.runNext();
+  const waiting=(await f.request(`/tasks/${task.id}`)).data;assert.equal(waiting.status,'retry_wait');assert.equal(waiting.canDelete,false);assert.equal(waiting.canRetry,false);
+  assert.ok(waiting.steps.some(step=>step.step==='recognize'&&step.status==='retry_wait'));
+  assert.equal((await f.request(`/tasks/${task.id}`,'DELETE',{version:waiting.version})).status,409);
+  f.state.onRun=null;f.clock.value+=100001;await f.runUntil(task.id,'ready');
 });

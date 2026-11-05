@@ -53,7 +53,7 @@ export default function Welcome({
 
       {activeTaskCount > 0 && <button className="home-task-card" type="button" onClick={onOpenTasks} aria-label={`查看任务与导入草稿，共 ${activeTaskCount} 个`}>
         <Icon name="menu" size={22} />
-        <span><strong>任务与导入草稿 <span className="count">{activeTaskCount}</span></strong><small>{(taskCounts.queued || 0) + (taskCounts.running || 0)} 个处理中 · {activeTaskCount - (taskCounts.queued || 0) - (taskCounts.running || 0)} 个待继续或校对</small></span>
+        <span><strong>任务与导入草稿 <span className="count">{activeTaskCount}</span></strong><small>{Number.isFinite(taskCounts.queued) || Number.isFinite(taskCounts.running) ? `${(taskCounts.queued || 0) + (taskCounts.running || 0)} 个处理中 · ${activeTaskCount - (taskCounts.queued || 0) - (taskCounts.running || 0)} 个待继续或校对` : "查看导入与正文处理进度，继续草稿或核对结果"}</small></span>
         <Icon name="arrow" size={18} />
       </button>}
 
@@ -104,7 +104,7 @@ export default function Welcome({
             </span>
             <div>
               <h3>{loading ? "正在整理书架…" : "暂无阅读记录"}</h3>
-              <p>从左侧书架导入图片、导入文字或新建书籍后，最近的阅读记录会显示在这里。</p>
+              <p>从左侧书架导入照片、PDF、EPUB 或文字后，最近的阅读记录会显示在这里。</p>
             </div>
           </div>
         )}

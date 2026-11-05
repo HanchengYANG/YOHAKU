@@ -9,7 +9,10 @@ export function createRoleConfiguration({ database, ownerId, connection, preferr
   const row = () => database.prepare("SELECT * FROM ai_role_configurations WHERE owner_id=?").get(ownerId());
   function current() {
     const saved = row();
-    return saved ? { ...JSON.parse(saved.configuration_json), version: saved.version, enabled: true, updatedAt: saved.updated_at } : null;
+    if (!saved) return null;
+    const configuration = JSON.parse(saved.configuration_json);
+    configuration.roles.correction ||= { ...configuration.roles.ocr };
+    return { ...configuration, version: saved.version, enabled: true, updatedAt: saved.updated_at };
   }
   async function providerState(id) {
     const provider = connection(ownerId(), id);
@@ -53,13 +56,16 @@ export function createRoleConfiguration({ database, ownerId, connection, preferr
     if (revision === null) throw fail(409, "连接、模型目录或测试记录正在更新，请完成后再保存角色配置。");
     if (!input || !Number.isSafeInteger(input.version) || input.version < 0) throw fail(400, "缺少角色配置版本，请刷新页面。");
     if ((current()?.version || 0) !== input.version) throw fail(409, "角色配置已更新，请刷新页面后再保存。");
-    if (!input.roles || typeof input.annotationReferenceImage !== "boolean") throw fail(400, "请提供完整的四个角色及注音参考原图设置。");
+    if (!input.roles || typeof input.annotationReferenceImage !== "boolean") throw fail(400, "请提供完整的角色及注音参考原图设置。");
+    // Older clients can save their four existing roles without resetting an
+    // independently configured correction role.
+    const suppliedRoles = { ...input.roles, correction: input.roles.correction || current()?.roles.correction || input.roles.ocr };
     const roles = {}, readyStates = {}, identities = new Map(), evidence = new Map();
     for (const role of ROLE_IDS) {
-      const selected = input.roles[role];
+      const selected = suppliedRoles[role];
       const state = selected && ["openai", "api_base"].includes(selected.providerId) ? await providerState(selected.providerId) : undefined;
       const ready = await readiness(role, selected, role === "annotation" && input.annotationReferenceImage, state);
-      if (!ready.ready) throw fail(409, `${{ocr:"OCR", annotation:"注音",segmentation:"分句",chat:"问答"}[role]}尚未就绪：${ready.message}`);
+      if (!ready.ready) throw fail(409, `${{ocr:"OCR",correction:"正文校正", annotation:"注音",segmentation:"分句",chat:"问答"}[role]}尚未就绪：${ready.message}`);
       readyStates[role] = ready;
       const reasoning = normalizeReasoning(selected.reasoning);
       roles[role] = { providerId: selected.providerId, model: selected.model, ...(reasoning ? { reasoning } : {}) };

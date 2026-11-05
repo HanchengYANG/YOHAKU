@@ -48,11 +48,15 @@ test("导入、选区注音、校对、保存重开、导出及手机布局", as
     .getByRole("button", { name: "导入文字", exact: true })
     .click();
   await page
-    .getByRole("textbox", { name: "材料标题" })
+    .getByRole("textbox", { name: "资料标题" })
     .fill(`验收歌词 ${info.project.name}`);
   await page
-    .getByRole("textbox", { name: "日语正文" })
+    .getByRole("textbox", { name: "导入原文" })
     .fill("はーい口開けてー\n汚い言葉の歯石が取れないね〜\n\n背中を見た");
+  await page.getByRole("button", {name:"继续确认类型",exact:true}).click();
+  await page.getByRole("button", {name:"确认导入",exact:true}).click();
+  await page.getByRole("button", {name:"校对正文",exact:true}).click();
+  await page.getByRole("button", {name:"编辑正文与注音",exact:true}).click();
   await expect(page.getByRole("textbox", { name: "假名读音", exact: true })).toHaveCount(0);
   await selectWord(page, 3, 4);
   await page
@@ -69,13 +73,14 @@ test("导入、选区注音、校对、保存重开、导出及手机布局", as
   });
   await reading.fill("");
   await expect(reading).toBeVisible();
-  await expect(page.getByRole("button", { name: "保存并阅读" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "保存正文" })).toBeDisabled();
   await reading.fill("くち");
   await page.screenshot({
     path: `artifacts/stage1-editor-${info.project.name}.png`,
     fullPage: true,
   });
-  await page.getByRole("button", { name: "保存并阅读" }).click();
+  await page.getByRole("button", { name: "保存正文" }).click();
+  await page.getByRole("button", { name: "返回阅读", exact: true }).click();
   await expect(
     page.getByRole("heading", {
       name: `验收歌词 ${info.project.name}`,
@@ -88,6 +93,8 @@ test("导入、选区注音、校对、保存重开、导出及手机布局", as
   await expect(article.locator(".text-line")).toHaveCount(4);
   await page.reload();
   await expect(article.locator("rt")).toHaveText(["くち", "あ"]);
+  await article.locator("ruby").first().scrollIntoViewIfNeeded();
+  await expect(article.locator("ruby").first()).toBeVisible();
   const rects = await article
     .locator("ruby")
     .first()
@@ -136,9 +143,10 @@ test("导入、选区注音、校对、保存重开、导出及手机布局", as
       () => document.documentElement.scrollWidth <= window.innerWidth,
     ),
   ).toBe(true);
-  await page.getByRole("button", { name: "校对文字与注音" }).click();
+  await page.getByRole("button", { name: "校对正文" }).click();
+  await page.getByRole("button", { name: "编辑正文与注音", exact: true }).click();
   await page
-    .getByRole("textbox", { name: "日语正文" })
+    .getByRole("textbox", { name: "来源正文" })
     .fill(
       "はーい口開けてー\n汚い言葉の歯石が取れないね〜\n\n背中を見た\n追加の行",
     );
@@ -146,88 +154,46 @@ test("导入、选区注音、校对、保存重开、导出及手机布局", as
   await expect(
     page.getByRole("region", { name: "阅读预览" }).locator("rt"),
   ).toHaveText(["くち", "あ"]);
-  await page.getByRole("button", { name: "保存并阅读" }).click();
+  await page.getByRole("button", { name: "保存正文" }).click();
+  await page.getByRole("button", { name: "返回阅读", exact: true }).click();
   await expect(article.locator(".text-line")).toHaveCount(5);
   await deleteDocument(page, docId);
   expect(errors).toEqual([]);
 });
 
-test("未保存离开会确认，新建能清空旧草稿，慢速保存期间锁定编辑", async ({
-  page,
-}) => {
+test("未保存离开会确认，新建能清空旧草稿，慢速导入期间锁定输入", async ({ page }) => {
   await page.goto("/");
-  if (await page.getByRole("button", { name: "打开书架", exact: true }).isVisible()) {
-    await page.getByRole("button", { name: "打开书架", exact: true }).click();
-  }
-  await page.getByRole("button", { name: "导入文字", exact: true }).click();
-  await page.getByRole("textbox", { name: "日语正文" }).fill("未保存草稿");
-  page.once("dialog", (dialog) => dialog.dismiss());
-  await page.getByRole("button", { name: "取消", exact: true }).click();
-  await expect(page.getByRole("textbox", { name: "日语正文" })).toBeVisible();
-  page.once("dialog", (dialog) => dialog.accept());
-  if (await page.getByRole("button", { name: "打开书架" }).isVisible()) {
-    await page.getByRole("button", { name: "打开书架" }).click();
-  }
-  await page.getByRole("button", { name: "导入文字", exact: true }).click();
-  await expect(page.getByRole("textbox", { name: "材料标题" })).toHaveValue("");
-  await expect(page.getByRole("textbox", { name: "日语正文" })).toHaveValue("");
-  await page.getByRole("textbox", { name: "材料标题" }).fill("慢速保存");
-  await page.getByRole("textbox", { name: "日语正文" }).fill("空を見た");
-  let release;
-  const delayed = new Promise((resolve) => {
-    release = resolve;
-  });
-  await page.route("**/api/documents", async (route) => {
-    if (route.request().method() === "POST") {
-      await delayed;
-    }
-    await route.continue();
-  });
-  await page.getByRole("button", { name: "保存并阅读" }).click();
-  await expect(page.getByRole("textbox", { name: "日语正文" })).toBeDisabled();
-  await expect(page.getByRole("textbox", { name: "材料标题" })).toBeDisabled();
-  release();
-  await expect(
-    page.getByRole("heading", { name: "慢速保存", exact: true }),
-  ).toBeVisible();
-  const id = await page.evaluate(() => location.hash.slice(1));
-  await deleteDocument(page, id);
+  if(await page.getByRole("button",{name:"打开书架",exact:true}).isVisible())await page.getByRole("button",{name:"打开书架",exact:true}).click();
+  await page.getByRole("button",{name:"导入文字",exact:true}).click();
+  await page.getByLabel("导入原文").fill("未保存草稿");
+  page.once("dialog",dialog=>dialog.dismiss());await page.getByRole("button",{name:"返回",exact:true}).click();
+  await expect(page.getByLabel("导入原文")).toHaveValue("未保存草稿");
+  page.once("dialog",dialog=>dialog.accept());
+  if(await page.getByRole("button",{name:"打开书架",exact:true}).isVisible())await page.getByRole("button",{name:"打开书架",exact:true}).click();
+  await page.getByRole("button",{name:"导入文字",exact:true}).click();
+  await expect(page.getByLabel("资料标题")).toHaveValue("");await expect(page.getByLabel("导入原文")).toHaveValue("");
+  await page.getByLabel("资料标题").fill("慢速保存");await page.getByLabel("导入原文").fill("空を見た。");
+  await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
+  let release;const delayed=new Promise(resolve=>{release=resolve;});
+  await page.route("**/api/imports/*/confirm",async route=>{await delayed;await route.continue();});
+  await page.getByRole("button",{name:"确认导入",exact:true}).click();
+  await expect(page.getByLabel("资料标题")).toBeDisabled();await expect(page.getByLabel("确认来源类型")).toBeDisabled();release();
+  await expect(page.getByRole("heading",{name:"慢速保存",exact:true})).toBeVisible();
+  await deleteDocument(page,await page.evaluate(()=>location.hash.slice(1)));
 });
 
-test("多页面版本冲突后可以重新打开最新材料", async ({ page }) => {
-  const created = await page.request.post("/api/documents", {
-    data: {
-      title: "并发修改",
-      kind: "article",
-      orientation: "horizontal",
-      content: "最初の文章",
-    },
-  });
-  const old = await created.json();
-  await page.goto(`/#${old.id}`);
-  await page.getByRole("button", { name: "校对文字与注音" }).click();
-  await page.getByRole("textbox", { name: "材料标题" }).fill("旧页面的修改");
-  // Preparing the first read persists sentence boundaries and advances the
-  // revision. The competing page must update that actual current revision.
-  const latest = await (await page.request.get(`/api/documents/${old.id}`)).json();
-  const updated = await page.request.put(`/api/documents/${old.id}`, {
-    data: { ...latest, title: "其他页面已更新" },
-  });
-  expect(updated.ok()).toBe(true);
-  await page.getByRole("button", { name: "保存并阅读" }).click();
-  await expect(page.getByRole("alert")).toContainText("其他页面修改");
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "取消", exact: true }).click();
-  if (await page.getByRole("button", { name: "打开书架" }).isVisible())
-    await page.getByRole("button", { name: "打开书架" }).click();
-  await page
-    .getByRole("navigation", { name: "阅读材料" })
-    .getByRole("button", { name: /并发修改/ })
-    .click();
-  await expect(
-    page.getByRole("heading", { name: "其他页面已更新", exact: true }),
-  ).toBeVisible();
-  await deleteDocument(page, old.id);
+test("同一来源的多页面版本冲突后可以保留草稿并重新打开最新正文", async ({ page }) => {
+  const created=await page.request.post("/api/documents",{data:{title:"并发修改",kind:"article",orientation:"horizontal",content:"最初の文章。"}});
+  const old=await created.json();await page.goto(`/#${old.id}`);
+  await page.getByRole("button",{name:"校对正文",exact:true}).click();await page.getByRole("button",{name:"编辑正文与注音",exact:true}).click();
+  await page.getByLabel("来源正文",{exact:true}).fill("旧页面的修改。");
+  const list=await(await page.request.get(`/api/documents/${old.id}/sources`)).json();const source=list.sources[0];
+  const updated=await page.request.put(`/api/documents/${old.id}/sources/${source.id}`,{data:{version:source.version,text:"其他页面已更新。"}});expect(updated.ok()).toBe(true);
+  await page.waitForResponse((response) => response.request().method() === "GET" && new URL(response.url()).pathname === `/api/documents/${old.id}/sources/${source.id}`);
+  await page.getByRole("button",{name:"保存正文",exact:true}).click();
+  await expect(page.getByRole("alert")).toContainText("来源已修改");await expect(page.getByLabel("来源正文",{exact:true})).toHaveValue("旧页面的修改。");
+  page.once("dialog",dialog=>dialog.accept());await page.getByRole("button",{name:"取消",exact:true}).click();await page.getByRole("button",{name:"返回阅读",exact:true}).click();
+  await expect(page.getByRole("article",{name:"日语原文",exact:true})).toContainText("其他页面已更新。");await deleteDocument(page,old.id);
 });
 
 test("无效材料显示错误，搜索书架后仍可重试", async ({ page }) => {
@@ -267,7 +233,8 @@ test("原词示例与完整词注音统一横排，注音在上方并能保存�
   expect(created.ok()).toBe(true);
   const initial = await created.json();
   await page.goto(`/#${initial.id}`);
-  await page.getByRole("button", { name: "校对文字与注音", exact: true }).click();
+  await page.getByRole("button", { name: "校对正文", exact: true }).click();
+  await page.getByRole("button", { name: "编辑正文与注音", exact: true }).click();
   await expect(page.getByRole("combobox", { name: "阅读方向" })).toHaveCount(0);
   await page.getByRole("tab", { name: /^注音校正/ }).click();
   const preview = page.getByRole("region", { name: "阅读预览", exact: true });
@@ -281,7 +248,7 @@ test("原词示例与完整词注音统一横排，注音在上方并能保存�
   ];
   await expect(preview.locator("rt")).toHaveText(originalReadings);
   await page.getByRole("tab", { name: "正文编辑", exact: true }).click();
-  const body = page.getByRole("textbox", { name: "日语正文" });
+  const body = page.getByRole("textbox", { name: "来源正文" });
   const originalText = await body.inputValue();
   await body.fill(`${originalText}\n食べる`);
   await selectWord(page, originalText.length + 1, originalText.length + 4);
@@ -291,7 +258,8 @@ test("原词示例与完整词注音统一横排，注音在上方并能保存�
   await page.getByRole("button", { name: "添加注音" }).click();
   await page.getByRole("tab", { name: /^注音校正/ }).click();
   await expect(preview.locator("rt")).toHaveText([...originalReadings, "た"]);
-  await page.getByRole("button", { name: "保存并阅读" }).click();
+  await page.getByRole("button", { name: "保存正文" }).click();
+  await page.getByRole("button", { name: "返回阅读", exact: true }).click();
   const article = page.getByRole("article", { name: "日语原文" });
   await expect(article.locator(".japanese-text")).toHaveCSS(
     "writing-mode",
@@ -330,7 +298,11 @@ test("原词示例与完整词注音统一横排，注音在上方并能保存�
   await expect(article.locator("rt")).toHaveText([...originalReadings, "た"]);
   expect(await article.locator("ruby").last().evaluate((el) => el.firstChild.textContent))
     .toBe("食");
-  expect(await (await page.request.get(`/api/documents/${id}`)).json()).toEqual(saved);
+  const reopened = await (await page.request.get(`/api/documents/${id}`)).json();
+  for (const field of ["content", "bodyHtml", "bodyHash", "blocks", "orientation", "revision"])
+    expect(reopened[field]).toEqual(saved[field]);
+  expect(reopened.reading.pages.map(({id, ranges}) => ({id, ranges})))
+    .toEqual(saved.reading.pages.map(({id, ranges}) => ({id, ranges})));
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= innerWidth,
@@ -340,11 +312,13 @@ test("原词示例与完整词注音统一横排，注音在上方并能保存�
     path: `artifacts/stage1-horizontal-whole-word-${info.project.name}.png`,
     fullPage: true,
   });
-  await page.getByRole("button", { name: "校对文字与注音", exact: true }).click();
+  await page.getByRole("button", { name: "校对正文", exact: true }).click();
+  await page.getByRole("button", { name: "编辑正文与注音", exact: true }).click();
   await page.getByRole("tab", { name: /注音校正/ }).click();
   await expect(page.getByRole("textbox", { name: "食べる的读音（第6行）", exact: true }))
     .toHaveValue("たべる");
   await page.getByRole("button", { name: "取消", exact: true }).click();
+  await page.getByRole("button", { name: "返回阅读", exact: true }).click();
   await deleteDocument(page, id);
 });
 
@@ -371,8 +345,9 @@ test("假名锚点只让汉字显示注音，前后缀与多汉字整词保存�
     expect(text).toBe(expectedBody);
   };
   await checkDisplay();
-  await page.getByRole("button", { name: "校对文字与注音", exact: true }).click();
-  await expect(page.getByRole("textbox", { name: "日语正文", exact: true })).toHaveValue(expectedBody);
+  await page.getByRole("button", { name: "校对正文", exact: true }).click();
+  await page.getByRole("button", { name: "编辑正文与注音", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "来源正文", exact: true })).toHaveValue(expectedBody);
   await page.getByRole("tab", { name: /注音校正/ }).click();
   const father = page.getByRole("textbox", { name: "お父さん的读音（第1行）", exact: true });
   await expect(father).toHaveValue("おとうさん");
@@ -381,7 +356,8 @@ test("假名锚点只让汉字显示注音，前后缀与多汉字整词保存�
   await expect(page.getByRole("textbox", { name: "ここで的读音（第2行）", exact: true })).toHaveValue("ここで");
   await father.fill("おとーさん");
   await father.fill("おとうさん");
-  await page.getByRole("button", { name: "保存并阅读", exact: true }).click();
+  await page.getByRole("button", { name: "保存正文", exact: true }).click();
+  await page.getByRole("button", { name: "返回阅读", exact: true }).click();
   await page.reload();
   await checkDisplay();
   await page.screenshot({

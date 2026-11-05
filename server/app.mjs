@@ -8,6 +8,10 @@ import { attachAIRoutes } from "./ai/routes.mjs";
 import { attachAccountRoutes } from "./accounts.mjs";
 import { attachBookRoutes } from "./books.mjs";
 import { attachImageTaskRoutes } from "./image-tasks.mjs";
+import { createSourceService } from "./sources.mjs";
+import { attachImportRoutes } from "./imports.mjs";
+import { attachTaskRoutes } from "./tasks.mjs";
+import { createNdlOcr } from './ocr/ndl.mjs';
 import {
   parseText,
   serializeBlocks,
@@ -180,6 +184,7 @@ export function createApp({
   aiServices,
   mangaOcr,
   ndlOcr,
+  localRuby,
   imageTaskOptions = {},
 } = {}) {
   const sites = [publicOrigin, ...publicOrigins.split(",")]
@@ -277,7 +282,7 @@ export function createApp({
     }
     next();
   });
-  app.use(express.json({ limit: "1mb" }));
+  app.use(express.json({ limit: "4mb" }));
   const accounts = attachAccountRoutes({
     app,
     database,
@@ -301,6 +306,7 @@ export function createApp({
   app.use("/api", (req, res, next) =>
     req.path === "/health" ? next() : accounts.requireUser(req, res, next),
   );
+  const sharedNdlOcr=ndlOcr||createNdlOcr();
   const ai = attachAIRoutes({
     app,
     database,
@@ -308,9 +314,12 @@ export function createApp({
     callbackUri,
     services: aiServices,
     mangaOcr,
-    ndlOcr,
+    ndlOcr:sharedNdlOcr,
+    localRuby,
   });
-  const books = attachBookRoutes({ app, database, summary, requireDocument });
+  const books = attachBookRoutes({ app, database, summary, requireDocument,
+    beforeDeleteDocument: (userId, id) => {imports.invalidateTarget(userId,{documentId:id});sources.deleteDocument(userId,id);},
+    beforeDeleteBook:(userId,id)=>imports.invalidateTarget(userId,{bookId:id}) });
   // Material IDs and legacy book membership are unchanged. Existing photos are
   // attached to their original text; old pages remain individual articles.
   const migrateBody = database.prepare("UPDATE documents SET body_html=?,body_hash=?,source_images_json=? WHERE id=?");
@@ -483,6 +492,25 @@ export function createApp({
     getAppliedDocument: (userId, id) => fromRow(requireDocument(userId, id)), ...imageTaskOptions });
   ai.setImageMutationGuard(imageTasks.assertImageMutable);
 
+  const sources = createSourceService({ database, ai, requireDocument, fromRow });
+  sources.attachRoutes(app);
+  ai.setSourceScopeValidator?.((userId, documentId, selection) => sources.validateSelection?.(userId, documentId, selection) || {});
+  ai.setSourceMarksWriter?.((userId, documentId, html) => sources.persistDocumentMarks(userId, documentId, html));
+  ai.setManagedDocument?.((userId, documentId) => sources.hasDocument(userId, documentId));
+  function createImportedArticle(userId, value) {
+    const input = validateInput({ ...value, orientation: "horizontal", content: "待准备" });
+    if (value.bookId) books.requireBook(userId, value.bookId);
+    const id = randomUUID(), now = new Date().toISOString();
+    const html = blocksToHtml(parseText(""));
+    const position = value.bookId ? database.prepare("SELECT count(*)+1 AS position FROM documents WHERE owner_id=? AND book_id=?").get(userId, value.bookId).position : null;
+    database.prepare(`INSERT INTO documents(id,title,kind,orientation,blocks_json,plain_text,revision,created_at,updated_at,
+      owner_id,book_id,page_position,body_html,body_hash,source_images_json) VALUES(?,?,?,'horizontal',?,'',1,?,?,?,?,?,?,?,'[]')`)
+      .run(id, input.title, input.kind, JSON.stringify(parseText("")), now, now, userId, value.bookId || null, position, html, hashBody(html));
+    return fromRow(read.get(id));
+  }
+  const imports = attachImportRoutes({ app, database, storageDir, ai, sources, books, createImportedArticle, requireDocument,localOcr:sharedNdlOcr });
+  const tasks = attachTaskRoutes({app,database,adapters:[imageTasks.taskAdapter,imports.taskAdapter,sources.taskAdapter]});
+
   app.get("/api/health", async (req, res) => {
     const authorization = await ai.statusForUser(req.user?.id);
     return res.json({
@@ -492,6 +520,9 @@ export function createApp({
       capabilities: {
         textImport: true,
         imageImport: true,
+        unifiedImport: true,
+        sourceCorrection: true,
+        readingPages: true,
         ai: authorization.connected,
         speech: false,
         notes: false,
@@ -533,7 +564,7 @@ export function createApp({
   });
 
   app.get("/api/documents/:id", (req, res) =>
-    res.json(fromRow(requireDocument(req.user.id, req.params.id))),
+    res.json(sources.hydrateDocument(req.user.id, requireDocument(req.user.id, req.params.id))),
   );
 
   app.put("/api/documents/:id", async (req, res) => {
@@ -541,6 +572,20 @@ export function createApp({
     const input = validateInput(req.body, true);
     if (input.revision !== old.revision)
       throw new HttpError(409, "这篇材料已在其他页面修改。请保留当前文字，重新打开最新版本后再保存。");
+    if (sources.hasDocument(req.user.id, old.id)) {
+      const current = sources.hydrateDocument(req.user.id, old);
+      const suppliedHtml = input.bodyHtml === undefined ? current.bodyHtml : normalizeBodyHtml(input.bodyHtml);
+      const suppliedContent = input.content === undefined ? current.content : input.content;
+      if (suppliedHtml !== current.bodyHtml || suppliedContent !== current.content)
+        throw new HttpError(409, "请在“校对正文”中按来源保存正文与注音，以同步更新相关阅读页。");
+      books.transaction(() => {
+        const now = new Date().toISOString();
+        database.prepare("UPDATE documents SET title=?,kind=?,revision=revision+1,updated_at=? WHERE id=? AND owner_id=? AND revision=?")
+          .run(input.title, input.kind, now, old.id, req.user.id, old.revision);
+        if (old.book_id) books.touch(req.user.id, old.book_id, now);
+      });
+      return res.json(sources.hydrateDocument(req.user.id, requireDocument(req.user.id, old.id)));
+    }
     const sourceImages = await articleImages(req.user.id, req.body, fromRow(old).sourceImages);
     const result = books.transaction(() => writeArticle(req.user.id, req.body, sourceImages, old));
     res.json(result);
@@ -552,7 +597,10 @@ export function createApp({
     if (!Number.isSafeInteger(revision) || revision < 1) {
       throw new HttpError(400, "缺少有效的文档版本，请重新打开后再删除。");
     }
+    if(revision!==document.revision)throw new HttpError(409,'这篇材料已在其他页面修改，请重新打开最新版本后再决定是否删除。');
     books.transaction(() => {
+      imports.invalidateTarget(req.user.id,{documentId:document.id});
+      sources.deleteDocument?.(req.user.id, document.id);
       const result = database
         .prepare("DELETE FROM documents WHERE id = ? AND revision = ?")
         .run(document.id, revision);
@@ -634,14 +682,19 @@ export function createApp({
     if (closed) return;
     closed = true;
     imageTasks.close();
+    sources.close();
+    imports.close();
     ai.close();
     database.close();
   }
   async function shutdown({ beforeClose = Promise.resolve() } = {}) {
     if (closed) return;
     imageTasks.close();
-    ai.close();
+    sources.stop();
+    imports.close();
     await imageTasks.drain();
+    await sources.drain();
+    ai.close();
     await ai.whenIdle?.();
     await beforeClose;
     close();
@@ -650,6 +703,9 @@ export function createApp({
     app,
     ai,
     imageTasks,
+    imports,
+    tasks,
+    sources,
     close,
     shutdown,
   };

@@ -44,7 +44,7 @@ export default function BookView({
         </div>
         <div className="book-actions">
           <button type="button" className="button primary" disabled={busy} onClick={onAddImage}>
-            添加图片文章
+            导入阅读资料
           </button>
           <button type="button" className="button secondary" disabled={busy} onClick={onAddText}>
             添加文字文章
@@ -52,7 +52,7 @@ export default function BookView({
         </div>
       </div>
       <p className="stage2-description">
-        一本书包含多篇文章，每篇可关联多张来源图片。正文连续阅读，文章顺序可调整。
+        一本书包含多篇文章，每篇可关联多个原始来源。正文按页阅读，文章顺序可调整。
       </p>
       <form className="book-rename" onSubmit={(event) => {
         event.preventDefault();
@@ -99,7 +99,7 @@ export default function BookView({
       ) : (
         <div className="book-empty">
           <h2>先添加第一篇文章</h2>
-          <p>选择「添加图片文章」导入一张照片或截图，也可以添加文字文章。保存后就能在这里按文章阅读。</p>
+          <p>选择「导入阅读资料」导入一张照片或截图，也可以添加文字文章。保存后就能在这里按文章阅读。</p>
         </div>
       )}
       <footer className="book-footer">

@@ -12,6 +12,17 @@ import { serializeBlocks } from "../shared/document.mjs";
 import { editBodyText, bodyText, bodyRanges, markBodyRange, applySentenceBoundaries } from "../shared/article-html.mjs";
 import { createHash } from "node:crypto";
 
+test('删除书籍同时清理所属文章的来源范围和阅读会话', async (t) => {
+  const f=await fixture(t);
+  const book=(await f.request('/api/books','POST',{title:'来源清理'})).data;
+  const article=(await f.request('/api/documents','POST',{...input('来源文章'),bookId:book.id})).data;
+  assert.equal((await f.request(`/api/documents/${article.id}/sources`)).status,200);
+  assert.ok(f.inspect(db=>db.prepare('SELECT count(*) AS n FROM article_sources WHERE document_id=?').get(article.id).n)>0);
+  const current=(await f.request(`/api/books/${book.id}`)).data;
+  assert.equal((await f.request(`/api/books/${book.id}`,'DELETE',{revision:current.revision})).status,204);
+  assert.equal(f.inspect(db=>db.prepare('SELECT count(*) AS n FROM article_sources WHERE document_id=?').get(article.id).n),0);
+});
+
 const input = (title, content = "{日本語|にほんご}を読む。") => ({ title, content, kind: "book", orientation: "horizontal" });
 
 async function fixture(t, beforeStart) {
