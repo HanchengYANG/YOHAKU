@@ -419,6 +419,60 @@ test('edit renewal never reacquires a released lease or changes a newer opening'
   }finally{database.close();}
 });
 
+test('late first edit acquisition cannot replace a newer opening or revive an abandoned one',async t=>{
+  const f=await fixture(t);
+  const id=(await f.importText('日本語の原文。')).firstDocumentId,documentPath=`/documents/${id}`;
+  const [source]=(await f.request(`${documentPath}/sources`)).sources;
+  const sourcePath=`${documentPath}/sources/${source.id}`,editPath=`${sourcePath}/edit`;
+  const acquire=(sessionId,editRevision,expected=200)=>f.request(editPath,'POST',{sessionId,editRevision},expected);
+  const release=(sessionId,editRevision)=>f.request(editPath,'DELETE',{sessionId,editRevision});
+  const database=new DatabaseSync(join(f.dataDir,'yohaku.sqlite'),{readOnly:true});
+  const lease=()=>database.prepare('SELECT edit_session,edit_expires FROM article_sources WHERE scope_id=?').get(source.scopeId);
+  const rejectsOld=async(sessionId,revision)=>assert.equal((await acquire(sessionId,revision,409)).code,'SOURCE_EDIT_REVISION_CONFLICT');
+  try{
+    const observed=(await f.request(sourcePath)).editRevision;
+    assert.ok(Number.isSafeInteger(observed)&&observed>=0);
+    const newer=await acquire('newer-opening',observed),newerLease=lease();
+    assert.equal(newer.editRevision,observed+1);
+    assert.equal(newer.version,source.version);
+    assert.equal(newerLease.edit_session,'newer-opening');
+    await rejectsOld('delayed-opening',observed);
+    const staleCleanup=await release('delayed-opening',observed);
+    assert.equal(staleCleanup.editRevision,newer.editRevision);
+    assert.deepEqual(lease(),newerLease);
+
+    const cancelledWhileHeld=await release('never-delivered-while-held',newer.editRevision);
+    assert.equal(cancelledWhileHeld.editRevision,newer.editRevision+1);
+    assert.equal(cancelledWhileHeld.editing,true);
+    assert.deepEqual(lease(),newerLease,'the pending cancel fences acquisition without releasing a different holder');
+    await rejectsOld('never-delivered-while-held',newer.editRevision);
+    await f.request(editPath,'POST',{sessionId:'newer-opening',renew:true});
+    assert.equal((await f.request(sourcePath)).editRevision,cancelledWhileHeld.editRevision);
+
+    const reopened=await acquire('observed-reopen',cancelledWhileHeld.editRevision);
+    assert.equal(reopened.editRevision,cancelledWhileHeld.editRevision+1);
+    assert.equal(lease().edit_session,'observed-reopen');
+    const free=await release('observed-reopen',cancelledWhileHeld.editRevision);
+    assert.equal(free.editing,false,'the holder can release using its original observation');
+
+    const abandoned=await release('abandoned-opening',free.editRevision);
+    assert.equal(abandoned.editRevision,free.editRevision+1);
+    assert.equal(abandoned.editing,false);
+    await f.restart();
+    await rejectsOld('abandoned-opening',free.editRevision);
+    const stillFree=await f.request(sourcePath);
+    assert.equal(stillFree.editRevision,abandoned.editRevision);
+    assert.equal(stillFree.editing,false);
+    assert.equal(stillFree.bodyHtml,source.bodyHtml);
+    assert.equal(stillFree.version,source.version);
+
+    const legacy=await acquire('legacy-opening');
+    assert.equal(legacy.editRevision,stillFree.editRevision+1);
+    assert.equal((await release('legacy-opening')).editing,false);
+    await rejectsOld('stale-before-legacy',stillFree.editRevision);
+  }finally{database.close();}
+});
+
 test('keeping current source text rejects stale proposals and resumes the existing task without applying AI edits',async t=>{
   const original='日本語の原文です。\n削除してはいけない本文。',proposed='日本語の原文です。';
   let extractions=0;

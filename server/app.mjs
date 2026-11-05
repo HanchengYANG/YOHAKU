@@ -669,7 +669,7 @@ export function createApp({
     if (status >= 500 && !error.expose)
       console.error("数据库或服务错误：", error.message);
     res.status(status).json({
-      ...(["WEBSITE_AUTH_REQUIRED", "TASK_VERSION_CONFLICT", "TASK_RESULT_STALE", "TASK_UNAVAILABLE"].includes(error.code) ? { code: error.code } : {}),
+      ...(["WEBSITE_AUTH_REQUIRED", "TASK_VERSION_CONFLICT", "TASK_RESULT_STALE", "TASK_UNAVAILABLE", "SOURCE_EDIT_REVISION_CONFLICT"].includes(error.code) ? { code: error.code } : {}),
       error:
         status >= 500 && !error.expose
           ? "服务暂时遇到问题，请稍后再试。"

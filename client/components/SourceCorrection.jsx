@@ -7,7 +7,7 @@ import ArticleBody from "./ArticleBody.jsx";
 import DocumentChat from "./DocumentChat.jsx";
 import "../sources.css";
 
-const releaseEdit = (lease) => api(`${lease.path}/edit`, {method:"DELETE",keepalive:true,body:JSON.stringify({sessionId:lease.id})});
+const releaseEdit = (lease) => api(`${lease.path}/edit`, {method:"DELETE",keepalive:true,body:JSON.stringify({sessionId:lease.id,editRevision:lease.revision})});
 
 function SourcePreview({ source }) {
   const [zoom,setZoom] = useState(100), [rotation,setRotation] = useState(0);
@@ -41,6 +41,7 @@ export default function SourceCorrection({ document, sourceIds = [], reviewSourc
   const [sources,setSources] = useState([]), [activeId,setActiveId] = useState(null), [source,setSource] = useState(null);
   const [html,setHtml] = useState(""), [editing,setEditing] = useState(false), [dirty,setDirty] = useState(false), [proposalEditing,setProposalEditing] = useState(false);
   const [error,setError] = useState(""), [busy,setBusy] = useState(false), [overview,setOverview] = useState(false);
+  const [openingEdit,setOpeningEdit] = useState(false);
   const [selection,setSelection] = useState(null), [notice,setNotice] = useState("");
   const [chatOpen,setChatOpen] = useState(false), [chatRequest,setChatRequest] = useState(null), [chatNavigation,setChatNavigation] = useState(null), [answering,setAnswering] = useState(false);
   const session = useRef(crypto.randomUUID()), detailSequence = useRef(0), isEditing = useRef(false), editLease = useRef(null);
@@ -51,7 +52,7 @@ export default function SourceCorrection({ document, sourceIds = [], reviewSourc
     const lease = editLease.current;
     if (!lease || lease.path !== sourcePath) return;
     editLease.current = null;
-    if (lease.held) return releaseEdit(lease);
+    if (lease.held || Number.isSafeInteger(lease.revision)) return releaseEdit(lease);
   };
   const loadSources = async () => {const result = await api(route);setSources(result.sources);return result.sources;};
   useEffect(() => {
@@ -112,23 +113,33 @@ export default function SourceCorrection({ document, sourceIds = [], reviewSourc
   const beginEdit = async (overrideHtml) => {
     const proposed = typeof overrideHtml === "string" ? overrideHtml : null;
     const clickedVersion = source?.version, clickedProposal = source?.proposal?.bodyHtml;
-    const lease = {id:crypto.randomUUID(),path:sourcePath,held:false};
+    const lease = {id:crypto.randomUUID(),path:sourcePath,revision:source?.editRevision,held:false};
+    const acquire = () => api(`${lease.path}/edit`,{method:"POST",body:JSON.stringify({sessionId:lease.id,editRevision:lease.revision})});
     editLease.current = lease;
     setProposalEditing(proposed !== null);
-    setBusy(true);setError("");setNotice("");
+    setBusy(true);setOpeningEdit(true);setError("");setNotice("");
     let latest;
     try {
-      latest = await api(`${lease.path}/edit`,{method:"POST",body:JSON.stringify({sessionId:lease.id})});
+      try {
+        latest = await acquire();
+      } catch (cause) {
+        if (cause.code !== "SOURCE_EDIT_REVISION_CONFLICT" || editLease.current !== lease) throw cause;
+        const refreshed = await api(lease.path);
+        if (editLease.current !== lease) return;
+        if (refreshed.editing) throw cause;
+        lease.revision = refreshed.editRevision;
+        latest = await acquire();
+      }
     } catch (cause) {
-      void releaseEdit(lease).catch(() => {});
+      if (cause.code !== "SOURCE_EDIT_REVISION_CONFLICT") void releaseEdit(lease).catch(() => {});
       if (editLease.current !== lease) return;
       editLease.current = null;
-      setError(cause.message);setBusy(false);
+      setError(cause.message);setBusy(false);setOpeningEdit(false);
       return;
     }
     if (editLease.current !== lease) {void releaseEdit(lease).catch(() => {});return;}
     lease.held = true;
-    setBusy(false);
+    setBusy(false);setOpeningEdit(false);
     if (proposed !== null && (latest.version !== clickedVersion || proposed !== clickedProposal || latest.proposal?.bodyHtml !== proposed)) {
       void closeEdit()?.catch(() => {});
       reviewSequence.current++;
@@ -226,10 +237,11 @@ export default function SourceCorrection({ document, sourceIds = [], reviewSourc
   const viewGroups = (ids) => {setChatNavigation({key:crypto.randomUUID(),documentId:document.id,groupIds:ids});setChatRequest(null);setChatOpen(true);};
   const first = source?.firstExtraction;
   return <section className={`source-correction ${chatOpen ? "has-chat" : ""}`} aria-label="校对正文">
-    <div className="source-correction-main"><div className="source-heading"><div><span className="eyebrow">校对正文</span><h1>{document.title}</h1></div><button className="button subtle" disabled={busy} onClick={onClose}>返回阅读</button></div>
+    <div className="source-correction-main"><div className="source-heading"><div><span className="eyebrow">校对正文</span><h1>{document.title}</h1></div><button className="button subtle" disabled={busy && !openingEdit} onClick={onClose}>返回阅读</button></div>
       <div className="source-toolbar"><label>当前来源 <select aria-label="切换校对来源" value={activeId || ""} disabled={busy} onChange={(e) => switchSource(e.target.value)}>{!activeId && <option value="" disabled>选择来源</option>}{sources.map((item) => <option key={item.id} value={item.id}>{sourceLabel(item)} · {item.checked ? "已核对" : "待核对"}</option>)}</select></label>
         {sources.length > 1 && sources.every((item) => ["photo","screenshot","image"].includes(item.type)) && <><button className="text-button" disabled={busy || dirty || sources[0]?.id === activeId} onClick={() => reorder(-1)}>来源上移</button><button className="text-button" disabled={busy || dirty || sources.at(-1)?.id === activeId} onClick={() => reorder(1)}>来源下移</button></>}
         <button className="button secondary" onClick={() => {setOverview(!overview);void loadSources();}}>全文检查</button><button className="button subtle" onClick={() => setChatOpen(!chatOpen)}>对话记录</button></div>
+      {openingEdit && <p role="status">正在打开编辑，可以返回阅读。</p>}
       {error && <p className="source-error" role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
       {overview ? <div className="source-overview"><h2>已准备正文与待准备位置</h2><p>这里只展示已保存内容。选择来源后才准备该来源。</p>{sources.map((item) => <section key={item.id}><button className="text-button" onClick={() => {switchSource(item.id);setOverview(false);}}>{sourceLabel(item)} · {item.checked ? "已核对" : "待核对"}</button>{item.bodyHtml && bodyText(item.bodyHtml).trim() ? <ArticleBody html={item.bodyHtml} showRuby fontSize={22} /> : item.firstExtraction && item.status === "ready" ? <p>{item.original?.importExclusions?.length ? "非正文内容已排除" : "此来源没有正文"}</p> : <p className="source-unprepared">此处正文尚未准备</p>}</section>)}</div>
         : !source ? !error && <p role="status">正在读取来源…</p> : <>

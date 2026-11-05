@@ -72,6 +72,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
   // NULL retains legacy manual boundary protection. New saves distinguish
   // touched readings/marks from human changes to text or sentence boundaries.
   if(!database.prepare('PRAGMA table_info(article_sources)').all().some(column=>column.name==='manual_boundaries'))database.exec('ALTER TABLE article_sources ADD COLUMN manual_boundaries INTEGER');
+  if(!database.prepare('PRAGMA table_info(article_sources)').all().some(column=>column.name==='edit_revision'))database.exec('ALTER TABLE article_sources ADD COLUMN edit_revision INTEGER NOT NULL DEFAULT 0');
   for(const [column,type] of [['snapshot_json','TEXT'],['finished_at','TEXT'],['target_json','TEXT']])if(!database.prepare('PRAGMA table_info(source_preparation_requests)').all().some(value=>value.name===column))database.exec(`ALTER TABLE source_preparation_requests ADD COLUMN ${column} ${type}`);
   for(const table of ['source_step_attempts','source_preparation_jobs'])if(!database.prepare(`PRAGMA table_info(${table})`).all().some(value=>value.name==='request_id'))database.exec(`ALTER TABLE ${table} ADD COLUMN request_id TEXT`);
   if(!database.prepare('PRAGMA table_info(reading_sessions)').all().some(column=>column.name==='last_sequence'))database.exec('ALTER TABLE reading_sessions ADD COLUMN last_sequence INTEGER');
@@ -439,7 +440,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     const processing=row.status==='processing'||!internal&&row.status==='pending'&&steps.some(({step,inputVersion,status})=>
       status==='running'&&inputVersion===row.version&&(liveNodes??=liveSourceNodes(row.user_id,row.document_id)).has(json([row.scope_id,inputVersion,step])));
     const text=body.bodyText(html);
-    return {id:row.source_id,scopeId:row.scope_id,type:row.type,localRange:decode(row.range_json),position:row.position,...(internal?{documentTitle:document.title}:{failedCorrection:failedCorrection(row,text)}),version:row.version,checked:row.checked_version===row.version,checkedVersion:row.checked_version,status:row.status,processing,manual:!!row.manual,editing:!!row.edit_session&&row.edit_expires>now(),preview,original:internal?decode(row.original_json,{}):publicMetadata(decode(row.original_json,{})),firstExtraction:decode(row.first_extraction_json),bodyHtml:html,text,articleStart:before,articleEnd:before+text.length,articleBodyHash,error:row.error||null,proposal:decode(row.proposal_json),proposalToken:reviewToken(row),steps,changes:database.prepare("SELECT version,step,body_html AS bodyHtml,execution_json AS executionJson,created_at AS createdAt FROM source_revisions WHERE scope_id=? ORDER BY version,created_at,CASE step WHEN 'extract' THEN 0 WHEN 'chapter_filter' THEN 1 ELSE 2 END").all(row.scope_id).map(({executionJson,...revision})=>({...revision,...(revision.step==='keep_uncorrected'?{label:'使用未校对的当前正文'}:{}),execution:decode(executionJson)}))};
+    return {id:row.source_id,scopeId:row.scope_id,type:row.type,localRange:decode(row.range_json),position:row.position,...(internal?{documentTitle:document.title}:{failedCorrection:failedCorrection(row,text),editRevision:row.edit_revision}),version:row.version,checked:row.checked_version===row.version,checkedVersion:row.checked_version,status:row.status,processing,manual:!!row.manual,editing:!!row.edit_session&&row.edit_expires>now(),preview,original:internal?decode(row.original_json,{}):publicMetadata(decode(row.original_json,{})),firstExtraction:decode(row.first_extraction_json),bodyHtml:html,text,articleStart:before,articleEnd:before+text.length,articleBodyHash,error:row.error||null,proposal:decode(row.proposal_json),proposalToken:reviewToken(row),steps,changes:database.prepare("SELECT version,step,body_html AS bodyHtml,execution_json AS executionJson,created_at AS createdAt FROM source_revisions WHERE scope_id=? ORDER BY version,created_at,CASE step WHEN 'extract' THEN 0 WHEN 'chapter_filter' THEN 1 ELSE 2 END").all(row.scope_id).map(({executionJson,...revision})=>({...revision,...(revision.step==='keep_uncorrected'?{label:'使用未校对的当前正文'}:{}),execution:decode(executionJson)}))};
   }
   function listSources(userId,id) {const document=requireDocument(userId,id),rows=scopes(userId,id),articleOffsets=new Map();let offset=0;for(const row of rows){articleOffsets.set(row.source_id,offset);offset+=body.bodyText(readHtml(row)).length;}const articleBodyHash=document.body_hash||hash(compose(rows)),liveNodes=liveSourceNodes(userId,id);return rows.map(row=>sourceDetail(row,{articleOffsets,articleBodyHash,liveNodes}));}
   const getSource=(userId,id,sourceId)=>sourceDetail(scope(userId,id,sourceId));
@@ -546,13 +547,18 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     }
     if(row.edit_session&&row.edit_expires>now()&&row.edit_session!==input.sessionId)throw fail(409,'另一个页面正在编辑此来源，请保存或退出编辑后再试。');
     const saved=saveSource(userId,id,sourceId,{version:row.version,bodyHtml:html},afterFailure?'keep_uncorrected':'manual');
-    return row.edit_session&&row.edit_session===input.sessionId?endEdit(userId,id,sourceId,input):saved;
+    return row.edit_session&&row.edit_session===input.sessionId?endEdit(userId,id,sourceId,{sessionId:input.sessionId}):saved;
   }
   function markChecked(userId,id,sourceId,input) {
     const row=scope(userId,id,sourceId);assertVersion(row,input?.version);
     if(input.checked!==undefined&&typeof input.checked!=='boolean')throw fail(400,'核对状态无效。');
     database.prepare('UPDATE article_sources SET checked_version=? WHERE scope_id=?').run(input.checked===false?null:row.version,row.scope_id);
     return getSource(userId,id,sourceId);
+  }
+  function expectedEditRevision({editRevision,sessionId}) {
+    if(editRevision===undefined)return null;
+    if(!Number.isSafeInteger(editRevision)||editRevision<0||typeof sessionId!=='string'||!sessionId)throw fail(400,'编辑会话或序号无效。');
+    return editRevision;
   }
   function beginEdit(userId,id,sourceId,input={}) {
     const row=scope(userId,id,sourceId),sessionId=input.sessionId||randomUUID();
@@ -562,12 +568,17 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
       if(!renewed.changes)throw fail(409,'这次编辑保护已结束。草稿仍可保存，保存时会检查正文版本。');
       return {sessionId};
     }
-    database.prepare('UPDATE article_sources SET edit_session=?,edit_expires=? WHERE scope_id=?').run(sessionId,now()+sessionTtlMs,row.scope_id);
+    const revision=expectedEditRevision(input);
+    const acquired=database.prepare('UPDATE article_sources SET edit_session=?,edit_expires=?,edit_revision=edit_revision+1 WHERE scope_id=? AND (? IS NULL OR edit_revision=?)').run(sessionId,now()+sessionTtlMs,row.scope_id,revision,revision);
+    if(!acquired.changes)throw Object.assign(fail(409,'来源的编辑状态已更新，请重新打开编辑。'),{code:'SOURCE_EDIT_REVISION_CONFLICT'});
     return {...getSource(userId,id,sourceId),sessionId};
   }
   function endEdit(userId,id,sourceId,input={}) {
-    const row=scope(userId,id,sourceId);
-    if(!input.sessionId||row.edit_session===input.sessionId)database.prepare('UPDATE article_sources SET edit_session=NULL,edit_expires=NULL WHERE scope_id=?').run(row.scope_id);
+    const row=scope(userId,id,sourceId),revision=expectedEditRevision(input),sessionId=input.sessionId||null;
+    const released=database.prepare('UPDATE article_sources SET edit_session=NULL,edit_expires=NULL WHERE scope_id=? AND (? IS NULL OR edit_session=?)').run(row.scope_id,sessionId,sessionId);
+    // A cleanup can arrive before its acquisition. Invalidate that observed
+    // revision without releasing an editor whose token belongs to another attempt.
+    if(!released.changes&&revision!==null)database.prepare('UPDATE article_sources SET edit_revision=edit_revision+1 WHERE scope_id=? AND edit_revision=?').run(row.scope_id,revision);
     schedule();return getSource(userId,id,sourceId);
   }
   function rangesForInterval(rows,start,end) {

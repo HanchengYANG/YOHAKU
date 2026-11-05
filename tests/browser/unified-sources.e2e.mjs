@@ -942,6 +942,81 @@ test("old edit lease renewal and release cannot interfere with a reopened source
   }finally{releaseRenewal();releaseCancel();}
 });
 
+test("leaving during edit acquisition cannot replace a lease opened after returning",async({page})=>{
+  const source={id:"s2",type:"text",position:1,version:7,status:"ready",bodyHtml:html(original),preview:{type:"text",text:original},editRevision:0};
+  const state=await fixture(page,{source});
+  const acquires=[],releases=[];
+  let editRevision=0,activeLease=null,reopening=false,releaseFirst;
+  const firstGate=new Promise(resolve=>releaseFirst=resolve);
+  const detail=(revision=editRevision)=>({...source,editRevision:revision,editing:activeLease!==null});
+  await page.route("**/api/documents/doc/sources/s2",route=>{
+    if(route.request().method()!=="GET")return route.fallback();
+    // The reopened view sees a snapshot from before the abandoned acquisition was cancelled.
+    return route.fulfill({json:detail(reopening&&acquires.length===1 ? 0 : editRevision)});
+  });
+  await page.route("**/api/documents/doc/sources/s2/edit",async route=>{
+    const request=route.request(),input=request.postDataJSON();
+    if(request.method()==="DELETE"){
+      releases.push(input);
+      if(activeLease===input.sessionId)activeLease=null;
+      else if(input.editRevision===editRevision)editRevision++;
+      return route.fulfill({json:detail()});
+    }
+    if(input.renew)return route.fulfill({json:{sessionId:input.sessionId}});
+    const acquire={request,input,status:200};
+    acquires.push(acquire);
+    if(acquires.length===1)await firstGate;
+    if(input.editRevision!==editRevision){
+      acquire.status=409;
+      return route.fulfill({status:409,json:{code:"SOURCE_EDIT_REVISION_CONFLICT",error:"编辑状态已更新，请重试。"}});
+    }
+    activeLease=input.sessionId;editRevision++;
+    return route.fulfill({json:{...detail(),sessionId:activeLease}});
+  });
+
+  try{
+    await page.goto("/#doc");
+    const correction=page.getByRole("button",{name:"校对正文",exact:true}),edit=page.getByRole("button",{name:"编辑正文与注音",exact:true});
+    await correction.click();await edit.click();
+    await expect.poll(()=>acquires.length).toBe(1);
+    const abandoned=acquires[0];
+    await expect(page.getByRole("status").filter({hasText:"正在打开编辑"})).toBeVisible();
+    await page.getByRole("button",{name:"返回阅读",exact:true}).click();
+    await expect(page.getByRole("article",{name:"日语原文",exact:true})).toBeVisible();
+    await expect.poll(()=>editRevision).toBe(1);
+    expect(releases).toEqual([{sessionId:abandoned.input.sessionId,editRevision:0}]);
+
+    reopening=true;
+    await correction.click();await edit.click();
+    const editor=page.getByLabel("来源正文",{exact:true});
+    await expect(editor).toHaveValue(original);
+    const [,conflict,current]=acquires;
+    expect(acquires).toHaveLength(3);
+    expect(conflict.status).toBe(409);
+    expect(conflict.input).toMatchObject({sessionId:current.input.sessionId,editRevision:0});
+    expect(current.input.editRevision).toBe(1);
+    expect(current.input.sessionId).not.toBe(abandoned.input.sessionId);
+    const draft="再び開いた編集画面の下書き。";
+    await editor.fill(draft);
+
+    const late=page.waitForResponse(response=>response.request()===abandoned.request);
+    releaseFirst();
+    const lateResponse=await late;
+    expect(lateResponse.status()).toBe(409);
+    await lateResponse.finished();
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    expect(acquires).toHaveLength(3);
+    expect(activeLease).toBe(current.input.sessionId);
+    await expect(editor).toHaveValue(draft);
+    await expect(page.locator(".source-error")).toHaveCount(0);
+    await page.getByRole("button",{name:"保存正文",exact:true}).click();
+    await expect(page.getByRole("status").filter({hasText:"已保存，将仅补齐"})).toBeVisible();
+    expect(state.saves).toHaveLength(1);
+    expect(state.saves[0]).toMatchObject({sessionId:current.input.sessionId,version:source.version});
+    expect(bodyText(state.saves[0].bodyHtml)).toBe(draft);
+  }finally{releaseFirst();}
+});
+
 for(const change of ["version","proposal"])test(`a delayed proposal edit rejects a changed ${change} and releases its edit lease`,async({page})=>{
   const state=await delayedProposalEditFixture(page);
   try{
