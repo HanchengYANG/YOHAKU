@@ -769,6 +769,21 @@ for(const conflict of [false,true])test(`keeping current source text ${conflict 
   }finally{state.release();}
 });
 
+test("a segmentation failure offers explicit retry but cannot keep current text as a correction fallback",async({page})=>{
+  const state=await fixture(page,{source:{status:"failed",error:"分句失败",steps:[{step:"segment",status:"failed"}],failedCorrection:null}});
+  await page.goto("/#doc");
+  await page.getByRole("button",{name:"校对正文",exact:true}).click();
+  const correction=page.getByRole("region",{name:"校对正文",exact:true});
+  await expect(correction.locator(".source-current-body")).toContainText(original);
+  await expect(correction.getByRole("button",{name:"使用当前正文继续",exact:true})).toHaveCount(0);
+  const prepares=()=>state.calls.filter(call=>call.method==="POST"&&call.path==="/documents/doc/sources/s2/prepare");
+  await expect.poll(()=>prepares().length).toBe(1);
+  expect(prepares()[0].input).toMatchObject({retry:false});
+  await correction.getByRole("button",{name:"重试准备此来源",exact:true}).click();
+  await expect.poll(()=>prepares().length).toBe(2);
+  expect(prepares()[1].input.retry).not.toBe(false);
+});
+
 
 for (const sourceType of ["text_pdf","epub"]) test(`${sourceType} correction previews preserve original page and ruby`,async({page})=>{
   const source = sourceType === "text_pdf" ? {type:"text_pdf",preview:{type:"pdf",url:"/original.pdf",page:12}} : {type:"epub",preview:{type:"html",html:blocksToHtml(parseText("{原文|げんぶん}を残す。"))},original:{chapterHtml:blocksToHtml(parseText("{原文|げんぶん}を残す。\n章全体の続き。"))}};

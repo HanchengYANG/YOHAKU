@@ -192,23 +192,29 @@ test("preparation detail shows dependency and execution states without running d
   await page.screenshot({path:`artifacts/unified-task-detail-${info.project.name}.png`,fullPage:true});
 });
 
-for(const missing of [false,true])test(`preparation task review ${missing ? "reports a missing exact source" : "opens the exact later PDF source without starting work"}`,async({page})=>{
+async function pdfTaskSourceFixture(page,{missing=false,failedCorrection=null}={}) {
   const state=await fixture(page);
   const makeHtml=(text)=>applySentenceBoundaries(blocksToHtml(parseText(text)),[text]);
   const pdfSource=(pageNumber,text,status)=>({id:`source-${pageNumber}`,type:"scan_pdf",position:pageNumber-105,version:2,status,
     bodyHtml:makeHtml(text),original:{page:pageNumber},preview:{type:"pdf",url:"/api/imports/imp/files/file/raw",page:pageNumber},
     ...(status==="requires_review" ? {proposal:{bodyHtml:makeHtml(`第${pageNumber}頁の提案。`)},proposalToken:"a".repeat(64)} : {})});
-  const firstText="初めの本文。",first=pdfSource(105,firstText,"ready"),earlier=pdfSource(109,"前の要確認本文。","requires_review"),target=pdfSource(110,"開きたい本文。","requires_review");
+  const firstText="初めの本文。",targetText="開きたい本文。";
+  const first=pdfSource(105,firstText,"ready"),earlier=pdfSource(109,"前の要確認本文。","requires_review"),target=pdfSource(110,targetText,failedCorrection ? "failed" : "requires_review");
+  if(failedCorrection)Object.assign(target,{failedCorrection,firstExtraction:{text:targetText,label:"本地 OCR 首次提取结果"}});
   state.sources=missing ? [first,earlier] : [first,earlier,target];
   const readingPage={id:"first-page",index:0,ready:true,bodyHtml:first.bodyHtml,sourceIds:[first.id],start:0,end:firstText.length};
   state.document={id:"article",title:"十四元気茶",kind:"article",sourceWorkflow:true,revision:1,updatedAt:createdAt,preview:firstText,
     blocks:parseText(firstText),bodyHtml:first.bodyHtml,reading:{pages:[readingPage],currentPage:readingPage,index:0,hasNext:true}};
   const step=(source,status)=>({id:`${source.id}:correct`,step:"correct",title:`PDF 第${source.original.page}页 · 正文校对`,status,sourceId:source.id,
     source:{id:source.id,label:`PDF 第${source.original.page}页`,type:source.type,page:source.original.page}});
-  state.task={...state.task,documentId:state.document.id,steps:[step(first,"running"),step(earlier,"requires_review"),step(target,"requires_review")]};
+  state.task={...state.task,documentId:state.document.id,steps:[step(first,"running"),step(earlier,"requires_review"),step(target,failedCorrection?.status || "requires_review")]};
   const previewUrl="/api/imports/imp/files/file/pages/110";
   await page.route(`**${previewUrl}`,route=>route.fulfill({contentType:"image/svg+xml",body:'<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="white"/></svg>'}));
+  return {state,target,targetText,previewUrl};
+}
 
+for(const missing of [false,true])test(`preparation task review ${missing ? "reports a missing exact source" : "opens the exact later PDF source without starting work"}`,async({page})=>{
+  const {state,target,previewUrl}=await pdfTaskSourceFixture(page,{missing});
   await page.goto("/#tasks/prepare-14");
   const detail=page.getByRole("region",{name:"任务状态",exact:true});
   await expect(detail.locator(".task-state")).toHaveText("执行中");
@@ -232,6 +238,42 @@ for(const missing of [false,true])test(`preparation task review ${missing ? "rep
   const detailReads=state.calls.filter(call=>call.method==="GET"&&call.path.startsWith("/documents/article/sources/"));
   expect([...new Set(detailReads.map(call=>call.path))]).toEqual(missing ? [] : [`/documents/article/sources/${target.id}`]);
   expect(state.calls.filter(call=>call.method!=="GET"&&(call.path.startsWith("/documents/article/")||call.path.startsWith("/tasks/prepare-14/")))).toEqual([]);
+});
+
+for(const status of ["timeout","failed"])test(`preparation task can explicitly keep OCR text after correction ${status}`,async({page})=>{
+  const failedCorrection={attemptId:`correction-${status}`,status};
+  const {state,target,targetText,previewUrl}=await pdfTaskSourceFixture(page,{failedCorrection});
+  const requests=[];
+  await page.route(`**/api/documents/article/sources/${target.id}/keep-current`,route=>{
+    const request=route.request();requests.push({method:request.method(),body:request.postDataJSON()});
+    const saved={...target,version:target.version+1,status:"pending",failedCorrection:null};
+    state.sources=state.sources.map(source=>source.id===target.id ? saved : source);
+    return route.fulfill({json:saved});
+  });
+
+  await page.goto("/#tasks/prepare-14");
+  await page.getByRole("region",{name:"任务状态",exact:true}).getByRole("button",{name:"查看 PDF 第110页 正文",exact:true}).click();
+  const correction=page.getByRole("region",{name:"校对正文",exact:true});
+  await expect(correction.getByLabel("切换校对来源",{exact:true})).toHaveValue(target.id);
+  const failure=correction.getByRole("alert").filter({has:page.getByRole("heading",{name:status==="timeout" ? "AI 校对已超时" : "AI 校对未完成",exact:true})});
+  await expect(failure).toContainText("当前正文已保存");
+  await expect(failure).toContainText("尚未校对的正文");
+  await expect(correction.locator(".source-current-body")).toContainText(targetText);
+  const originalPage=correction.getByRole("img",{name:"PDF 原始页面，第 110 页",exact:true});
+  await expect(originalPage).toHaveAttribute("src",previewUrl);
+  await expect.poll(()=>originalPage.evaluate(image=>image.complete&&image.naturalWidth>0)).toBe(true);
+  const writes=()=>state.calls.filter(call=>call.method!=="GET"&&(call.path.startsWith("/documents/article/")||call.path.startsWith("/tasks/prepare-14/")));
+  expect(requests).toEqual([]);
+  expect(writes()).toEqual([]);
+
+  const keep=correction.getByRole("button",{name:"使用当前正文继续",exact:true});
+  await keep.click();
+  await expect(correction.getByText("已保留当前正文，后台将继续分句和注音。",{exact:true})).toBeVisible();
+  await expect(keep).toHaveCount(0);
+  await expect(correction.locator(".source-current-body")).toContainText(targetText);
+  await expect(correction.getByLabel("来源正文",{exact:true})).toHaveCount(0);
+  expect(requests).toEqual([{method:"POST",body:{version:target.version,failedCorrectionAttemptId:failedCorrection.attemptId,sessionId:expect.any(String)}}]);
+  expect(writes()).toEqual([]);
 });
 
 for(const type of ["import","preparation","image"])test(`${type} task duration is labeled as elapsed lifecycle time without changing recorded execution time`,async({page})=>{

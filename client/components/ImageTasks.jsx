@@ -64,8 +64,8 @@ function BackgroundStep({step,index,type}) {
 }
 function BackgroundTaskDetail({task,busy,error,onBack,onDocumentOpen,onImportOpen,onRetry,onDelete,reload}) {
   const capabilities=taskActions(task),status=taskStatus(task),steps=task.steps || [];
-  const reviewSteps = task.type === "preparation" && task.documentId && !task.archived
-    ? steps.filter(step => step.step === "correct" && step.status === "requires_review" && step.sourceId)
+  const attentionSteps = task.type === "preparation" && task.documentId && !task.archived
+    ? steps.filter(step => step.step === "correct" && ["requires_review", "timeout", "failed"].includes(step.status) && step.sourceId)
     : [];
   const stoppedError=["failed","timeout","interrupted"].includes(status);
   const message=task.message || (task.archived ? "任务已完成并归档，成功结果与处理记录会保留。" : stoppedError ? "任务已停止，成功步骤与原始资料已保留。重试只执行失败或超时的步骤。" : status === "requires_review" || status === "ready" ? "请核对结果后继续，成功步骤已保留。" : status === "draft" ? "原始资料已保存，可继续确认来源和导入范围。" : "可以离开此页面，后台会继续处理。不同章节独立推进。");
@@ -81,11 +81,14 @@ function BackgroundTaskDetail({task,busy,error,onBack,onDocumentOpen,onImportOpe
       <ExecutionTiming execution={task.execution} />
       <ExecutionDetails execution={task.execution} />
       <div className="task-actions">
-        {reviewSteps.map(step => <button key={step.sourceId} className="button primary" type="button" disabled={busy}
-          onClick={() => onDocumentOpen?.(task.documentId, { reviewSourceId: step.sourceId })}>
-          核对 {step.source?.label || step.title || "来源正文"}<Icon name="arrow" size={16} />
-        </button>)}
-        {task.documentId && <button className={`button ${reviewSteps.length ? "secondary" : "primary"}`} type="button" onClick={()=>onDocumentOpen?.(task.documentId)}>打开关联文章<Icon name="arrow" size={16} /></button>}
+        {attentionSteps.map(step => {
+          const label = step.source?.label || step.title || "来源";
+          return <button key={step.sourceId} className="button primary" type="button" disabled={busy}
+            onClick={() => onDocumentOpen?.(task.documentId, { reviewSourceId: step.sourceId })}>
+            {step.status === "requires_review" ? `核对 ${label}` : `查看 ${label} 正文`}<Icon name="arrow" size={16} />
+          </button>;
+        })}
+        {task.documentId && <button className={`button ${attentionSteps.length ? "secondary" : "primary"}`} type="button" onClick={()=>onDocumentOpen?.(task.documentId)}>打开关联文章<Icon name="arrow" size={16} /></button>}
         {!task.documentId && task.bookId && <button className="button primary" type="button" onClick={()=>onDocumentOpen?.(`book/${task.bookId}`)}>打开关联书籍<Icon name="arrow" size={16} /></button>}
         {task.type === "import" && task.importId && !task.archived && task.canOpenResult && <button className="button primary" type="button" disabled={busy} onClick={onImportOpen}>继续导入<Icon name="arrow" size={16} /></button>}
         {capabilities.retry && <button className="button primary" type="button" disabled={busy} onClick={onRetry}>重试失败步骤</button>}

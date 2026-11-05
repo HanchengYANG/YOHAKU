@@ -5,6 +5,7 @@ import { mkdtemp,rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { setTimeout as delay } from 'node:timers/promises';
 import sharp from 'sharp';
 import { createApp } from '../server/app.mjs';
 import { ensureSession,cookieFromResponse } from './helpers/session.mjs';
@@ -64,13 +65,21 @@ test('source tasks enforce ownership and running deletion; failed tombstones sur
   }
   release();await f.instance.sources.drain();task=await f.request(`/tasks/${task.id}`);assert.equal(task.canDelete,true);
   const sources=(await f.request(`/documents/${id}/sources`)).sources,preview=sources[0].preview;
+  const sourcePath=`/documents/${id}/sources/${sources[0].id}`,source=await f.request(sourcePath);
+  assert.equal(source.failedCorrection.status,'failed');
+  const keep={version:source.version,failedCorrectionAttemptId:source.failedCorrection.attemptId};
+  const denied=await fetch(f.url+`/api${sourcePath}/keep-current`,{method:'POST',headers:{Cookie:friend,'Content-Type':'application/json'},body:JSON.stringify(keep)});
+  assert.equal(denied.status,404);
   await f.request(`/tasks/${task.id}`,'DELETE',{version:task.version},204);
+  assert.equal((await f.request(sourcePath)).failedCorrection,null);
+  await f.request(`${sourcePath}/keep-current`,'POST',keep,409);
   const calls=f.calls.length;
   await f.request(`/documents/${id}/reading-session`,'POST',{index:0,active:true});await f.instance.sources.drain();
   assert.equal(f.calls.length,calls);assert.equal((await f.request('/tasks?type=preparation')).tasks.some(item=>item.id===task.id),false);
   assert.deepEqual((await f.request(`/documents/${id}/sources`)).sources[0].preview,preview);
   await f.restart();await f.request(`/documents/${id}/reading-session`,'POST',{index:0,active:true});await f.instance.sources.drain();
   await f.request(`/tasks/${task.id}`,'GET',undefined,404);
+  await f.request(`${sourcePath}/keep-current`,'POST',keep,409);
   assert.deepEqual((await f.request(`/documents/${id}/sources`)).sources[0].preview,preview);
 });
 
@@ -352,6 +361,123 @@ test('keeping current source text rejects stale proposals and resumes the existi
     const raw=await fetch(f.url+ready.preview.url,{headers:{Cookie:(await ensureSession(f.url)).cookie},signal:AbortSignal.timeout(5000)});
     assert.equal(raw.status,200);assert.deepEqual(Buffer.from(await raw.arrayBuffer()),bytes);
   }finally{database.close();}
+});
+
+test('keeping extracted text after a correction timeout uses the latest stopped attempt and continues the same task', {timeout:20000},async t=>{
+  const original='日本語の原文です。\n本文を読みます。';
+  const slots=Math.min(2,Math.max(1,Math.floor(Number(process.env.AI_HTTP_CONCURRENCY)||4)));
+  let corrections=0,extractions=0,firstRetryEntered,releaseFirstRetry,timeoutEntered,releaseTimeout,held=0,slotsFilled,releaseSlots;
+  const capacityFull=new Promise(resolve=>{slotsFilled=resolve;}),slotGate=new Promise(resolve=>{releaseSlots=resolve;});
+  const firstRetryStarted=new Promise(resolve=>{firstRetryEntered=resolve;}),firstRetryGate=new Promise(resolve=>{releaseFirstRetry=resolve;});
+  const timeoutStarted=new Promise(resolve=>{timeoutEntered=resolve;}),timeoutGate=new Promise(resolve=>{releaseTimeout=resolve;});
+  t.after(()=>{releaseSlots();releaseFirstRetry();releaseTimeout();});
+  const f=await fixture(t,{ndlOcr:{async recognize(){
+    extractions++;
+    return {text:original,blocks:parseText(original.replace('日本語','{日本語|ニホンゴ}'))};
+  },close(){}},beforeRun:async input=>{
+    if(input.model!=='correction-model')return;
+    if(input.prompt.includes('校正枠を保持')){if(++held===slots)slotsFilled();await slotGate;return;}
+    if(++corrections===1)throw Object.assign(new Error('controlled failure'),{status:502,expose:true});
+    if(corrections===2){firstRetryEntered();await firstRetryGate;throw Object.assign(new Error('controlled backoff'),{status:429});}
+    timeoutEntered();await timeoutGate;
+    throw Object.assign(new Error('controlled timeout'),{status:504,expose:true,diagnostic:{code:'AI_TIMEOUT',category:'timeout'}});
+  }});
+  await f.configure();
+  const bytes=await sharp({create:{width:30,height:50,channels:3,background:'white'}}).png().toBuffer(),form=new FormData();
+  form.append('files',new Blob([bytes],{type:'image/png'}),'Screenshot.png');
+  const draft=await f.request('/imports','POST',form,201);
+  const imported=await f.request(`/imports/${draft.id}/confirm`,'POST',{type:'screenshot',title:'校对超时'},201);
+  const id=imported.firstDocumentId,documentPath=`/documents/${id}`;
+  const [{id:sourceId}]=(await f.request(`${documentPath}/sources`)).sources;
+  const path=`${documentPath}/sources/${sourceId}`,keepPath=`${path}/keep-current`;
+  assert.equal((await f.request(path)).failedCorrection,null);
+  const session=await f.request(`${documentPath}/reading-session`,'POST',{index:0,active:true}),taskPath=`/tasks/${session.taskId}`;
+  await f.instance.sources.drain();
+  const failed=await f.request(path);
+  assert.equal(failed.failedCorrection.status,'failed');assert.equal(typeof failed.failedCorrection.attemptId,'string');
+  const stale={version:failed.version,failedCorrectionAttemptId:failed.failedCorrection.attemptId};
+  const task=await f.request(taskPath);
+  assert.equal(task.status,'failed');
+  const waitForCorrectionState=async status=>{
+    let step;
+    for(let i=0;i<50;i++){
+      step=(await f.request(taskPath)).steps.find(node=>node.step==='correct');
+      if(step.status===status)break;
+      await delay(15);
+    }
+    assert.equal(step.status,status);
+  };
+  // Occupy the article's real provider slots so the new attempt remains queued.
+  const blockers=Promise.allSettled(Array.from({length:slots},()=>f.instance.ai.processSource(f.user.id,{
+    step:'correct',source:{type:'text'},bodyHtml:'<p>校正枠を保持。</p>',groupKey:JSON.stringify([f.user.id,id]),
+  })));
+  await capacityFull;
+  const scheduled=await f.request(`${taskPath}/retry`,'POST',{version:task.version});
+  assert.equal(scheduled.status,'queued');
+  await waitForCorrectionState('queued');
+  assert.equal((await f.request(path)).failedCorrection,null);
+  await f.request(keepPath,'POST',stale,409);
+  releaseSlots();assert.ok((await blockers).every(result=>result.status==='fulfilled'));
+  await firstRetryStarted;
+  assert.equal((await f.request(path)).failedCorrection,null);
+  await f.request(keepPath,'POST',stale,409);
+  releaseFirstRetry();
+  await waitForCorrectionState('retry_wait');
+  assert.equal((await f.request(path)).failedCorrection,null);
+  await f.request(keepPath,'POST',stale,409);
+  await timeoutStarted;releaseTimeout();await f.instance.sources.drain();
+
+  const timedOut=await f.request(path);
+  assert.equal(timedOut.version,failed.version);assert.equal(timedOut.failedCorrection.status,'timeout');
+  assert.notEqual(timedOut.failedCorrection.attemptId,failed.failedCorrection.attemptId);
+  assert.equal((await f.request(taskPath)).status,'timeout');
+  await f.request(keepPath,'POST',stale,409);
+  await f.request(`${path}/checked`,'POST',{version:timedOut.version,checked:true});
+  const article=await f.request(documentPath);
+  f.instance.sources.persistDocumentMarks(f.user.id,id,markBodyRange(article.bodyHtml,0,3,'timeout-qa'));
+  const marked=await f.request(path),database=new DatabaseSync(join(f.dataDir,'yohaku.sqlite'),{readOnly:true});
+  try{
+    const correction=()=>database.prepare("SELECT * FROM source_step_attempts WHERE scope_id=? AND step='correct' ORDER BY rowid").all(timedOut.scopeId);
+    const journal=correction();assert.equal(journal.length,2);
+    const keep={version:timedOut.version,failedCorrectionAttemptId:timedOut.failedCorrection.attemptId,sessionId:session.sessionId};
+    const kept=await f.request(keepPath,'POST',keep);
+    assert.equal(kept.version,timedOut.version+1);assert.equal(kept.failedCorrection,null);assert.equal(kept.checked,true);
+    assert.equal(kept.bodyHtml,marked.bodyHtml);assert.deepEqual(kept.firstExtraction,failed.firstExtraction);
+    await f.request(keepPath,'POST',{...keep,version:kept.version},409);
+    await f.instance.sources.drain();
+
+    const ready=await f.request(path),reading=await f.request(`${documentPath}/reading-pages`),finished=await f.request(taskPath);
+    assert.equal(ready.status,'ready');assert.equal(ready.text,original);assert.equal(ready.checked,true);
+    assert.deepEqual(bodyRanges(ready.bodyHtml).qa.map(mark=>mark.id),['timeout-qa']);
+    assert.ok(htmlToBlocks(ready.bodyHtml).flatMap(block=>block.segments).some(({text,reading,origin})=>text==='日本語'&&reading==='ニホンゴ'&&origin==='manual'));
+    assert.equal(reading.currentPage.ready,true);assert.equal(bodyText(reading.currentPage.bodyHtml),original);
+    assert.equal(finished.status,'completed');assert.equal(finished.archived,true);assert.equal(finished.generation,task.generation);
+    assert.equal(finished.steps.find(step=>step.step==='correct').message,'已选择使用当前正文，跳过 AI 校对。');
+    assert.equal(extractions,1);assert.equal(corrections,3);assert.deepEqual(correction(),journal);
+    assert.deepEqual(f.calls.filter(call=>!call.prompt.includes('校正枠を保持')).map(call=>call.model).sort(),['ruby-model','sentence-model']);
+  }finally{database.close();}
+});
+
+test('keep-current is unavailable after extraction or segmentation failures',async t=>{
+  const failure=()=>Object.assign(new Error('controlled step failure'),{status:502,expose:true});
+  const f=await fixture(t,{ndlOcr:{async recognize(){throw failure();},close(){}},beforeRun:input=>{
+    if(input.model==='sentence-model')throw failure();
+  }});
+  await f.configure();
+  const bytes=await sharp({create:{width:30,height:50,channels:3,background:'white'}}).png().toBuffer(),form=new FormData();
+  form.append('files',new Blob([bytes],{type:'image/png'}),'Screenshot.png');
+  const draft=await f.request('/imports','POST',form,201);
+  const image=await f.request(`/imports/${draft.id}/confirm`,'POST',{type:'screenshot',title:'提取失败'},201);
+  const text=await f.importText('日本語の原文。');
+  for(const [id,step] of [[image.firstDocumentId,'extract'],[text.firstDocumentId,'segment']]){
+    const session=await f.request(`/documents/${id}/reading-session`,'POST',{index:0,active:true});
+    await f.instance.sources.drain();
+    const task=await f.request(`/tasks/${session.taskId}`),failed=task.steps.find(node=>node.step===step);
+    assert.equal(failed.status,'failed');
+    const path=`/documents/${id}/sources/${failed.sourceId}`,source=await f.request(path);
+    assert.equal(source.failedCorrection,null);
+    await f.request(`${path}/keep-current`,'POST',{version:source.version,failedCorrectionAttemptId:failed.children[0].id},409);
+  }
 });
 
 
