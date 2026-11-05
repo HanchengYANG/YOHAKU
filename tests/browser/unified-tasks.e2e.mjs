@@ -174,6 +174,7 @@ for(const target of ["task","book","article"])test(`${target} deletion uses an a
 
 test("preparation detail shows dependency and execution states without running delete or cancel",async({page},info)=>{
   const state=await fixture(page);state.task.canDelete=true;
+  state.task.steps[0].execution.retryCount=1;
   await page.goto("/#tasks/prepare-14");
   const detail=page.getByRole("region",{name:"任务状态",exact:true});
   await expect(detail).toContainText("PDF 第105页");
@@ -182,6 +183,7 @@ test("preparation detail shows dependency and execution states without running d
   await expect(detail.getByRole("button",{name:/取消|停止任务/})).toHaveCount(0);
   await expect(detail).toContainText("排队 1 秒");
   await expect(detail).toContainText("执行 2 秒");
+  await expect(detail).toContainText("自动重试 1 次");
   await page.screenshot({path:`artifacts/unified-task-detail-${info.project.name}.png`,fullPage:true});
 });
 

@@ -55,8 +55,12 @@ export function createOperationQueue({ concurrency = 1, maxPerGroup = Infinity, 
     const controller = new AbortController();
     const abort = () => controller.abort(abortError(entry.signal));
     if (entry.signal?.aborted) abort(); else entry.signal?.addEventListener('abort', abort, { once:true });
-    const duration = entry.timeoutMs ?? timeoutMs;
-    const timer = duration > 0 ? setTimeout(() => controller.abort(failure('AI_TIMEOUT', 'AI 执行超时，请重试当前步骤。')), duration) : null;
+    const {executionBudget} = entry;
+    const budgetStartedAt = executionBudget ? performance.now() : null;
+    const duration = executionBudget?.remainingMs ?? entry.timeoutMs ?? timeoutMs;
+    const timeout = () => controller.abort(failure('AI_TIMEOUT', 'AI 执行超时，请重试当前步骤。'));
+    if (executionBudget && duration <= 0) timeout();
+    const timer = duration > 0 ? setTimeout(timeout, duration) : null;
     let rejectAbort;
     const aborted = new Promise((_,reject) => { rejectAbort = () => reject(abortError(controller.signal));
       if (controller.signal.aborted) rejectAbort(); else controller.signal.addEventListener('abort', rejectAbort, {once:true}); });
@@ -65,6 +69,8 @@ export function createOperationQueue({ concurrency = 1, maxPerGroup = Infinity, 
     }), aborted])); }
     catch (error) { entry.reject(error); }
     finally {
+      // Sequential attempts share execution time, excluding time in the queue.
+      if (executionBudget) executionBudget.remainingMs = Math.max(0, duration - (performance.now() - budgetStartedAt));
       clearTimeout(timer); entry.signal?.removeEventListener('abort', abort);
       controller.signal.removeEventListener('abort', rejectAbort);
       active.delete(entry);
@@ -83,13 +89,13 @@ export function createOperationQueue({ concurrency = 1, maxPerGroup = Infinity, 
     notifyIdle();
   }
   return {
-    run(work, { priority = 'interactive', getPriority, groupKey, signal, wait = true, timeoutMs: executionTimeout, canStart, acquire } = {}) {
+    run(work, { priority = 'interactive', getPriority, groupKey, signal, wait = true, timeoutMs: executionTimeout, executionBudget, canStart, acquire } = {}) {
       if (closed) return Promise.reject(stopped());
       if (signal?.aborted) return Promise.reject(abortError(signal));
       if (!wait && (active.size || pending.length))
         return Promise.reject(failure('AI_BUSY', 'AI 正在处理请求，请完成后重试。'));
       return new Promise((resolve, reject) => {
-        const entry = { work, resolve, reject, signal, priority, getPriority, groupKey, timeoutMs:executionTimeout, exclusive:!wait,canStart,acquire };
+        const entry = { work, resolve, reject, signal, priority, getPriority, groupKey, timeoutMs:executionTimeout, executionBudget, exclusive:!wait,canStart,acquire };
         entry.onAbort = () => {
           const index = pending.indexOf(entry); if (index < 0) return;
           pending.splice(index,1); reject(abortError(signal)); queueMicrotask(drain); notifyIdle();

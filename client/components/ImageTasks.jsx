@@ -46,8 +46,9 @@ function elapsedLabel(value) {
 }
 function ExecutionTiming({execution}) {
   const queued=elapsedLabel(execution?.queueMs),elapsed=elapsedLabel(execution?.elapsedMs);
-  if (!queued && !elapsed) return null;
-  return <p className="task-step-timing">{[queued && `排队 ${queued}`,elapsed && `执行 ${elapsed}`].filter(Boolean).join(" · ")}</p>;
+  const retries=execution?.retryCount > 0 ? `自动重试 ${execution.retryCount} 次` : null;
+  if (!queued && !elapsed && !retries) return null;
+  return <p className="task-step-timing">{[queued && `排队 ${queued}`,elapsed && `执行 ${elapsed}`,retries].filter(Boolean).join(" · ")}</p>;
 }
 function BackgroundStep({step,index,type}) {
   const display=taskStepState(step),title=step.title || stepNames[step.step] || step.step || `步骤 ${index+1}`;

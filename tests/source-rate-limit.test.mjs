@@ -35,11 +35,12 @@ async function fixture(t, { respond,responseUsage,responseFinishReason='stop', .
     const text = role === 'correction' ? JSON.parse(prompt.split('\n目标正文：\n').at(-1))
       : role === 'segmentation' ? JSON.parse(prompt.split('\n输入正文：\n').at(-1).split('\n')[0]) : 'annotation';
     calls.push(text);
-    const status = await respond?.({ text, calls, role }) || 200;
+    const details = { text, calls, role, input };
+    const status = await respond?.(details) || 200;
     const output = role === 'correction' ? { text } : role === 'segmentation' ? { sentences: text.match(/[^。]*。|[^。]+$/gu) || [] } : { changes: [], uncertain: [] };
     response.writeHead(status, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify(status === 200
-      ? { model: 'controlled-http', choices: [{ message: { role: 'assistant', content: JSON.stringify(output) }, finish_reason: typeof responseFinishReason==='function'?responseFinishReason(role):responseFinishReason }],...(responseUsage?{usage:responseUsage}:{}) }
+      ? { model: 'controlled-http', choices: [{ message: { role: 'assistant', content: JSON.stringify(output) }, finish_reason: typeof responseFinishReason==='function'?responseFinishReason(role,details):responseFinishReason }],...(responseUsage?{usage:responseUsage}:{}) }
       : { error: { message: 'Controlled HTTP failure', type: 'rate_limit_error' } }));
   });
   upstream.listen(0, '127.0.0.1');
@@ -99,9 +100,13 @@ test('HTTP 429 退避释放资源，其他章节先完成，退避不消耗执�
   assert.ok(result.execution.elapsedMs < 200, '执行计时不应包含退避时间');
 });
 
-for(const truncated of [false,true])test(`real HTTP usage survives ${truncated?'length failure':'successful source processing'} through unified task responses`,async t=>{
+for(const scenario of ['successful source processing','length failure','screenshot recovery'])test(`real HTTP usage survives ${scenario} through unified task responses`,async t=>{
+  const truncated=scenario==='length failure',recovers=scenario==='screenshot recovery',requests=[];
   const usage={prompt_tokens:12,completion_tokens:40,total_tokens:52,completion_tokens_details:{reasoning_tokens:35},prompt_tokens_details:{cached_tokens:4},rawResponse:'private-provider-response'};
-  const f=await fixture(t,{responseUsage:usage,responseFinishReason:role=>truncated&&role==='correction'?'length':'stop',localRuby:{close(){},async annotate(){return {annotations:[]};}}});
+  const f=await fixture(t,{responseUsage:usage,
+    respond:({role,input})=>{if(role==='correction')requests.push(input);},
+    responseFinishReason:role=>role==='correction'&&(truncated||recovers&&requests.length===1)?'length':'stop',
+    localRuby:{close(){},async annotate(){return {annotations:[]};}}});
   f.database.exec(`CREATE TABLE documents(id TEXT PRIMARY KEY,owner_id TEXT,title TEXT,kind TEXT,orientation TEXT,blocks_json TEXT,plain_text TEXT,body_html TEXT,body_hash TEXT,revision INTEGER,created_at TEXT,updated_at TEXT,source_images_json TEXT,source_image_id TEXT,recognition_json TEXT);
     INSERT INTO documents VALUES('usage-article','u','用量文章','article','horizontal','[]','','<p></p>','',1,'2026-01-01','2026-01-01','[]',NULL,NULL);`);
   const sources=createSourceService({database:f.database,ai:f.ai,requireDocument:(user,id)=>f.database.prepare('SELECT * FROM documents WHERE owner_id=? AND id=?').get(user,id),fromRow:row=>({id:row.id,bodyHtml:row.body_html,blocks:JSON.parse(row.blocks_json),revision:row.revision})});
@@ -109,15 +114,97 @@ for(const truncated of [false,true])test(`real HTTP usage survives ${truncated?'
   f.app.use(express.json());f.app.use((req,_res,next)=>{req.user={id:'u'};next();});
   attachTaskRoutes({app:f.app,database:f.database,adapters:[sources.taskAdapter]});
   const server=f.app.listen(0,'127.0.0.1');await once(server,'listening');f.cleanup.push(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));});
-  sources.createArticleSources('u','usage-article',[{id:'usage-source',type:'text',text:'日本語。'}]);
+  sources.createArticleSources('u','usage-article',[{id:'usage-source',type:recovers?'screenshot':'text',text:'日本語。'}]);
   const request=sources.heartbeat('u','usage-article',{index:0});await sources.drain();
   const response=await fetch(`http://127.0.0.1:${server.address().port}/api/tasks/${request.taskId}`),task=await response.json();assert.equal(response.status,200);
   const correction=task.steps.find(step=>step.step==='correct');
   assert.equal(correction.status,truncated?'failed':'completed');
-  assert.deepEqual(correction.execution.usage,{inputTokens:12,outputTokens:40,totalTokens:52,reasoningTokens:35,cachedInputTokens:4});
+  const count=recovers?2:1;
+  assert.deepEqual(correction.execution.usage,{inputTokens:12*count,outputTokens:40*count,totalTokens:52*count,reasoningTokens:35*count,cachedInputTokens:4*count});
   assert.equal(correction.execution.maxOutputTokens,32768);assert.equal(correction.execution.reasoningParameterSent,false);
-  if(truncated){assert.equal(correction.diagnostic.finishReason,'length');assert.equal(f.calls.length,1,'usage diagnostics must not introduce a retry');}
+  if(truncated){assert.equal(correction.diagnostic.finishReason,'length');assert.equal(f.calls.length,1,'non-screenshot length failures remain explicit');}
+  if(recovers){
+    assert.equal(task.status,'completed');
+    assert.equal(requests.length,2);
+    assert.deepEqual(requests[1],requests[0],'the retry must use the same correction input and role controls');
+    assert.equal(correction.execution.retryCount,1);
+    assert.equal(correction.children.length,1);
+    assert.ok(correction.execution.operationId);
+    assert.equal(correction.children[0].execution.operationId,correction.execution.operationId);
+    assert.equal(f.database.prepare("SELECT COUNT(*) AS count FROM source_step_attempts WHERE request_id=? AND step='correct'").get(request.taskId).count,1);
+    assert.equal(sources.getSource('u','usage-article','usage-source').firstExtraction.text,'日本語。');
+  }
   assert.doesNotMatch(JSON.stringify(task),/private-provider-response|fixture-only-private-api-key|rawResponse/);
+});
+
+test('截图校对连续两次被截断后停止自动重试',async t=>{
+  const text='截断。',states=[];
+  const f=await fixture(t,{responseFinishReason:'length'});
+  await assert.rejects(f.correct(text,{source:{id:'screenshot',type:'screenshot'},onStatus:event=>states.push(event)}),error=>{
+    assert.equal(error.diagnostic.code,'AI_INCOMPLETE_OUTPUT');
+    assert.equal(error.diagnostic.finishReason,'length');
+    assert.equal(error.execution.retryCount,1);
+    assert.ok(error.execution.operationId);
+    assert.equal(new Set([...states.map(event=>event.operationId),error.execution.operationId]).size,1);
+    return true;
+  });
+  assert.deepEqual(f.calls,[text,text]);
+});
+
+test('截图校对截断后重新排队，已经等待的另一章节先执行',{timeout:8000},async t=>{
+  const text='截图。',otherText='别章。',firstEntered=deferred(),firstReply=deferred(),otherQueued=deferred();
+  const states=[];
+  const f=await fixture(t,{httpConcurrency:1,executionTimeoutMs:3000,
+    respond:async ({text:target,calls})=>{
+      if(target===text&&calls.length===1){firstEntered.resolve();await firstReply.promise;}
+    },
+    responseFinishReason:(_role,{text:target,calls})=>target===text&&calls.length===1?'length':'stop'});
+  const correction=f.correct(text,{source:{id:'screenshot',type:'screenshot'},onStatus:event=>states.push(event)});
+  let other;
+  try{
+    await Promise.race([firstEntered.promise,correction.then(()=>assert.fail('expected the held first request'))]);
+    other=f.correct(otherText,{onStatus:event=>{if(event.state==='queued')otherQueued.resolve();}});
+    await otherQueued.promise;
+    firstReply.resolve();
+    assert.equal((await other).text,otherText);
+    assert.equal((await correction).text,text);
+    assert.deepEqual(f.calls,[text,otherText,text]);
+    assert.deepEqual(states.map(event=>event.state),['queued','running','queued','running']);
+  }finally{
+    firstReply.resolve();
+    await Promise.allSettled([correction,other]);
+  }
+});
+
+test('截图校对重试只用剩余执行预算，超时释放执行位',{timeout:10000},async t=>{
+  const text='截图。',otherText='别章。',retryEntered=deferred(),allowLateReply=deferred();
+  let attempts=0,lateReply=false,otherRanBeforeLateReply=false;
+  const f=await fixture(t,{httpConcurrency:1,executionTimeoutMs:1200,
+    respond:async ({text:target})=>{
+      if(target===otherText){otherRanBeforeLateReply=!lateReply;return;}
+      if(++attempts===1){await delay(600);return;}
+      retryEntered.resolve();
+      let timer;
+      await Promise.race([allowLateReply.promise,new Promise(resolve=>{timer=setTimeout(resolve,950);})]).finally(()=>clearTimeout(timer));
+      lateReply=true;
+    },
+    responseFinishReason:(_role,{text:target})=>target===text&&attempts===1?'length':'stop'});
+  const result=f.correct(text,{source:{id:'screenshot',type:'screenshot'}}).then(value=>({value}),error=>({error}));
+  let other;
+  try{
+    const retried=await Promise.race([retryEntered.promise.then(()=>true),result.then(()=>false)]);
+    assert.equal(retried,true,'the first length error must launch a retry');
+    other=f.correct(otherText);
+    const [{error},otherResult]=await Promise.all([result,other]);
+    assert.equal(error?.diagnostic?.category,'timeout');
+    assert.equal(error.execution.retryCount,1);
+    assert.equal(otherResult.text,otherText);
+    assert.equal(otherRanBeforeLateReply,true);
+    assert.deepEqual(f.calls,[text,text,otherText]);
+  }finally{
+    allowLateReply.resolve();
+    await Promise.allSettled([result,other]);
+  }
 });
 
 test('HTTP 429 自动重试有界，非 429 错误不自动重试', async t => {

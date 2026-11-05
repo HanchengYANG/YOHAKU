@@ -1,6 +1,6 @@
 // Development acceptance runner. Production server/index.mjs never loads this.
-// Faults are scoped by the newly imported PDF id + page + source step, and
-// inserted inside the real provider execution slot. Other work uses real AI.
+// Faults target a specific imported source inside its provider execution slot.
+// Other work uses the configured provider.
 import {bodyText} from '../shared/article-html.mjs';
 import {confirmedTitleLength} from '../server/ai/source-processing.mjs';
 import {readFileSync,appendFileSync,mkdirSync} from 'node:fs';
@@ -22,12 +22,26 @@ const instance=createApp({dataDir,callbackUri,aiServices:(ownerId,providerId)=>{
   const connection=createProviderConnection({providerId,storageDir:join(dataDir,'users',ownerId,'providers'),callbackUri});
   const run=connection.runtime.run.bind(connection.runtime);
   const wrap=work=>async input=>{
-    let target;try{target=JSON.parse(input.prompt.split('目标正文：\n').at(-1));}catch{}
-    const scope=typeof target==='string'?pendingSources.get(target):null,fault=control();
-    const metadata={providerId,sourceId:scope?.source?.id,page:scope?.source?.original?.page,step:scope?.step,groupKey:scope?.groupKey};
-    const match=scope&&fault.importId===scope.source?.original?.importId&&fault.page===scope.source?.original?.page&&fault.step===scope.step&&fault.id&&!injected.has(fault.id);
-    if(match&&['timeout','failure'].includes(fault.mode)){
-      injected.add(fault.id);record({...metadata,event:'controlled_fault_started',faultId:fault.id,mode:fault.mode});
+    let target;
+    try {
+      const parts=input.prompt.split('目标正文：\n');
+      if(parts.length>1)target=JSON.parse(parts.at(-1));
+    } catch {}
+    const scopes=typeof target==='string'?pendingSources.get(target):null;
+    const scope=scopes?.size===1?scopes.values().next().value:null;
+    const source=scope?.source,original=source?.original,fault=control();
+    const metadata={providerId,sourceId:source?.id,importId:original?.importId,page:original?.page,step:scope?.step,groupKey:scope?.groupKey};
+    const match=scope&&fault&&fault.importId===original?.importId&&fault.step===scope.step&&fault.id&&!injected.has(fault.id);
+    const incompleteLength=match&&fault.mode==='incomplete_length'&&source?.type==='screenshot'&&scope.step==='correct'&&
+      typeof fault.id==='string'&&fault.id.trim()&&typeof fault.importId==='string'&&fault.importId.trim()&&
+      (fault.fileName===undefined||fault.fileName===original?.name)&&
+      (fault.documentTitle===undefined||fault.documentTitle===source.documentTitle);
+    const previousMode=match&&fault.page===original?.page&&['timeout','failure'].includes(fault.mode);
+    if(incompleteLength||previousMode){
+      injected.add(fault.id);
+      const diagnostic=incompleteLength?{code:'AI_INCOMPLETE_OUTPUT',category:'incomplete_output',finishReason:'length'}:null;
+      record({...metadata,event:'controlled_fault_started',faultId:fault.id,mode:fault.mode,...(diagnostic?{diagnostic}:{})});
+      if(diagnostic)throw Object.assign(new Error('AI 输出为空、被截断或未完整完成，未保存部分结果，请重试。'),{status:502,expose:true,diagnostic});
       if(fault.mode==='timeout'){
         try{await delay(600000,null,{signal:input.signal});}
         finally{record({...metadata,event:'controlled_fault_stopped',faultId:fault.id});}
@@ -49,10 +63,21 @@ for(const method of ['processSource']){
   const original=instance.ai[method].bind(instance.ai);
   instance.ai[method]=async(userId,input)=>{
     const text=bodyText(input.bodyHtml||'<p></p>');
-    const targets=new Set([text,text.slice(confirmedTitleLength(input.source||{},text))].filter(target=>target.trim()));
-    if(input.step==='correct')for(const target of targets)pendingSources.set(target,input);
+    const targets=input.step==='correct'?new Set([text,text.slice(confirmedTitleLength(input.source||{},text))].filter(target=>target.trim())):[];
+    const scope={source:input.source,step:input.step,groupKey:input.groupKey};
+    for(const target of targets){
+      let scopes=pendingSources.get(target);
+      if(!scopes)pendingSources.set(target,scopes=new Set());
+      scopes.add(scope);
+    }
     try{return await original(userId,input);}
-    finally{for(const target of targets)if(pendingSources.get(target)===input)pendingSources.delete(target);}
+    finally{
+      for(const target of targets){
+        const scopes=pendingSources.get(target);
+        scopes.delete(scope);
+        if(!scopes.size)pendingSources.delete(target);
+      }
+    }
   };
 }
 const server=instance.app.listen(Number(process.env.PORT||4317),'127.0.0.1',()=>console.log('GUI isolation acceptance backend listening'));

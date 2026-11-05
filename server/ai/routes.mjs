@@ -17,7 +17,7 @@ import { createNdlOcr } from "../ocr/ndl.mjs";
 import { createLocalRuby } from "../ocr/ruby.mjs";
 import { createHybridAnnotation } from "./hybrid-annotation.mjs";
 import { diagnosticForError } from "./diagnostics.mjs";
-import { executionUsage } from "./execution-usage.mjs";
+import { executionUsage, summarizeExecutionUsage } from "./execution-usage.mjs";
 import {
   CORRECTION_SCHEMA,
   expandOcrCorrection,
@@ -1162,11 +1162,13 @@ export function attachAIRoutes({
   const withSourceRole = async (userId, role, input, work) => {
     const operationId = randomUUID(), queuedAt = new Date().toISOString();
     const signal = AbortSignal.any([stopping.signal, ...(input.signal ? [input.signal] : [])]);
+    const executionBudget = input.retryTruncatedOutput && executionTimeoutMs > 0 ? {remainingMs: executionTimeoutMs} : undefined;
     let complete;
     const completed = new Promise(resolve => { complete = resolve; });
     sourceOperations.add(completed);
     let route = { role }, startedAt, phase = 'queued', phaseAt = performance.now();
-    let queueMs = 0, elapsedMs = 0, retryWaitMs = 0, retryCount = 0;
+    let queueMs = 0, elapsedMs = 0, retryWaitMs = 0, rateLimitRetryCount = 0;
+    let retriedTruncation = false, truncatedExecution;
     const transition = next => {
       const now = performance.now(), duration = now - phaseAt;
       if (phase === 'queued') queueMs += duration;
@@ -1176,7 +1178,7 @@ export function attachAIRoutes({
     };
     const timing = () => {
       const duration = performance.now() - phaseAt;
-      return { operationId, queuedAt, ...(startedAt ? { startedAt } : {}), retryCount,
+      return { operationId, queuedAt, ...(startedAt ? { startedAt } : {}), retryCount: rateLimitRetryCount + Number(retriedTruncation),
         queueMs: Math.round(queueMs + (phase === 'queued' ? duration : 0)),
         elapsedMs: Math.round(elapsedMs + (phase === 'running' ? duration : 0)),
         retryWaitMs: Math.round(retryWaitMs + (phase === 'retry_wait' ? duration : 0)) };
@@ -1187,6 +1189,11 @@ export function attachAIRoutes({
       const { annotationMode, ...selected } = execution(route);
       try { Promise.resolve(input.onStatus?.({ state, ...selected, ...timing(), ...details })).catch(() => {}); } catch {}
     };
+    const finalExecution = (details) => ({ ...details,
+      ...(truncatedExecution?.providerId && truncatedExecution.providerId === details.providerId &&
+        truncatedExecution.configurationVersion === details.configurationVersion
+        ? summarizeExecutionUsage([truncatedExecution, details]) : {}),
+      ...timing() });
     try {
       const configuration = roleConfiguration.current();
       route = { ...(configuration?.roles[role] || { providerId: preferred() }), role, configurationVersion: configuration?.version || 0 };
@@ -1208,16 +1215,24 @@ export function attachAIRoutes({
             }
             notify('running');
             return work(provider, route);
-          }, { priority: input.priority || "foreground", getPriority: input.getPriority, groupKey: input.groupKey, signal, threadId: input.threadId });
+          }, { priority: input.priority || "foreground", getPriority: input.getPriority, groupKey: input.groupKey, signal, threadId: input.threadId, executionBudget });
           transition('idle');
-          return { ...result, execution: { ...(result.execution || execution(route)), ...timing() } };
+          return { ...result, execution: finalExecution(result.execution || execution(route)) };
         } catch (cause) {
           transition('idle');
           assertOpen(signal);
           const diagnostic = diagnosticForError(cause, { signal });
+          if (executionBudget?.remainingMs === 0) throw cause;
+          if (input.retryTruncatedOutput && !retriedTruncation &&
+              diagnostic.code === 'AI_INCOMPLETE_OUTPUT' && diagnostic.finishReason === 'length') {
+            retriedTruncation = true;
+            truncatedExecution = cause.execution;
+            transition('queued'); startedAt = undefined;
+            continue;
+          }
           if ((cause?.execution?.providerId || route.providerId) !== 'api_base' ||
-              !(cause?.status === 429 || diagnostic.category === 'rate_limit') || retryCount >= rateLimitRetries) throw cause;
-          const retryDelay = Math.min(30000, retryDelayMs * 2 ** retryCount++);
+              !(cause?.status === 429 || diagnostic.category === 'rate_limit') || rateLimitRetryCount >= rateLimitRetries) throw cause;
+          const retryDelay = Math.min(30000, retryDelayMs * 2 ** rateLimitRetryCount++);
           // Re-enter the provider queue only after backoff. No execution slot,
           // chapter allowance or execution timeout belongs to this waiting phase.
           transition('retry_wait');
@@ -1233,7 +1248,7 @@ export function attachAIRoutes({
       const cancelled = signal.aborted && signal.reason instanceof Error ? signal.reason : cause;
       const error = cancelled && typeof cancelled === 'object' ? cancelled : fail(502, "AI 步骤失败，请重试当前步骤。");
       error.diagnostic = diagnosticForError(error, { signal });
-      error.execution = { ...execution({ ...route, ...error.execution },error.execution), ...timing() };
+      error.execution = finalExecution(execution({ ...route, ...error.execution },error.execution));
       throw error;
     } finally {
       sourceOperations.delete(completed);
