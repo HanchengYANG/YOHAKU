@@ -6,6 +6,7 @@ import "../sources.css";
 
 const typeNames = { photo:"照片", screenshot:"截图", scan_pdf:"扫描 PDF", text_pdf:"文字 PDF", epub:"EPUB", text:"纯文本／粘贴文字" };
 const draftReference = ({createdAt,taskId}) => taskDisplayName({createdAt,id:taskId});
+const isImageFile = (file) => /^image\/(?:png|jpeg|webp)$/i.test(file.type) || /\.(?:png|jpe?g|webp)$/i.test(file.name);
 function ChapterPagePreview({ importId, file, chapter, nextChapter, index, totalPages }) {
   const [expanded, setExpanded] = useState(false), [page, setPage] = useState(chapter.startPage);
   const [imageState, setImageState] = useState("loading"), [attempt, setAttempt] = useState(0);
@@ -50,7 +51,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
   const [error, setError] = useState("");
   const [mode, setMode] = useState(initialText ? "text" : "files");
   const fileInput = useRef(null);
-  const pasted = useRef([]);
+  const nextFileId = useRef(0);
   const loadedContext = useRef(null);
   const dirty = () => onDirty?.(true);
   const processing = draft?.chapterProcessing;
@@ -158,6 +159,25 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
     catch (cause) {setError(cause.message);}
     finally {setRestoring(false);}
   };
+  const imageBatch = files.every(({file}) => isImageFile(file));
+  const selectFiles = (selected, fromClipboard = false) => {
+    if (busy || !selected.length) return;
+    const append = imageBatch && selected.every(isImageFile);
+    if (fromClipboard && files.length && !append) {
+      setError("图片和其他文件请分开导入。可移除已选文件，或从设备重新选择。");
+      return;
+    }
+    const entries = selected.map((file) => ({id:++nextFileId.current,file}));
+    setFiles(append ? [...files,...entries] : entries);
+    setError("");dirty();
+  };
+  const moveFile = (index, direction) => {
+    const destination = index + direction;
+    if (busy || destination < 0 || destination >= files.length) return;
+    const reordered = [...files];
+    [reordered[index],reordered[destination]] = [reordered[destination],reordered[index]];
+    setFiles(reordered);dirty();
+  };
   const stage = async () => {
     if (busy) return;
     setBusy(true); setError("");
@@ -165,11 +185,12 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
       let result;
       if (mode === "text") result = await api("/imports", {method:"POST",body:JSON.stringify({text,title,bookId:initialBookId || undefined,targetId:initialTargetId || undefined})});
       else {
-        const body = new FormData(); files.forEach((file) => body.append("files",file));
+        const body = new FormData(); files.forEach(({file}) => body.append("files",file));
         body.append("title",title);
         if (initialBookId) body.append("bookId",initialBookId);
         if (initialTargetId) body.append("targetId",initialTargetId);
         result = await readApiResult(await fetch("/api/imports", {method:"POST",body}));
+        setFiles([]);
       }
       setDraft(result); setType(result.detectedType); setTitle(result.title || title);
       setChapters(result.chapters || []);setExclusions(result.exclusions || []);
@@ -229,16 +250,26 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
       <label className="source-field">资料标题<input value={title} disabled={busy} maxLength={160} onChange={(e) => {setTitle(e.target.value);dirty();}} /></label>
       {mode === "text" ? <label className="source-field">原文<textarea aria-label="导入原文" rows={14} disabled={busy} value={text} onChange={(e) => {setText(e.target.value);dirty();}} /></label>
         : <div className="source-file-drop" tabIndex={0} aria-label="上传或粘贴来源文件" onPaste={(event) => {
-          if (busy) return;
-          const images = [...event.clipboardData.files];
-          if (images.length) { event.preventDefault(); pasted.current = [...pasted.current,...images];setFiles((current) => [...current,...images]);setError("");dirty(); }
+          const selected = [...event.clipboardData.files];
+          if (selected.length) {event.preventDefault();selectFiles(selected,true);}
         }}>
           <div className="source-field"><span>选择文件（一次仅支持同一类型）</span><div><button type="button" className="button secondary" disabled={busy} onClick={() => fileInput.current?.click()}>从设备选择文件</button></div></div>
           <input ref={fileInput} hidden aria-label="选择来源文件" type="file" disabled={busy} multiple
             accept="image/png,image/jpeg,image/webp,application/pdf,application/epub+zip,text/plain,.txt,.epub,.pdf"
-            onChange={(e) => {const selected = [...e.currentTarget.files];e.currentTarget.value = "";setFiles(selected);if(selected.length)setError("");dirty();}} />
-          <p>也可点击此处后粘贴截图。图片可按顺序一次导入多张。</p>
-          {files.length > 0 && <ol className="source-file-list">{files.map((file,index) => <li key={`${index}-${file.name}`}>{file.name}<button type="button" className="text-button" disabled={busy} aria-label={`移除 ${file.name}`} onClick={() => setFiles(files.filter((_,i) => i !== index))}>移除</button></li>)}</ol>}
+            onChange={(e) => {const selected = [...e.currentTarget.files];e.currentTarget.value = "";selectFiles(selected);}} />
+          <p>可分次选择或粘贴图片，按列表顺序阅读。选择其他文件会替换当前列表。</p>
+          {files.length > 0 && <ol className="source-file-list" aria-label="已选文件顺序">
+            {files.map(({id,file},index) => <li key={id}><div className="source-file-row">
+              <span className="source-file-name">{file.name}</span>
+              <div className="source-file-actions">
+                {imageBatch && files.length > 1 && <>
+                  <button type="button" className="text-button" disabled={busy || index === 0} aria-label={`上移 ${file.name}`} onClick={() => moveFile(index,-1)}>上移</button>
+                  <button type="button" className="text-button" disabled={busy || index === files.length - 1} aria-label={`下移 ${file.name}`} onClick={() => moveFile(index,1)}>下移</button>
+                </>}
+                <button type="button" className="text-button" disabled={busy} aria-label={`移除 ${file.name}`} onClick={() => setFiles(files.filter((entry) => entry.id !== id))}>移除</button>
+              </div>
+            </div></li>)}
+          </ol>}
         </div>}
       <button className="button primary" disabled={busy || (mode === "text" ? !text.trim() : !files.length)} onClick={stage}>{busy ? "正在保存原始资料…" : "继续确认类型"}</button>
     </> : <>

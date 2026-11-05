@@ -1011,6 +1011,70 @@ test("an image can be removed and selected again from the same native file path"
   }finally{await new Promise(resolve=>receiver.close(resolve));}
 });
 
+test("repeated image selections upload in the adjusted order and a new selection starts empty",async({page},info)=>{
+  await fixture(page,{importType:"photo"});
+  const png=await sharp({create:{width:12,height:12,channels:3,background:"white"}}).png().toBuffer();
+  const firstImage=info.outputPath("114.png"),secondImage=info.outputPath("105.png");
+  await mkdir(info.outputDir,{recursive:true});
+  await Promise.all([writeFile(firstImage,png),writeFile(secondImage,png)]);
+
+  let uploaded;
+  // A local HTTP receiver captures the browser's actual multipart body, including disk-backed files.
+  const receiver=createServer(async(request,response)=>{
+    const chunks=[];for await(const chunk of request)chunks.push(chunk);uploaded=Buffer.concat(chunks);
+    response.writeHead(200,{"content-type":"application/json","access-control-allow-origin":"*"});
+    response.end(JSON.stringify({id:"imp",status:"staged",detectedType:"photo",allowedTypes:["photo"]}));
+  });
+  await new Promise(resolve=>receiver.listen(0,"127.0.0.1",resolve));
+  try{
+    await page.route("**/api/imports",route=>route.request().method()==="POST"?route.continue({url:`http://127.0.0.1:${receiver.address().port}/upload`}):route.fallback());
+    await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"导入资料",exact:true}).click();
+    const input=page.getByLabel("选择来源文件",{exact:true});
+    const chooseButton=page.getByRole("button",{name:"从设备选择文件",exact:true});
+    const stageButton=page.getByRole("button",{name:"继续确认类型",exact:true});
+    const rows=page.locator(".source-file-list li");
+    const expectOrder=async(names)=>{
+      await expect(rows).toHaveCount(names.length);
+      for(const [index,name] of names.entries()){
+        await expect(rows.nth(index).getByRole("button",{name:`移除 ${name}`,exact:true})).toBeVisible();
+      }
+    };
+    const pasteImage=()=>page.getByLabel("上传或粘贴来源文件").evaluate((element,bytes)=>{
+      const transfer=new DataTransfer();
+      transfer.items.add(new File([new Uint8Array(bytes)],"pasted.png",{type:"image/png"}));
+      element.dispatchEvent(new ClipboardEvent("paste",{bubbles:true,clipboardData:transfer}));
+    },[...png]);
+
+    await input.setInputFiles({name:"original.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-original")});
+    await expectOrder(["original.pdf"]);
+    await input.setInputFiles({name:"replacement.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-replacement")});
+    await expectOrder(["replacement.pdf"]);
+    await pasteImage();
+    await expect(page.getByRole("alert")).toContainText("图片和其他文件请分开导入");
+    await expectOrder(["replacement.pdf"]);
+    await page.getByRole("button",{name:"移除 replacement.pdf",exact:true}).click();
+
+    for(const path of [firstImage,secondImage]){
+      const selected=page.waitForEvent("filechooser");await chooseButton.click();await(await selected).setFiles(path);
+    }
+    await expectOrder(["114.png","105.png"]);
+    await pasteImage();
+    await expectOrder(["114.png","105.png","pasted.png"]);
+    await page.getByRole("button",{name:"上移 105.png",exact:true}).click();
+    const expectedOrder=["105.png","114.png","pasted.png"];
+    await expectOrder(expectedOrder);
+
+    await stageButton.click();
+    await expect(page.getByLabel("确认来源类型",{exact:true})).toHaveValue("photo");
+    expect([...uploaded.toString("latin1").matchAll(/filename="([^"]+)"/g)].map((match)=>match[1])).toEqual(expectedOrder);
+
+    await page.getByRole("button",{name:"重新选择",exact:true}).click();
+    await expect(chooseButton).toBeEnabled();
+    await expectOrder([]);
+    await expect(stageButton).toBeDisabled();
+  }finally{await new Promise(resolve=>receiver.close(resolve));}
+});
+
 test("file upload persists the entered title for a draft reopened without session storage",async({page})=>{
   await fixture(page,{importType:"epub"});
   const title="【持续回归】お目出たき人（EPUB）";
