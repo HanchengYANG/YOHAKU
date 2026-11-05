@@ -231,6 +231,87 @@ test("a late pending heartbeat cannot replace an automatically loaded completed 
   await expect(page.getByRole("progressbar",{name:"当前阅读页准备进度",exact:true})).toHaveCount(0);
 });
 
+async function hiddenReaderFixture(page,{holdFirst=false}={}) {
+  await fixture(page);
+  await page.addInitScript(()=>{
+    window.__readerTestVisibility="visible";
+    Object.defineProperty(document,"visibilityState",{configurable:true,get:()=>window.__readerTestVisibility});
+  });
+  const state={gets:{doc:0,other:0},aborts:0,finished:0,text:{doc:holdFirst?"隐藏前的迟到旧正文。":original,other:"別資料の新しい正文。"}};
+  let releaseGet,releaseHeartbeats;
+  const getGate=new Promise(resolve=>releaseGet=resolve),heartbeatGate=new Promise(resolve=>releaseHeartbeats=resolve);
+  state.releaseGet=releaseGet;state.releaseHeartbeats=releaseHeartbeats;
+  const snapshot=(id,text)=>{const currentPage={id:`${id}-page`,index:0,ready:true,bodyHtml:html(text),sourceIds:["s2"],start:0,end:text.length};return {pages:[currentPage],currentPage,index:0,complete:true,totalPages:1,hasNext:false};};
+  await page.route(/\/api\/documents\/(doc|other)$/,route=>{
+    const id=route.request().url().endsWith("/other")?"other":"doc",text=id==="other"?"別資料の預載正文。":original;
+    return route.fulfill({json:{id,title:id==="other"?"另一篇阅读资料":"当前阅读资料",kind:"article",sourceWorkflow:true,blocks:parseText(text),bodyHtml:html(text),...(holdFirst?{reading:snapshot(id,text)}:{})}});
+  });
+  await page.route("**/api/documents/other/conversations",route=>route.fulfill({json:{conversations:[]}}));
+  page.on("requestfailed",request=>{if(request.method()==="GET"&&request.url().includes("/reading-pages"))state.aborts++;});
+  await page.route("**/api/documents/*/reading-*",async route=>{
+    const request=route.request(),id=request.url().includes("/other/")?"other":"doc";
+    if(request.method()==="POST"&&request.postDataJSON().active===false)return route.fulfill({json:{sessionId:"test"}});
+    const value=snapshot(id,state.text[id]);
+    if(request.method()==="POST"){await heartbeatGate;return route.fulfill({json:value});}
+    state.gets[id]++;
+    if(holdFirst&&id==="doc"&&state.gets.doc===1)await getGate;
+    try{return await route.fulfill({json:value});}finally{state.finished++;}
+  });
+  return state;
+}
+async function readerVisibility(page,value){await page.evaluate(value=>{window.__readerTestVisibility=value;document.dispatchEvent(new Event("visibilitychange"));},value);}
+
+test("hidden reading tabs stop GET polling and resume immediately on visibility or online",async({page})=>{
+  const state=await hiddenReaderFixture(page);
+  try{
+    await page.goto("/#doc");await expect(page.getByLabel("日语原文")).toContainText(original);
+    await readerVisibility(page,"hidden");const before=state.gets.doc;
+    await page.waitForTimeout(2300);expect(state.gets.doc).toBe(before);
+    await page.evaluate(()=>window.dispatchEvent(new Event("online")));
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    expect(state.gets.doc).toBe(before);
+    state.text.doc="恢复可见后的正文。";await readerVisibility(page,"visible");
+    await expect.poll(()=>state.gets.doc,{timeout:1000}).toBe(before+1);
+    await expect(page.getByLabel("日语原文")).toContainText("恢复可见后的正文。");
+    state.text.doc="重新联网后的正文。";const resumed=state.gets.doc;
+    await page.evaluate(()=>window.dispatchEvent(new Event("online")));
+    await expect.poll(()=>state.gets.doc,{timeout:1000}).toBe(resumed+1);
+    await expect(page.getByLabel("日语原文")).toContainText("重新联网后的正文。");
+  }finally{state.releaseGet();state.releaseHeartbeats();}
+});
+
+test("hidden reading tabs abort pending GETs and reject their late response",async({page})=>{
+  const state=await hiddenReaderFixture(page,{holdFirst:true});
+  try{
+    await page.goto("/#doc");await expect(page.getByLabel("日语原文")).toContainText(original);
+    await expect.poll(()=>state.gets.doc).toBe(1);
+    await readerVisibility(page,"hidden");state.releaseGet();
+    await expect.poll(()=>state.finished).toBeGreaterThan(0);
+    await expect.poll(()=>state.aborts).toBeGreaterThan(0);
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    await expect(page.getByLabel("日语原文")).toContainText(original);
+    await expect(page.getByLabel("日语原文")).not.toContainText("隐藏前的迟到旧正文。");
+  }finally{state.releaseGet();state.releaseHeartbeats();}
+});
+
+test("hidden reading tabs keep delayed responses isolated when changing documents",async({page})=>{
+  const state=await hiddenReaderFixture(page,{holdFirst:true});
+  try{
+    await page.goto("/#doc");await expect(page.getByLabel("日语原文")).toContainText(original);
+    await expect.poll(()=>state.gets.doc).toBe(1);await readerVisibility(page,"hidden");
+    await page.evaluate(()=>location.hash="other");
+    await expect(page.getByLabel("日语原文")).toContainText("別資料の預載正文。");
+    state.releaseGet();state.releaseHeartbeats();
+    await expect.poll(()=>state.finished).toBeGreaterThan(0);
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    expect(state.gets.other).toBe(0);
+    await expect(page.getByLabel("日语原文")).toContainText("別資料の預載正文。");
+    await readerVisibility(page,"visible");
+    await expect.poll(()=>state.gets.other,{timeout:1000}).toBe(1);
+    await expect(page.getByLabel("日语原文")).toContainText("別資料の新しい正文。");
+  }finally{state.releaseGet();state.releaseHeartbeats();}
+});
+
 async function pagedFailureFixture(page) {
   await fixture(page);
   const pages=[{id:"ready",index:0,ready:true,bodyHtml:html(original),sourceIds:["s2"],start:0,end:original.length},
@@ -396,6 +477,29 @@ test("source correction opens the mapped source, saves its version and preserves
   await expect(page.getByRole("img",{name:"照片 1",exact:true})).toBeVisible();
   await page.getByRole("button",{name:"向右旋转",exact:true}).click();
   await expect(page.getByRole("img",{name:"照片 1",exact:true})).toHaveAttribute("style",/rotate\(90deg\)/);
+});
+
+for(const example of [
+  {name:"failed second PDF source",state:"failed",sourceId:"s2",sourceIds:["s1","s2"],expected:"s2"},
+  {name:"unpublished PDF source awaiting review",state:"requires_review",sourceId:"s2",unpublished:true,expected:"s2"},
+  {name:"page source order without current diagnostics",sourceIds:["s2","s1"],expected:"s2"},
+  {name:"page fallback for an unavailable diagnostic source",state:"failed",sourceId:"removed",sourceIds:["s2","s1"],expected:"s2"},
+  {name:"ready page's original edit source",state:"failed",sourceId:"s2",sourceIds:["s1","s2"],ready:true,expected:"s1"},
+])test(`reading correction opens the ${example.name}`,async({page})=>{
+  const state=await fixture(page,{source1:{type:"scan_pdf",page:105,original:{page:105},preview:{type:"text",text:"PDF 第105页原文"}},source:{type:"scan_pdf",page:110,original:{page:110},preview:{type:"text",text:"PDF 第110页原文"}}});
+  const currentPage=example.unpublished ? null : {id:"current",index:0,ready:!!example.ready,bodyHtml:html(original),sourceIds:example.sourceIds,start:0,end:original.length};
+  await page.route("**/api/documents/doc/reading-*",route=>{
+    if(route.request().method()==="POST"&&route.request().postDataJSON().active===false)return route.fulfill({json:{sessionId:"test"}});
+    return route.fulfill({json:{pages:currentPage?[currentPage]:[],currentPage,index:0,complete:false,hasNext:false,
+      preparation:{stage:example.ready?"ready":"correct"},diagnostics:{current:example.sourceId?{state:example.state,step:"correct",source:{id:example.sourceId,type:"scan_pdf",position:1,page:110,label:"PDF 第110页"}}:null}}});
+  });
+  await page.goto("/#doc");
+  if(example.ready)await expect(page.getByLabel("日语原文")).toBeVisible();
+  else if(example.sourceId)await expect(page.getByRole("region",{name:"准备当前阅读页",exact:true})).toContainText("PDF 第110页");
+  else await expect(page.getByText("文章目录",{exact:true})).toBeVisible();
+  await page.getByRole("button",{name:"校对正文",exact:true}).click();
+  await expect(page.getByLabel("切换校对来源",{exact:true})).toHaveValue(example.expected);
+  expect(state.calls.filter(call=>call.path.endsWith("/prepare")).map(call=>call.path)).toEqual([`/documents/doc/sources/${example.expected}/prepare`]);
 });
 
 async function delayedProposalEditFixture(page) {

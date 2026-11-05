@@ -3,11 +3,27 @@ import { parseText } from '../../shared/document.mjs';
 import { SENTENCE_SCHEMA, sentencePrompt, validateSentences } from '../../shared/sentences.mjs';
 import { ANNOTATION_SCHEMA } from '../../shared/ocr-correction.mjs';
 import { prepareBodyAnnotation, applyBodyAnnotation } from './annotation.mjs';
+import { normalizeReasoning } from '../../shared/ai-roles.mjs';
 
 const fail = (message) => Object.assign(new Error(message), { status: 502, expose: true });
 const TEXT_SCHEMA = { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false };
 const contextPrompt = (context = {}) => `\n相邻上下文（仅帮助理解，不得写入目标正文）：${JSON.stringify({ before: context.before || '', after: context.after || '' })}`;
 const asHtml = (value) => normalizeBodyHtml(value.bodyHtml || blocksToHtml(value.blocks || parseText(value.text || '')));
+function executionSummary(values){
+  const executions=values.filter(value=>value&&typeof value==='object');if(!executions.length)return undefined;
+  const last=executions.at(-1),result={};
+  for(const key of ['operationId','role','providerId','model','annotationMode'])if(typeof last[key]==='string'&&last[key].length<=240&&!/[\r\n]/.test(last[key]))result[key]=last[key];
+  if(Number.isFinite(last.configurationVersion)&&last.configurationVersion>=0)result.configurationVersion=last.configurationVersion;
+  try{const reasoning=normalizeReasoning(last.reasoning);if(reasoning)result.reasoning=reasoning;}catch{}
+  for(const key of ['queueMs','elapsedMs','retryWaitMs','retryCount']){
+    const times=executions.map(value=>value[key]).filter(value=>Number.isFinite(value)&&value>=0);
+    if(times.length)result[key]=times.reduce((sum,value)=>sum+value,0);
+  }
+  for(const key of ['queuedAt','startedAt']){
+    const first=executions.find(value=>typeof value[key]==='string'&&Number.isFinite(Date.parse(value[key])));if(first)result[key]=first[key];
+  }
+  return result;
+}
 
 export function correctionRisk(before, after) {
   if (before === after) return { requiresReview: false };
@@ -104,25 +120,48 @@ export function createSourceProcessor({ execute, extractSource, recognizePhoto, 
     }
     if (step === 'segment') {
       if (hasCompleteSentenceBoundaries(html)) return { bodyHtml: html, text, sentences: bodyRanges(html).sentences };
-      const existing = bodyRanges(html).sentences, sentences = []; let offset = 0, execution;
+      const existing = bodyRanges(html).sentences, sentences = [],executions=[];let offset=0,repairs=0;
+      const assertActive=()=>{try{signal?.throwIfAborted();}catch(error){const summary=executionSummary(executions);if(summary)error.execution=summary;throw error;}};
       const split = async (part, from) => {
+        assertActive();
         if (!part) return;
         if (!part.trim()) { sentences.push(part); return; }
         const adjacent = { before: ((context?.before || '') + text.slice(0, from)).slice(-600), after: (text.slice(from + part.length) + (context?.after || '')).slice(0, 600) };
-        const result = await execute(userId, 'segmentation', { prompt: sentencePrompt(part) + contextPrompt(adjacent), schema: SENTENCE_SCHEMA, priority, signal, groupKey, getPriority, onStatus });
-        try { sentences.push(...validateSentences(result.value, part)); }
-        catch (error) {
-          error.result = { expectedText: part, value: result.value, execution: result.execution, kind: 'invalid_segmentation' };
-          throw error;
+        let repairReason;
+        for(let attempt=0;attempt<2;attempt++){
+          assertActive();
+          const feedback=attempt?`\n上次分句校验失败（${repairReason}），请只重新切分上方原始输入，不纠错、不改写。只返回JSON {"sentences":["片段"]}，每项必须为非空字符串，所有片段按顺序直接拼接必须与解码后的输入逐字相等。标题、章节序号、独立分隔符（例如 **）、空白和换行均为正文，不得删除、解释为Markdown或增补字符；片段不得包含输入JSON编码的最外层引号，不返回额外字段。`:'';
+          let result;
+          try{result=await execute(userId, 'segmentation', { prompt: sentencePrompt(part)+feedback+contextPrompt(adjacent), schema: SENTENCE_SCHEMA, priority, signal, groupKey, getPriority, onStatus });}
+          catch(error){
+            if(error&&typeof error==='object'){
+              if(error.execution)executions.push(error.execution);
+              const summary=executionSummary(executions);if(summary)error.execution=summary;
+            }
+            throw error;
+          }
+          executions.push(result.execution);assertActive();
+          try{sentences.push(...validateSentences(result.value,part));return;}
+          catch(error){
+            const candidates=result.value?.sentences;
+            const reason=Array.isArray(candidates)&&candidates.length>0&&candidates.length<=20000&&candidates.every(value=>typeof value==='string'&&value.length>0)?'text_mismatch':'invalid_shape';
+            error.validationReason=reason;
+            error.diagnostic={code:'AI_INVALID_RESPONSE',category:'invalid_response',errorType:'Error'};
+            error.execution=executionSummary(executions);
+            error.result={expectedText:part,value:result.value,execution:error.execution,kind:'invalid_segmentation'};
+            // The entire source operation gets one repair, including all gaps.
+            if(attempt||repairs>=1)throw error;
+            repairs++;repairReason=reason;
+          }
         }
-        execution = result.execution;
       };
       for (const sentence of existing) {
         await split(text.slice(offset, sentence.start), offset);
         sentences.push(text.slice(sentence.start, sentence.end)); offset = sentence.end;
       }
       await split(text.slice(offset), offset);
-      return { bodyHtml: initializeSentenceBoundaries(html, sentences), text, sentences, execution };
+      assertActive();
+      return { bodyHtml: initializeSentenceBoundaries(html, sentences), text, sentences, execution:executionSummary(executions) };
     }
     if (step === 'annotate') {
       if (annotateBodies) {

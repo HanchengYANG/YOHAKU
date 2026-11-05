@@ -51,21 +51,30 @@ export default function PagedReader({ document, active = true, onEditSources, on
   const setSnapshot = (next) => setResponse({documentId:document.id,snapshot:next});
   const setError = (message, requestedIndex = current.current.index) => setFailure(message ? {documentId:document.id,index:requestedIndex,message} : null);
   useEffect(() => {
-    let stopped = false, timer, controller;
+    let stopped = false, timer, controller, sequence = 0;
     const load = async () => {
+      clearTimeout(timer);
+      if (stopped || window.document.visibilityState === "hidden") return;
+      const currentRequest = ++sequence;
       const request = ++requestSequence.current;
       const requestedIndex = current.current.index;
+      controller?.abort();
       controller = new AbortController();
       try {
         const next = await api(`/documents/${encodeURIComponent(document.id)}/reading-pages${index === null ? "" : `?index=${index}`}`, {signal:controller.signal});
-        if (stopped || request < latestResponse.current) return;
+        if (stopped || currentRequest !== sequence || window.document.visibilityState === "hidden" || request < latestResponse.current) return;
         latestResponse.current = request;
         setSnapshot(next); setError(""); onPageChange?.(next.currentPage,next);
-      } catch (cause) { if (!stopped && request >= latestResponse.current && cause.name !== "AbortError") setError(cause.message,requestedIndex); }
-      finally { if (!stopped && active) timer = setTimeout(load,2000); }
+      } catch (cause) { if (!stopped && currentRequest === sequence && window.document.visibilityState !== "hidden" && request >= latestResponse.current && cause.name !== "AbortError") setError(cause.message,requestedIndex); }
+      finally { if (!stopped && currentRequest === sequence && active && window.document.visibilityState !== "hidden") timer = setTimeout(load,2000); }
+    };
+    const visibility = () => {
+      if (window.document.visibilityState === "hidden") {sequence++;clearTimeout(timer);controller?.abort();}
+      else void load();
     };
     void load();
-    return () => {stopped = true;clearTimeout(timer);controller?.abort();};
+    window.document.addEventListener("visibilitychange",visibility);window.addEventListener("online",load);
+    return () => {stopped = true;sequence++;clearTimeout(timer);controller?.abort();window.document.removeEventListener("visibilitychange",visibility);window.removeEventListener("online",load);};
   },[document.id,index,retry,active]);
   useEffect(() => {
     if (!active || !snapshot) return;
@@ -102,6 +111,8 @@ export default function PagedReader({ document, active = true, onEditSources, on
   const paused = preparation.paused;
   const recentFailures = snapshot?.diagnostics?.recentFailures?.slice(0,5) || [];
   const taskId=matchesIndex ? snapshot?.taskId || progress?.taskId : null;
+  const diagnosticSourceId = diagnostics?.current?.source?.id;
+  const preparationSourceIds = diagnosticSourceId ? [diagnosticSourceId,...(page?.sourceIds || []).filter((id) => id !== diagnosticSourceId)] : page?.sourceIds || [];
   const change = (next) => {setPageIndex({documentId:document.id,value:Math.max(0,next)});setError("");window.scrollTo({top:0,behavior:"instant"});};
   return <div className="paged-reader">
     <nav className="reading-pagination" aria-label="阅读分页">
@@ -129,7 +140,7 @@ export default function PagedReader({ document, active = true, onEditSources, on
         {diagnostics?.current && <details className="reading-diagnostics"><summary>处理详情</summary><DiagnosticFacts record={diagnostics.current} /></details>}
         <div className="source-actions">{!emptyComplete && <button className="button secondary" onClick={() => {retryPending.current = true;setRetry((value) => value + 1);}}>重试准备</button>}
           {taskId && <a className="button subtle" href={`#tasks/${encodeURIComponent(taskId)}`}>查看后台任务</a>}
-          <button className="button subtle" onClick={() => onEditSources(page?.sourceIds || [])}>校对正文</button></div>
+          <button className="button subtle" onClick={() => onEditSources(preparationSourceIds)}>校对正文</button></div>
       </section>}
     {recentFailures.length > 0 && <details className="reading-diagnostics reading-diagnostics-history"><summary>最近处理异常（{recentFailures.length}）</summary><div aria-label="最近处理异常记录"><p className="source-scope-note">以下是历史记录，不代表当前阅读页仍有错误。</p>{recentFailures.map((failure) => <section key={failure.id}><p>{failure.message}</p><DiagnosticFacts record={failure} /></section>)}</div></details>}
     {page?.ready && <nav className="reading-pagination" aria-label="页末阅读分页"><button className="button secondary" disabled={currentIndex === 0} onClick={() => change(currentIndex - 1)}>上一页</button><span>{readingPageLabel({index:currentIndex,complete:snapshot?.complete,totalPages:snapshot?.totalPages})}</span><button className="button primary" disabled={!hasNext || !page} onClick={() => change(currentIndex + 1)}>下一页</button></nav>}

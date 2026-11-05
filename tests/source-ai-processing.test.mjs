@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createSourceProcessor, correctionRisk, validateChapterProposal } from '../server/ai/source-processing.mjs';
-import { bodyText } from '../shared/article-html.mjs';
+import { bodyText, bodyRanges, htmlToBlocks } from '../shared/article-html.mjs';
+import { createOperationQueue } from '../server/ai/operation-queue.mjs';
 import { requiredCapabilities, ROLE_IDS } from '../shared/ai-roles.mjs';
 
 test('校正角色仅需结构化文字能力，独立于图片识别', () => {
@@ -197,4 +198,71 @@ test('来源注音交由混合批次服务处理，正文校正仍由独立角�
   assert.deepEqual(calls[0].input.context,{before:'前文。',after:'後文。'});
   assert.equal(result.execution.annotationMode,'proofread');
   assert.equal(bodyText(result.bodyHtml),'日本語。');
+});
+
+test('分句遗漏独立分隔符时最多纠错一次，保留原文标记并累计两次耗时',async()=>{
+  const original='<p data-paragraph-id="title" data-block-type="heading">十つるや</p><p data-paragraph-id="divider">**</p><p data-paragraph-id="body"><span data-source-id="source"><ruby data-origin="manual">東京<rt>とうきょう</rt></ruby>と<mark data-qa-group-ids="qa"><ruby data-origin="source">日本<rt>にほん</rt></ruby></mark>。</span></p>';
+  const text=bodyText(original),calls=[],controller=new AbortController(),onStatus=()=>{},getPriority=()=> 'foreground';
+  const options={signal:controller.signal,onStatus,getPriority,groupKey:'article',priority:'background'};
+  const processor=createSourceProcessor({execute:async(user,role,input)=>{
+    calls.push(input);assert.equal(user,'u');assert.equal(role,'segmentation');
+    for(const key of Object.keys(options))assert.equal(input[key],options[key],key);
+    assert.equal(JSON.parse(input.prompt.split('\n输入正文：\n')[1].split('\n')[0]),text);
+    const execution={operationId:`split-${calls.length}`,role,queueMs:calls.length===1?5:7,elapsedMs:calls.length===1?10:15,requestHeaders:'never-copy-headers'};
+    if(calls.length===1)return {value:{sentences:[text.replace('**','')],extra:'MODEL_OUTPUT_SHOULD_NOT_REENTER_PROMPT'},execution};
+    assert.match(input.prompt,/text_mismatch/);assert.match(input.prompt,/\*\*/);assert.match(input.prompt,/换行/);assert.doesNotMatch(input.prompt,/MODEL_OUTPUT_SHOULD_NOT_REENTER_PROMPT/);
+    return {value:{sentences:text.match(/[^\n]*\n|[^\n]+$/g)},execution};
+  }});
+  const result=await processor.processSource('u',{step:'segment',bodyHtml:original,...options});
+  assert.equal(calls.length,2);assert.equal(bodyText(result.bodyHtml),text);
+  assert.deepEqual(bodyRanges(result.bodyHtml).qa,bodyRanges(original).qa);assert.deepEqual(bodyRanges(result.bodyHtml).sources,bodyRanges(original).sources);
+  assert.deepEqual(htmlToBlocks(result.bodyHtml).flatMap(block=>block.segments.filter(segment=>segment.reading)).map(({text,reading,origin})=>({text,reading,origin})),[{text:'東京',reading:'とうきょう',origin:'manual'},{text:'日本',reading:'にほん',origin:'source'}]);
+  assert.equal(result.execution.elapsedMs,25);assert.equal(result.execution.queueMs,12);assert.equal(result.execution.operationId,'split-2');
+  assert.doesNotMatch(JSON.stringify(result.execution),/requestHeaders|never-copy-headers/);
+});
+
+for(const [reason,value] of [['invalid_shape',{sentences:[]}],['text_mismatch',{sentences:['改写的正文。']}]])test(`分句持续${reason}仍失败，不提交句界且保留安全累计执行详情`,async()=>{
+  let calls=0;const original='<p data-paragraph-id="p">原文。\n**\n末尾。</p>',input={step:'segment',bodyHtml:original},before=JSON.stringify(input);
+  const processor=createSourceProcessor({execute:async()=>{calls++;return {value,execution:{role:'segmentation',operationId:`op-${calls}`,elapsedMs:120,queueMs:30,rawResponse:'must-not-copy'},requestHeaders:{authorization:'must-not-copy'}};}});
+  await assert.rejects(processor.processSource('u',input),error=>{
+    assert.equal(error.validationReason,reason);assert.equal(error.diagnostic.category,'invalid_response');assert.equal(error.status,502);
+    assert.equal(error.execution.elapsedMs,240);assert.equal(error.execution.queueMs,60);assert.equal(error.execution.operationId,'op-2');
+    assert.equal(error.result.expectedText,bodyText(original));assert.deepEqual(error.result.value,value);assert.deepEqual(error.result.execution,error.execution);
+    assert.doesNotMatch(JSON.stringify(error.result),/must-not-copy|rawResponse|authorization/);return true;
+  });
+  assert.equal(calls,2);assert.equal(JSON.stringify(input),before);assert.equal(bodyRanges(input.bodyHtml).sentences.length,0);
+});
+
+test('分句取消后不发纠错请求，传输错误也不触发语义重试',async()=>{
+  const cancelled=new DOMException('cancelled','AbortError'),controller=new AbortController();let calls=0;
+  const processor=createSourceProcessor({execute:async()=>{calls++;controller.abort(cancelled);return {value:{sentences:['错误。']}};}});
+  await assert.rejects(processor.processSource('u',{step:'segment',bodyHtml:'<p>原文。</p>',signal:controller.signal}),error=>error===cancelled);assert.equal(calls,1);
+  const failure=Object.assign(new Error('offline'),{code:'ECONNRESET'});calls=0;
+  const offline=createSourceProcessor({execute:async()=>{calls++;throw failure;}});
+  await assert.rejects(offline.processSource('u',{step:'segment',bodyHtml:'<p>原文。</p>'}),error=>error===failure);assert.equal(calls,1);
+});
+
+test('同一次来源分句的多个缺口共享一次纠错预算，后缺口失败不重做成功部分',async()=>{
+  const original='<p data-paragraph-id="p">前文。<span data-sentence-id="kept">既存。</span>後文。</p>',parts=[];
+  const processor=createSourceProcessor({execute:async(_user,_role,input)=>{
+    const part=JSON.parse(input.prompt.split('\n输入正文：\n')[1].split('\n')[0]);parts.push(part);
+    return {value:{sentences:parts.length===2?[part]:['错误。']},execution:{elapsedMs:10,queueMs:5}};
+  }});
+  await assert.rejects(processor.processSource('u',{step:'segment',bodyHtml:original}),error=>error.validationReason==='text_mismatch'&&error.execution.elapsedMs===30);
+  assert.deepEqual(parts,['前文。','前文。','後文。']);assert.deepEqual(bodyRanges(original).sentences.map(sentence=>sentence.id),['kept']);
+});
+
+test('分句纠错通过同一资源队列等待名额，不绕开分组和取消',async()=>{
+  const queue=createOperationQueue({concurrency:1}),controller=new AbortController(),calls=[];
+  let release,entered,blocker,runs=0;const occupied=new Promise(resolve=>entered=resolve),gate=new Promise(resolve=>release=resolve);
+  const processor=createSourceProcessor({execute:(user,role,input)=>{
+    calls.push(input);return queue.run(async()=>{
+      runs++;if(runs===1){blocker=queue.run(async()=>{entered();await gate;},{groupKey:'other',priority:'foreground'});return {value:{sentences:['错误。']}};}
+      return {value:{sentences:['原文。']}};
+    },{signal:input.signal,groupKey:input.groupKey,priority:input.priority,getPriority:input.getPriority});
+  }});
+  const getPriority=()=> 'foreground',pending=processor.processSource('u',{step:'segment',bodyHtml:'<p>原文。</p>',signal:controller.signal,groupKey:'article',priority:'foreground',getPriority});
+  try{await occupied;await new Promise(setImmediate);assert.equal(calls.length,2);assert.equal(runs,1);for(const input of calls){assert.equal(input.signal,controller.signal);assert.equal(input.groupKey,'article');assert.equal(input.getPriority,getPriority);}}
+  finally{release();await blocker;}
+  assert.equal(bodyText((await pending).bodyHtml),'原文。');assert.equal(runs,2);
 });

@@ -191,17 +191,54 @@ function batchItems(items) {
 }
 
 function validateProofread(value, targets) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 2 || !Array.isArray(value.changes) || !Array.isArray(value.uncertain)) throw fail('注音校对返回格式无效，未应用。');
+  const invalid=reason=>Object.assign(fail({invalid_shape:'注音校对返回格式无效，未应用。',invalid_id:'注音校对标识必须为整数，未应用。',unknown_id:'注音校对包含本批资料之外的标识，未应用。',duplicate_id:'注音校对包含重复标识，未应用。',invalid_reading:'注音校对读音必须为非空平假名，未应用。'}[reason]),{validationReason:reason,diagnostic:{code:'AI_INVALID_RESPONSE',category:'invalid_response',errorType:'Error'}});
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 2 || !Array.isArray(value.changes) || !Array.isArray(value.uncertain)) throw invalid('invalid_shape');
   const changes = new Map(), uncertain = new Set();
   for (const change of value.changes) {
-    if (!change || typeof change !== 'object' || Array.isArray(change) || Object.keys(change).length !== 2 || !Number.isSafeInteger(change.id) || !targets.has(change.id) || changes.has(change.id) || !validReading(change.r)) throw fail('注音校对包含未知、重复的标识或无效读音，未应用。');
+    if (!change || typeof change !== 'object' || Array.isArray(change) || Object.keys(change).length !== 2) throw invalid('invalid_shape');
+    if (!Number.isSafeInteger(change.id)) throw invalid('invalid_id');
+    if (!targets.has(change.id)) throw invalid('unknown_id');
+    if (changes.has(change.id)) throw invalid('duplicate_id');
+    if (!validReading(change.r)) throw invalid('invalid_reading');
     changes.set(change.id, change.r);
   }
   for (const id of value.uncertain) {
-    if (!Number.isSafeInteger(id) || !targets.has(id) || changes.has(id) || uncertain.has(id)) throw fail('注音校对包含未知或重复的不确定标识，未应用。');
+    if (!Number.isSafeInteger(id)) throw invalid('invalid_id');
+    if (!targets.has(id)) throw invalid('unknown_id');
+    if (changes.has(id) || uncertain.has(id)) throw invalid('duplicate_id');
     uncertain.add(id);
   }
   return { changes, uncertain };
+}
+
+function safeExecution(value){
+  if(!value||typeof value!=='object')return null;
+  const result={};
+  for(const key of ['operationId','role','providerId','model','annotationMode'])if(typeof value[key]==='string'&&value[key].length<=240&&!/[\r\n]/.test(value[key]))result[key]=value[key];
+  for(const key of ['configurationVersion','queueMs','elapsedMs','retryCount','retryWaitMs'])if(Number.isFinite(value[key])&&value[key]>=0)result[key]=value[key];
+  for(const key of ['queuedAt','startedAt'])if(typeof value[key]==='string'&&Number.isFinite(Date.parse(value[key])))result[key]=value[key];
+  if(value.reasoning&&typeof value.reasoning==='object'){
+    const reasoning={};
+    if(typeof value.reasoning.effort==='string'&&/^[a-z][a-z0-9_-]{0,30}$/.test(value.reasoning.effort))reasoning.effort=value.reasoning.effort;
+    if(typeof value.reasoning.enabled==='boolean')reasoning.enabled=value.reasoning.enabled;
+    if(Number.isSafeInteger(value.reasoning.budgetTokens)&&value.reasoning.budgetTokens>0&&value.reasoning.budgetTokens<=1000000)reasoning.budgetTokens=value.reasoning.budgetTokens;
+    if(Object.keys(reasoning).length)result.reasoning=reasoning;
+  }
+  return Object.keys(result).length?result:null;
+}
+function executionSummary(executions){
+  const known=executions.filter(Boolean);if(!known.length)return null;
+  const result={...known.at(-1)};
+  if(known.length>1){
+    for(const key of ['queueMs','elapsedMs','retryWaitMs','retryCount']){
+      const values=known.map(value=>value[key]).filter(Number.isFinite);
+      if(values.length)result[key]=values.reduce((sum,value)=>sum+value,0);
+    }
+    for(const key of ['queuedAt','startedAt']){
+      const first=known.find(value=>value[key]);if(first)result[key]=first[key];
+    }
+  }
+  return result;
 }
 
 function replaceReading(readings, target, reading) {
@@ -258,12 +295,32 @@ export function createHybridAnnotation({ localRuby, execute } = {}) {
         return { id: item.id, text: pieces.join('') };
       });
       const adjacent = { before: (String(context.before || '') + documentText.slice(0, batch[0].documentStart)).slice(-600), after: (documentText.slice(batch.at(-1).documentEnd) + String(context.after || '')).slice(0, 600) };
-      const prompt = instructions + '\n相邻上下文（仅帮助理解，不得修改）：' + JSON.stringify(adjacent) + '\n资料：\n' + JSON.stringify(material);
-      const started = performance.now();
-      const result = await execute(userId, 'annotation', { prompt, schema: HYBRID_ANNOTATION_SCHEMA, priority, signal, groupKey, getPriority, annotationMode: 'proofread', onStatus });
-      proofreadMs += Math.round(performance.now() - started); llmCalls++;
-      const validated = validateProofread(result?.value, targets);
-      executions.push(result.execution ?? null);
+      let validated,repairReason;
+      for(let attempt=0;attempt<2;attempt++){
+        signal?.throwIfAborted();
+        const feedback=attempt?`\n上次回复校验失败（${repairReason}），请仅修复返回格式。本批允许的整数ID：${JSON.stringify([...targets.keys()])}。r必须为1至1000字的纯平假名（可含ー），不含汉字、片假名、空白或解释。changes与uncertain内部及两者之间均不允许重复ID。只返回changes与uncertain，不返回正文或其他字段。`:'';
+        const prompt = instructions + feedback + '\n相邻上下文（仅帮助理解，不得修改）：' + JSON.stringify(adjacent) + '\n资料：\n' + JSON.stringify(material);
+        const started=performance.now();let result;
+        try{result=await execute(userId, 'annotation', { prompt, schema: HYBRID_ANNOTATION_SCHEMA, priority, signal, groupKey, getPriority, annotationMode: 'proofread', onStatus });}
+        catch(error){
+          if(error&&typeof error==='object'){
+            const last=safeExecution(error.execution);if(last)executions.push(last);
+            const summary=executionSummary(executions);if(summary)error.execution=summary;
+          }
+          throw error;
+        }
+        proofreadMs+=Math.round(performance.now()-started);llmCalls++;
+        executions.push(safeExecution(result?.execution));
+        signal?.throwIfAborted();
+        try{validated=validateProofread(result?.value,targets);break;}
+        catch(error){
+          // Only the local, fixed semantic validation reasons earn one repair.
+          // Transport failures and cancellation never enter this retry path.
+          error.execution=executionSummary(executions);
+          if(attempt||!error.validationReason)throw error;
+          repairReason=error.validationReason;
+        }
+      }
       for (const [id, reading] of validated.changes) {
         const located = targets.get(id); changes.get(located.itemId).set(located.index, reading);
       }
@@ -288,7 +345,7 @@ export function createHybridAnnotation({ localRuby, execute } = {}) {
       result.metrics = itemMetrics(result, item.metrics);
       return result;
     });
-    return { items: annotated, execution: executions.at(-1) ?? null, executions,
+    return { items: annotated, execution: executionSummary(executions), executions,
       metrics: { ...totalMetrics(annotated, prepared.metrics), proofreadMs, llmCalls, corrections: correctionCount, uncertain: annotated.reduce((sum, item) => sum + item.uncertain.length, 0) } };
   }
 

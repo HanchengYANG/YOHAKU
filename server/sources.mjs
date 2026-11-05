@@ -71,6 +71,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
   };
   const fragments=row=>readOnce('fragments',row.scope_id,()=>database.prepare('SELECT * FROM source_fragments WHERE scope_id=? ORDER BY position').all(row.scope_id));
   const readHtml=row=>readOnce('html',row.scope_id,()=>fragments(row).map(f=>f.html).join('')||empty());
+  const sourceLength=row=>readOnce('length',row.scope_id,()=>fragments(row).reduce((sum,fragment,index)=>sum+fragment.text.length+(index?1:0),0));
   const stamp=()=>new Date(now()).toISOString();
   let closed=false,stopping=false,scheduled=false;
   const working=new Map(),articleKey=(userId,id)=>json([userId,id]);
@@ -379,7 +380,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     }
   }
   function annotationRanges(row) {
-    const length=body.bodyText(readHtml(row)).length;
+    const length=sourceLength(row);
     if(row.next_step>=4)return length?[{start:0,end:length}]:[];
     return database.prepare('SELECT start,end FROM source_annotations WHERE scope_id=? AND version=? ORDER BY start,end').all(row.scope_id,row.version);
   }
@@ -486,9 +487,13 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     const available=[];
     for(const row of rows){if(row.next_step<3)break;available.push(row);}
     if(!available.length)return;
-    const html=compose(available),text=body.bodyText(html),existing=database.prepare('SELECT * FROM reading_pages WHERE document_id=? AND user_id=? ORDER BY position').all(id,userId);
+    const existing=database.prepare('SELECT * FROM reading_pages WHERE document_id=? AND user_id=? ORDER BY position').all(id,userId);
     const covered=existing.reduce((sum,page)=>sum+decode(page.ranges_json,[]).reduce((n,ref)=>n+Math.max(0,ref.end-ref.start),0),0);
-    if(covered>=text.length)return;
+    const availableLength=available.reduce((sum,row)=>sum+sourceLength(row),0);
+    // A partial tail shorter than the reading-page minimum cannot be published.
+    // Check stored text lengths before rebuilding the segmented HTML prefix.
+    if(covered>=availableLength||available.length<rows.length&&availableLength-covered<800)return;
+    const html=compose(available),text=body.bodyText(html);
     const carry=available.length<rows.length?sentenceCarry(available,covered):null;
     const tail=sliceReadingHtml(html,covered,carry?.start??text.length),tailText=body.bodyText(tail);
     let sentences=body.bodyRanges(tail).sentences;
@@ -553,6 +558,39 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     const html=compose(scopes(userId,row.id));
     return {...document,bodyHtml:retainQa(html,row.body_html),bodyHash:hash(html),blocks:body.htmlToBlocks(html),content:serializeBlocks(body.htmlToBlocks(html)),sourceWorkflow:true,sources:listSources(userId,row.id),reading:readingPages(userId,row.id)};
   }
+  function demandPageReady(page,rows) {
+    return readOnce('demandPageReady',page.id,()=>{
+      const refs=decode(page.ranges_json,[]),bySource=new Map(rows.map(row=>[row.source_id,row]));
+      for(const sourceId of new Set(refs.map(ref=>ref.sourceId))){
+        const row=bySource.get(sourceId);
+        if(!row||!globalRefs(row,refs).filter(ref=>ref.sourceId===sourceId).every(ref=>annotationCovered(row,ref.start,ref.end)))return false;
+      }
+      // Inspect only the target fragments' sentence coverage. No rendered page,
+      // full article hash, other pages, or reader diagnostics are needed here.
+      let hasText=false,missing=false;
+      for(const ref of refs){
+        const row=bySource.get(ref.sourceId),fragment=fragments(row).find(item=>item.id===ref.paragraphId);
+        if(!fragment)continue;
+        const text=fragment.text.slice(ref.start,ref.end);hasText ||= !!text.trim();
+        const sentences=readOnce('fragmentSentences',json([row.scope_id,fragment.id]),()=>body.bodyRanges(fragment.html).sentences);
+        const covered=sentences.map(sentence=>fragment.text.slice(Math.max(ref.start,sentence.start),Math.min(ref.end,sentence.end))).join('');
+        if(covered.replace(/\n/g,'')!==text.replace(/\n/g,''))missing=true;
+      }
+      return !hasText||!missing;
+    });
+  }
+  function demandReadingState(userId,id,index,rows,pages) {
+    let current=pages[index];
+    if(!current){
+      refreshPages(userId,id);
+      pages=database.prepare('SELECT * FROM reading_pages WHERE user_id=? AND document_id=? ORDER BY position').all(userId,id);
+      current=pages[index];
+    }
+    if(current&&demandPageReady(current,rows))return {ready:true,pages};
+    if(!rows.length||rows.some(row=>row.next_step<4))return {ready:false,pages};
+    const covered=pages.reduce((sum,page)=>sum+decode(page.ranges_json,[]).reduce((n,ref)=>n+ref.end-ref.start,0),0);
+    return {ready:covered>=rows.reduce((sum,row)=>sum+sourceLength(row),0)&&pages.every(page=>demandPageReady(page,rows)),pages};
+  }
   function requestPreparation(userId,id,mode,index,sourceId) {
     if(mode==='correction'&&!sourceId)return;
     const ready=mode==='correction'?scope(userId,id,sourceId).next_step>=4:readingPages(userId,id,index).currentPage?.ready;
@@ -596,7 +634,8 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     for(const session of [...sessions,...jobs.map(job=>({...job,background:true}))]) {
       if(userId!==undefined&&(session.user_id!==userId||session.document_id!==documentId))continue;
       if(!requestEnabled(session.user_id,session.document_id))continue;
-      const rows=scopes(session.user_id,session.document_id),pages=database.prepare('SELECT * FROM reading_pages WHERE user_id=? AND document_id=? ORDER BY position').all(session.user_id,session.document_id);
+      const rows=scopes(session.user_id,session.document_id);
+      let pages=database.prepare('SELECT * FROM reading_pages WHERE user_id=? AND document_id=? ORDER BY position').all(session.user_id,session.document_id);
       const retire=()=>database.prepare('DELETE FROM source_preparation_jobs WHERE user_id=? AND document_id=? AND mode=? AND target=?').run(session.user_id,session.document_id,session.mode,session.target);
       if(session.mode==='retry'){
         const node=decode(session.target),row=rows.find(row=>row.scope_id===node.scopeId);
@@ -612,8 +651,8 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
         if(row)candidates.push({row,priority:session.background?'background':'foreground',mode:'correction',requestTarget:{mode:'correction',sourceId:session.source_id}});continue;
       }
       if(session.background) {
-        const snapshot=readingPages(session.user_id,session.document_id,session.page_index);
-        if(snapshot.currentPage?.ready||snapshot.complete){retire();continue;}
+        const snapshot=demandReadingState(session.user_id,session.document_id,session.page_index,rows,pages);pages=snapshot.pages;
+        if(snapshot.ready){retire();continue;}
       }
       const window=session.background?1:3,target=pages.slice(session.page_index,session.page_index+window);
       for(let pageIndex=0;pageIndex<target.length;pageIndex++){
@@ -648,7 +687,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     for(const candidate of [...candidates]){
       if(candidate.retryOnly)continue;
       const ordered=scopes(candidate.row.user_id,candidate.row.document_id);
-      const first=candidate.mode==='correction'?candidate.row:ordered.find(row=>!annotationCovered(row,0,body.bodyText(readHtml(row)).length));
+      const first=candidate.mode==='correction'?candidate.row:ordered.find(row=>!annotationCovered(row,0,sourceLength(row)));
       if(!first||first.next_step<2||database.prepare('SELECT 1 FROM source_annotations WHERE scope_id=? AND version=? LIMIT 1').get(first.scope_id,first.version))continue;
       const start=ordered.findIndex(row=>row.scope_id===first.scope_id),group=[];let length=0;
       const frontier=ordered.findIndex(row=>row.scope_id===candidate.row.scope_id);

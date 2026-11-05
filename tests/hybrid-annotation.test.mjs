@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bodyText, bodyRanges, htmlToBlocks, normalizeBodyHtml } from '../shared/article-html.mjs';
 import { createHybridAnnotation } from '../server/ai/hybrid-annotation.mjs';
+import { createOperationQueue } from '../server/ai/operation-queue.mjs';
 
 const html = (text, id = 'p') => `<p data-paragraph-id="${id}">${text}</p>`;
 const readings = (bodyHtml) => htmlToBlocks(bodyHtml).flatMap((b) => b.segments.filter((s) => s.reading));
@@ -171,9 +172,10 @@ test('本地重叠、错字或坏偏移拒绝且不会调用LLM', async () => {
 });
 
 test('后批次失败不返回先前批次已修改结果，也不改变本地持久化快照', async () => {
-  let calls = 0;
+  let calls = 0;const batches=[];
   const service = create({ execute: async (_u, _r, input) => {
     calls++;
+    batches.push(JSON.parse(input.prompt.split('\n资料：\n')[1]).map(item=>item.id));
     const spans = targetsIn(input.prompt);
     return { value: { changes: [{ id: calls === 1 ? spans[0].id : 999999, r: 'た' }], uncertain: [] } };
   } });
@@ -183,7 +185,8 @@ test('后批次失败不返回先前批次已修改结果，也不改变本地�
   ]);
   const before = JSON.stringify(prepared);
   await assert.rejects(service.proofreadPrepared('u', { prepared }));
-  assert.equal(calls, 2);
+  assert.equal(calls, 3,'one successful batch plus exactly two attempts for the failed batch');
+  assert.deepEqual(batches,[['a'],['b'],['b']],'a successful batch must not run again');
   assert.equal(JSON.stringify(prepared), before);
 });
 
@@ -249,4 +252,81 @@ test('持久化快照缺目标或重叠目标时拒绝，校对前重新核验�
     await assert.rejects(service.proofreadPrepared('u', { prepared }));
   }
   assert.equal(calls, 0);
+});
+
+test('首次语义格式失败只纠错一次，原资料和人工来源读音完整保留且计入两次执行耗时',async()=>{
+  const calls=[],controller=new AbortController(),onStatus=()=>{},getPriority=()=> 'foreground';
+  const original=html('<ruby data-origin="manual">東<rt>あずま</rt></ruby><ruby data-origin="source">京<rt>きょう</rt></ruby>で食べる。');
+  const options={signal:controller.signal,groupKey:'chapter',getPriority,priority:'background',onStatus};
+  const service=create({execute:async(user,role,input)=>{
+    calls.push(input);assert.equal(user,'u');assert.equal(role,'annotation');
+    for(const key of Object.keys(options))assert.equal(input[key],options[key],key);
+    assert.equal(input.annotationMode,'proofread');
+    assert.deepEqual(targetsIn(input.prompt).map(target=>target.surface),['食']);
+    const execution={operationId:`op-${calls.length}`,providerId:'provider',model:'model',queueMs:calls.length===1?10:20,elapsedMs:calls.length===1?30:40,authorization:'must-not-be-copied'};
+    if(calls.length===1)return {value:{changes:[{id:0,r:'私密RAW_OUTPUT'}],uncertain:[]},execution};
+    assert.match(input.prompt,/invalid_reading/);assert.match(input.prompt,/允许.*\[0\]/);assert.match(input.prompt,/平假名/);assert.match(input.prompt,/重复/);assert.doesNotMatch(input.prompt,/私密RAW_OUTPUT/);
+    return {value:{changes:[{id:0,r:'た'}],uncertain:[]},execution};
+  }});
+  const result=await service.annotateBodies('u',{items:[{id:'a',bodyHtml:original}],...options});
+  assert.equal(calls.length,2);assert.equal(result.metrics.llmCalls,2);assert.equal(result.executions.length,2);
+  assert.equal(result.execution.elapsedMs,70);assert.equal(result.execution.queueMs,30);assert.equal(result.execution.operationId,'op-2');
+  assert.doesNotMatch(JSON.stringify(result.executions),/must-not-be-copied|authorization/);
+  assert.equal(bodyText(result.items[0].bodyHtml),bodyText(original));assert.deepEqual(bodyRanges(result.items[0].bodyHtml),bodyRanges(original));
+  assert.deepEqual(readings(result.items[0].bodyHtml).map(({text,reading,origin})=>({text,reading,origin})),[{text:'東',reading:'あずま',origin:'manual'},{text:'京',reading:'きょう',origin:'source'},{text:'食',reading:'た',origin:'generated'}]);
+});
+
+for(const [reason,value] of [
+  ['invalid_id',{changes:[{id:'0',r:'た'}],uncertain:[]}],
+  ['unknown_id',{changes:[{id:99,r:'た'}],uncertain:[]}],
+  ['duplicate_id',{changes:[{id:0,r:'た'},{id:0,r:'た'}],uncertain:[]}],
+  ['duplicate_id',{changes:[{id:0,r:'た'}],uncertain:[0]}],
+  ['invalid_reading',{changes:[{id:0,r:'タ'}],uncertain:[]}],
+  ['invalid_shape',{changes:[],uncertain:[],secret:'never-reflect-this'}],
+])test(`持续${reason}整批失败并保留安全诊断、两次执行耗时与原快照`,async()=>{
+  let calls=0;
+  const service=create({execute:async()=>{calls++;return {value,execution:{operationId:`op-${calls}`,elapsedMs:200,queueMs:50,rawResponse:'never-reflect-this'}};}});
+  const prepared=await service.prepareBodies([{id:'a',bodyHtml:html('食べる。')}]),before=JSON.stringify(prepared);
+  await assert.rejects(service.proofreadPrepared('u',{prepared}),error=>{
+    assert.equal(error.validationReason,reason);assert.equal(error.diagnostic.category,'invalid_response');
+    assert.equal(error.execution.elapsedMs,400);assert.equal(error.execution.queueMs,100);assert.equal(error.execution.operationId,'op-2');
+    assert.doesNotMatch(JSON.stringify(error),/never-reflect-this|rawResponse/);return error.status===502;
+  });
+  assert.equal(calls,2);assert.equal(JSON.stringify(prepared),before);
+});
+
+test('首次语义失败后取消，不发纠错请求也不改本地快照',async()=>{
+  const controller=new AbortController(),cancelled=new DOMException('cancelled','AbortError');let calls=0;
+  const service=create({execute:async()=>{calls++;controller.abort(cancelled);return {value:{changes:[{id:999,r:'た'}],uncertain:[]}};}});
+  const prepared=await service.prepareBodies([{id:'a',bodyHtml:html('食べる。')}]),before=JSON.stringify(prepared);
+  await assert.rejects(service.proofreadPrepared('u',{prepared,signal:controller.signal}),error=>error===cancelled);
+  assert.equal(calls,1);assert.equal(JSON.stringify(prepared),before);
+});
+
+test('纠错调用重新经过真实资源队列，等待名额并保留取消和分组元数据',async()=>{
+  const queue=createOperationQueue({concurrency:1}),controller=new AbortController();
+  let release,entered,blocker,runs=0;const occupied=new Promise(resolve=>entered=resolve),gate=new Promise(resolve=>release=resolve),calls=[];
+  const service=create({execute:(user,role,input)=>{
+    calls.push(input);return queue.run(async()=>{
+      runs++;if(runs===1){
+        blocker=queue.run(async()=>{entered();await gate;},{priority:'foreground',groupKey:'other'});
+        return {value:{changes:[{id:999,r:'た'}],uncertain:[]}};
+      }
+      return {value:{changes:[{id:0,r:'た'}],uncertain:[]}};
+    },{priority:input.priority,signal:input.signal,groupKey:input.groupKey,getPriority:input.getPriority});
+  }});
+  const getPriority=()=> 'foreground',pending=service.annotateBodies('u',{items:[{id:'a',bodyHtml:html('食べる。')}],signal:controller.signal,priority:'foreground',groupKey:'article',getPriority});
+  try{
+    await occupied;await new Promise(setImmediate);
+    assert.equal(calls.length,2);assert.equal(runs,1,'repair must wait for the resource slot');
+    for(const call of calls){assert.equal(call.signal,controller.signal);assert.equal(call.groupKey,'article');assert.equal(call.getPriority,getPriority);}
+  }finally{release();await blocker;}
+  const result=await pending;assert.equal(runs,2);assert.equal(result.metrics.llmCalls,2);
+});
+
+test('传输错误不触发语义纠错请求',async()=>{
+  let calls=0;const failure=Object.assign(new Error('offline'),{code:'ECONNRESET'});
+  const service=create({execute:async()=>{calls++;throw failure;}});
+  await assert.rejects(service.annotateBodies('u',{items:[{id:'a',bodyHtml:html('食べる。')}]}),error=>error===failure);
+  assert.equal(calls,1);
 });
