@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { createSourceService } from '../server/sources.mjs';
 import { createSourceProcessor } from '../server/ai/source-processing.mjs';
@@ -299,6 +300,59 @@ test('page can reference multiple sources and source previews do not run AI',asy
   }finally{f.close();}
 });
 
+test('reading pages expose only verified image headings at source transitions without changing text coordinates',async()=>{
+  const title='十五馬を見に行く',calls=[];
+  const regions={
+    'ocr-heading':[{category:'タイトル本文',text:title},{category:'本文',text:'旅か'}],
+    continuation:[{category:'本文',text:'続く。'}],
+    'changed-title':[{category:'タイトル本文',text:'旧見出し'},{category:'本文',text:'本文。'}],
+  };
+  const corrected={'ocr-heading':`${title}\n旅が`,'changed-title':'新しい文\n本文。'};
+  const f=fixture({processSource:async(_u,request)=>{
+    const {id}=request.source;
+    calls.push([id,request.step]);
+    if(request.step==='extract')return {regions:regions[id],bodyHtml:html(regions[id].map(region=>region.text).join('\n'))};
+    if(request.step==='correct'&&corrected[id])return {bodyHtml:html(corrected[id])};
+    if(request.step==='segment')return {bodyHtml:applySentenceBoundaries(request.bodyHtml,bodyText(request.bodyHtml).match(/[^\n]+\n?/g))};
+    return {bodyHtml:request.bodyHtml};
+  }});
+  const explicit=(id,type,text)=>{
+    const blocks=parseText(text);blocks[0].type='heading';
+    return {id,type,status:'ready',bodyHtml:applySentenceBoundaries(blocksToHtml(blocks),[text])};
+  };
+  const texts=[['first','先頭の題\n「前の文章」'],['ocr-heading',corrected['ocr-heading']],['continuation','続く。'],
+    ['changed-title',corrected['changed-title']],['explicit-heading','写真の題\n本文。'],['pdf-heading','PDFの題\n本文。']];
+  try{
+    f.service.createArticleSources('u','a',[
+      explicit('first','photo',texts[0][1]),{id:'ocr-heading',type:'screenshot'},{id:'continuation',type:'screenshot'},
+      {id:'changed-title',type:'screenshot'},explicit('explicit-heading','photo',texts[4][1]),explicit('pdf-heading','scan_pdf',texts[5][1]),
+    ]);
+    f.service.heartbeat('u','a',{index:0});await f.service.drain();
+    const source=f.service.getSource('u','a','ocr-heading');
+    const checkpoint=f.database.prepare("SELECT input_version,result_json FROM source_steps WHERE scope_id=? AND step='extract' AND status='completed'").get(source.scopeId);
+    assert.deepEqual(JSON.parse(checkpoint.result_json).regions,regions['ocr-heading']);
+    assert.ok(source.version>checkpoint.input_version,'the title must use a persisted extraction from an older source version');
+    const count=calls.length;
+    f.restart();
+    const reading=f.service.readingPages('u','a',0),page=reading.currentPage;
+    assert.equal(page.ready,true);
+    assert.deepEqual(page.headingSourceIds,['ocr-heading','explicit-heading']);
+    const text=texts.map(([,value])=>value).join('');
+    assert.equal(bodyText(page.bodyHtml),text);
+    assert.equal(bodyText(f.service.hydrateDocument('u','a').bodyHtml),text);
+    assert.equal(reading.bodyHash,createHash('sha256').update(text).digest('hex'));
+    assert.deepEqual([page.start,page.end],[0,text.length]);
+    assert.deepEqual(page.ranges.map(({sourceId,start,end})=>[sourceId,start,end]),texts.flatMap(([sourceId,value])=>
+      value.split('\n').map((line,index,lines)=>[sourceId,0,line.length+Number(index<lines.length-1)])));
+    const start=texts[0][1].length,end=start+title.length;
+    const selection=f.service.validateSelection('u','a',{readingPageId:page.id,pageLocalStart:start,pageLocalEnd:end,
+      sourceIds:['ocr-heading'],sourceVersions:page.sourceVersions});
+    assert.deepEqual(selection,{start,end,scopeValidated:true,readingPageId:page.id,sourceIds:['ocr-heading'],
+      sourceRanges:[{sourceId:'ocr-heading',start:0,end:title.length,version:source.version}]});
+    await f.service.drain();assert.equal(calls.length,count,'reading a saved heading must not run OCR or AI');
+  }finally{f.close();}
+});
+
 test('legacy text adoption is a labelled historical body snapshot and never re-recognizes',()=>{
   const f=fixture();try {
     f.service.adoptDocument('u','a');
@@ -379,6 +433,7 @@ test('segmentation spans PDF pages and shares the sentence identity without dupl
     assert.deepEqual(calls.filter(c=>c.step==='segment').map(c=>c.text),['これはページをまたぐ一つの文です。']);
     const page=f.service.readingPages('u','a',0).currentPage;
     assert.equal(bodyText(page.bodyHtml),'これはページをまたぐ一つの文です。');
+    assert.deepEqual(page.headingSourceIds||[],[]);
     assert.equal((await import('../shared/article-html.mjs')).bodyRanges(page.bodyHtml).sentences.length,1);
   }finally{f.close();}
 });

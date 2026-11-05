@@ -20,7 +20,8 @@ async function fixture(page, options = {}) {
   const chapterProposal = [{id:"ch1",title:"第一章",startPage:2,endPage:8,needsReview:true,excluded:false},{id:"ch2",title:"付録",startPage:9,endPage:10,needsReview:true,excluded:false}];
   const importDraft = {id:"imp",title:"导入文字",detectedType:options.importType || "text",allowedTypes:options.importType === "screenshot" ? ["photo","screenshot"] : [options.importType || "text"],files:[{id:"file",name:"original.pdf"}],chapters:[],status:"staged",...options.draft};
   const proposedExclusions = [{page:1,startLine:1,endLine:2,reason:"重复页眉",text:"版権所有・学習資料",excluded:true},{page:3,startLine:8,endLine:10,reason:"与正文无关的广告",text:"関連図書のお知らせ",excluded:true},...(options.extraExclusions || [])];
-  const pageAt = (index) => ({id:`p${index}`,index,ready:true,bodyHtml:options.emptyPublished && !index ? "<p></p>" : index ? html("次の読書ページ。") : source2.bodyHtml,sourceIds:index ? ["s1"] : ["s2"],start:index ? 20 : 6,end:index ? 30 : 6 + bodyText(source2.bodyHtml).length});
+  const pageAt = (index) => ({id:`p${index}`,index,ready:true,bodyHtml:options.emptyPublished && !index ? "<p></p>" : index ? html("次の読書ページ。") : source2.bodyHtml,sourceIds:index ? ["s1"] : ["s2"],start:index ? 20 : 6,end:index ? 30 : 6 + bodyText(source2.bodyHtml).length,
+    ...(!index ? options.firstPage : {})});
   let currentIndex = 0;
   await page.route("**/pixel.svg", (route) => route.fulfill({contentType:"image/svg+xml",body:'<svg xmlns="http://www.w3.org/2000/svg" width="500" height="700"><rect width="500" height="700" fill="white"/><text x="50" y="50">original</text></svg>'}));
   await page.route("**/api/**", async (route) => {
@@ -187,6 +188,47 @@ test("reading preparation shows real progress then automatically displays the co
   state.ready=true;
   await expect(page.getByLabel("日语原文")).toContainText(original);
   await expect(progress).toHaveCount(0);expect(state.polls).toBeGreaterThan(1);
+});
+
+test("image chapter heading starts a new visual line without changing reader offsets",async({page})=>{
+  const lead="𠮷は",continuation="来た。",heading="次章",start=21;
+  const bodyHtml=`<p data-paragraph-id="body"><span data-sentence-id="continuous"><span data-source-id="s1">${lead}</span><span data-source-id="s2">${continuation}</span></span><span data-sentence-id="chapter-heading"><span data-source-id="s3"><ruby data-origin="source">${heading}<rt>じしょう</rt></ruby></span></span></p>`;
+  const state=await fixture(page,{firstPage:{bodyHtml,start,end:start+lead.length+continuation.length+heading.length,sourceIds:["s1","s2","s3"],headingSourceIds:["s3"]}});
+  await page.goto("/#doc");
+  const paragraph=page.getByLabel("日语原文").locator(".article-body > p");
+  await expect(paragraph).toHaveCount(1);
+  await expect(paragraph.locator("ruby rt")).toHaveText("じしょう");
+  await page.evaluate(()=>document.fonts.ready);
+  const boxes=await paragraph.evaluate(element=>{
+    const character=(sourceId,fromEnd=false)=>{
+      const source=element.querySelector(`[data-source-id="${sourceId}"]`);
+      const text=document.createTreeWalker(source,NodeFilter.SHOW_TEXT).nextNode();
+      const offset=fromEnd?text.length-1:0;
+      const range=document.createRange();range.setStart(text,offset);range.setEnd(text,offset+1);
+      return range.getBoundingClientRect().toJSON();
+    };
+    return {lead:character("s1",true),continuation:character("s2"),heading:character("s3")};
+  });
+  expect(Math.abs(boxes.lead.top-boxes.continuation.top)).toBeLessThan(2);
+  expect(boxes.continuation.left).toBeGreaterThan(boxes.lead.left);
+  expect(boxes.heading.top).toBeGreaterThan(boxes.continuation.bottom);
+  const separator=paragraph.locator(".reading-source-break");
+  await expect(separator).toHaveCount(1);
+  await expect(separator).toHaveAttribute("aria-hidden","true");
+  await expect(separator).toBeEmpty();
+
+  await paragraph.locator('ruby [data-source-id="s3"]').evaluate(element=>{
+    const range=document.createRange();range.selectNodeContents(element);
+    const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+  const popup=page.getByRole("dialog",{name:"划词提问",exact:true});
+  await expect(popup).toContainText(heading);
+  await popup.getByRole("button",{name:"翻译",exact:true}).click();
+  const question=()=>state.calls.find(call=>call.path==="/documents/doc/conversations"&&call.method==="POST")?.input;
+  const pageLocalStart=lead.length+continuation.length,pageLocalEnd=pageLocalStart+heading.length;
+  await expect.poll(question).toMatchObject({operation:"translation",selection:{text:heading,readingPageId:"p0",pageLocalStart,pageLocalEnd,
+    start:start+pageLocalStart,end:start+pageLocalEnd,sentenceIds:["chapter-heading"]}});
 });
 
 test("prepared source pages refresh authoritative shelf totals once per content change",async({page})=>{

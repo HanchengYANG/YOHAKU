@@ -4,6 +4,7 @@
 .source-file-name{flex:1 1 180px;min-width:0;overflow-wrap:anywhere}
 .source-file-actions{display:flex;flex-wrap:wrap;gap:4px 14px}
 .source-file-list .source-file-actions button{margin:0}
+.reading-source-break{display:block}
 @media(pointer:coarse){.source-file-list .source-file-actions button{min-width:44px;min-height:44px}}
 .chapter-page-review{flex-basis:100%;min-width:0;border-top:1px solid var(--border,#dedbd4);padding-top:14px}
 .chapter-page-review>summary{cursor:pointer;display:list-item;line-height:1.8}

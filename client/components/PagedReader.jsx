@@ -123,6 +123,7 @@ export default function PagedReader({ document, active = true, onEditSources, on
     </nav>
     {page?.ready && !bodyText(page.bodyHtml).trim() ? <section className="reading-preparation" aria-label="阅读页正文已清空"><h1>{document.title}</h1><h2>本页正文已清空</h2><p>阅读页位置已保留，可继续翻页，或在校对正文中补充内容。</p><button className="button secondary" onClick={() => onEditSources(page.sourceIds || [])}>校对正文</button></section> : page?.ready ? <Reader {...readerProps}
       document={{...document,bodyHtml:page.bodyHtml,bodyHash:snapshot?.bodyHash || document.bodyHash,blocks:htmlToBlocks(page.bodyHtml)}}
+      headingSourceIds={page.headingSourceIds}
       onEdit={() => onEditSources(page.sourceIds)} onSegment={null}
       onAsk={(request) => readerProps.onAsk?.({...request,selection:pageSelection(request.selection,page)})} />
       : <section className="reading-preparation" aria-label="准备当前阅读页" aria-busy={!emptyComplete && preparation.busy}>

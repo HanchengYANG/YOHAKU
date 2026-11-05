@@ -2,6 +2,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import * as body from '../shared/article-html.mjs';
 import { parseText, serializeBlocks } from '../shared/document.mjs';
 import { paginateReadingText, sliceReadingHtml, changedTextRange } from '../shared/reading-pages.mjs';
+import { ocrRegionBlockType } from '../shared/ocr-correction.mjs';
 import { diagnosticForError } from './ai/diagnostics.mjs';
 import { executionUsage } from './ai/execution-usage.mjs';
 import { mergeReadings } from './source-merge.mjs';
@@ -545,17 +546,32 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     }
     return result;
   }
+  function startsWithImageHeading(row,fragment) {
+    if(!['photo','screenshot'].includes(row.type)||!fragment.text.trim())return false;
+    if(/^<p\b[^>]*\bdata-block-type="heading"/.test(fragment.html))return true;
+    if(row.type!=='screenshot')return false;
+    const region=readOnce('firstOcrRegion',row.scope_id,()=>decode(database.prepare(`
+      SELECT json_extract(result_json,'$.regions[0]') AS region FROM source_steps
+      WHERE scope_id=? AND step='extract' AND status IN ('completed','stale')
+        AND json_type(result_json,'$.regions[0]')='object'
+      ORDER BY input_version LIMIT 1`).get(row.scope_id)?.region));
+    return typeof region?.text==='string'&&ocrRegionBlockType(region)==='heading'&&region.text.trim()===fragment.text.trim();
+  }
   function pageHtml(userId,id,refs,{sourceMap,fragmentMap,pageId}={}) {
-    const parts=[];
+    const parts=[],headingSourceIds=[];
     for(let i=0;i<refs.length;i++) {
       const ref=refs[i],row=sourceMap?.get(ref.sourceId)||scope(userId,id,ref.sourceId),list=fragmentMap?.get(ref.sourceId)||fragments(row),at=list.findIndex(f=>f.id===ref.paragraphId),fragment=list[at];
       if(!fragment)continue;
+      // Layout-only breaks keep persisted page ranges and question offsets in
+      // the same source-local and canonical text coordinates.
+      if(parts.length&&ref.sourceId!==refs[i-1].sourceId&&at===0&&ref.start===0&&startsWithImageHeading(row,fragment))headingSourceIds.push(ref.sourceId);
       let html=fragment.html;
       if(ref.end>fragment.text.length)html+=`<p data-paragraph-id="${list[at+1]?.id||fragment.id+':after'}"></p>`;
       const piece=sliceReadingHtml(html,ref.start,ref.end);
       parts.push(body.setBodySource?body.setBodySource(piece,ref.sourceId):piece);
     }
-    return parts.length?parts.reduce(appendContinuous):pageId?`<p data-paragraph-id="${pageId}:empty"></p>`:empty();
+    return {html:parts.length?parts.reduce(appendContinuous):pageId?`<p data-paragraph-id="${pageId}:empty"></p>`:empty(),
+      ...(headingSourceIds.length?{headingSourceIds}:{})};
   }
   const publishedLength=(userId,id)=>database.prepare('SELECT ranges_json FROM reading_pages WHERE document_id=? AND user_id=?').all(id,userId).reduce((sum,page)=>sum+decode(page.ranges_json,[]).reduce((n,ref)=>n+ref.end-ref.start,0),0);
   function sentenceCarry(prefix,covered) {
@@ -650,8 +666,8 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     if(!Number.isSafeInteger(currentIndex)||currentIndex<0)throw fail(400,'阅读页位置无效。');
     let offset=0;
     const pages=database.prepare('SELECT * FROM reading_pages WHERE user_id=? AND document_id=? ORDER BY position').all(userId,id).map(page=>{
-      const refs=decode(page.ranges_json,[]),sourceIds=[...new Set(refs.map(ref=>ref.sourceId))],html=pageHtml(userId,id,refs,{sourceMap,fragmentMap,pageId:page.id}),start=offset;offset+=body.bodyText(html).length;
-      return {id:page.id,index:page.position,sourceVersions:Object.fromEntries(sourceIds.map(sourceId=>[sourceId,sourceMap.get(sourceId)?.version])),ready:sourceIds.every(sourceId=>{const row=sourceMap.get(sourceId);if(!row)return false;const global=globalRefs(row,refs,fragmentMap.get(sourceId)).filter(ref=>ref.sourceId===sourceId);return global.every(ref=>annotationCovered(row,ref.start,ref.end));})&&(!body.bodyText(html).trim()||body.hasCompleteSentenceBoundaries(html)),bodyHtml:html,sourceIds,ranges:refs,start,end:offset};
+      const refs=decode(page.ranges_json,[]),sourceIds=[...new Set(refs.map(ref=>ref.sourceId))],{html,...layout}=pageHtml(userId,id,refs,{sourceMap,fragmentMap,pageId:page.id}),start=offset;offset+=body.bodyText(html).length;
+      return {id:page.id,index:page.position,sourceVersions:Object.fromEntries(sourceIds.map(sourceId=>[sourceId,sourceMap.get(sourceId)?.version])),ready:sourceIds.every(sourceId=>{const row=sourceMap.get(sourceId);if(!row)return false;const global=globalRefs(row,refs,fragmentMap.get(sourceId)).filter(ref=>ref.sourceId===sourceId);return global.every(ref=>annotationCovered(row,ref.start,ref.end));})&&(!body.bodyText(html).trim()||body.hasCompleteSentenceBoundaries(html)),bodyHtml:html,...layout,sourceIds,ranges:refs,start,end:offset};
     });
     const complete=!!rows.length&&rows.every(row=>row.next_step>=4)&&pages.every(page=>page.ready)&&offset>=body.bodyText(compose(rows)).length;
     const position=complete&&pages.length?Math.min(currentIndex,pages.length-1):currentIndex,currentPage=pages[position]||null;

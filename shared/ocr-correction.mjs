@@ -57,7 +57,7 @@ function correctionRegions(localResult) {
   return localResult.regions;
 }
 
-function regionType(region) {
+export function ocrRegionBlockType(region) {
   if (blockProperties.type.enum.includes(region.type)) return region.type;
   return ["タイトル本文", "line_title", "title", "title_text"].includes(region.category)
     ? "heading" : "paragraph";
@@ -71,7 +71,7 @@ function lineBox(region) {
 }
 
 function bodyLine(region) {
-  return region.vertical === false && regionType(region) === "paragraph" &&
+  return region.vertical === false && ocrRegionBlockType(region) === "paragraph" &&
     ["本文", "キャプション", "line_main", "line_caption", "main", "caption"].includes(region.category) &&
     region.text.trim() && !/[\r\n]/.test(region.text);
 }
@@ -103,7 +103,7 @@ export function groupOcrCorrectionRegions(localResult) {
       groups.at(-1).text += region.text;
       groups.at(-1).regionIndexes.push(index);
     } else {
-      groups.push({ text: region.text, regionIndexes: [index], type: regionType(region),
+      groups.push({ text: region.text, regionIndexes: [index], type: ocrRegionBlockType(region),
         sourcePage: blockProperties.sourcePage.enum.includes(region.sourcePage) ? region.sourcePage : "unknown" });
     }
   }

@@ -3,7 +3,7 @@ import { splitRubyDisplay } from "../../shared/ruby-display.mjs";
 import { normalizeBodyHtml, bodyText } from "../../shared/article-html.mjs";
 
 
-function displayBodyHtml(html) {
+function displayBodyHtml(html, headingSourceIds) {
   const container = window.document.createElement("div");
   container.innerHTML = normalizeBodyHtml(html);
   container.querySelectorAll("p").forEach((node) => {
@@ -12,6 +12,22 @@ function displayBodyHtml(html) {
     if (node.dataset.blockType === "heading") node.classList.add("text-heading");
     if (node.dataset.blockType === "list_item") node.classList.add("article-list-item");
   });
+  if (headingSourceIds?.length) {
+    const unseen = new Set(headingSourceIds);
+    for (const source of container.querySelectorAll("[data-source-id]")) {
+      if (!unseen.delete(source.dataset.sourceId)) continue;
+      const paragraph = source.closest("p");
+      let first = source;
+      while (first.parentElement !== paragraph) first = first.parentElement;
+      if (!first.previousSibling || first.previousSibling.nodeName === "BR") continue;
+      // An empty element wraps the display without adding a selection offset
+      // or interrupting the heading's ruby and question markers.
+      const separator = window.document.createElement("span");
+      separator.className = "reading-source-break";
+      separator.setAttribute("aria-hidden","true");
+      first.before(separator);
+    }
+  }
   container.querySelectorAll("ruby").forEach((ruby) => {
     const reading = ruby.querySelector("rt")?.textContent;
     const base = ruby.cloneNode(true);
@@ -155,13 +171,13 @@ export function articleSelection(root, canonicalHtml) {
   return { start, end, text, rect: { left: rect.left, top: rect.top, bottom: rect.bottom } };
 }
 
-export default function ArticleBody({ html, showRuby = true, fontSize = 26, onSelection, onSource, onGroup, activeSourceId, className = "" }) {
+export default function ArticleBody({ html, headingSourceIds, showRuby = true, fontSize = 26, onSelection, onSource, onGroup, activeSourceId, className = "" }) {
   const root = useRef(null);
   const surface = useRef(null);
   const highlighted = useRef([]);
   const pointer = useRef(null);
   const [decorations, setDecorations] = useState({ sentences: [], qa: [] });
-  const display = useMemo(() => displayBodyHtml(html), [html]);
+  const display = useMemo(() => displayBodyHtml(html, headingSourceIds), [html, headingSourceIds]);
   const highlight = (ids) => {
     if (ids.length === highlighted.current.length && ids.every((id,index) => id === highlighted.current[index])) return;
     highlighted.current = ids;

@@ -17,7 +17,7 @@ export default function Reader({
   chatOpen = false,
   answering = false,
   onPromoteBook = null,
-  onAsk, onGroup, onAppendImage, onSegment, segmentationBusy, segmentationError,
+  onAsk, onGroup, onAppendImage, onSegment, segmentationBusy, segmentationError, headingSourceIds,
 }) {
   const counts = stats(document.blocks);
   const [selection, setSelection] = useState(null);
@@ -99,7 +99,7 @@ export default function Reader({
         className={`reading-sheet ${document.kind}`}
         aria-label="日语原文"
       >
-        <ArticleBody html={html} showRuby={showRuby} fontSize={fontSize}
+        <ArticleBody html={html} headingSourceIds={headingSourceIds} showRuby={showRuby} fontSize={fontSize}
           onSelection={setSelection} onGroup={onGroup} />
       </article>
       {selection && <div className="selection-questions" role="dialog" aria-label="划词提问"
