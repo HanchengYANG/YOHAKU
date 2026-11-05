@@ -14,6 +14,7 @@ const hash=html=>createHash('sha256').update(body.bodyText(html)).digest('hex');
 const aliases={pdf_text:'text_pdf',pdf_scan:'scan_pdf'};
 const types=new Set(['photo','screenshot','scan_pdf','text_pdf','epub','text','paste']);
 const stages=['extract','correct','segment','annotate'];
+const activeAttemptStates=['queued','running','retry_wait'];
 const empty=()=>body.blocksToHtml(parseText(''));
 const appendContinuous=(a,b)=>body.normalizeBodyHtml(a.slice(0,-4)+b.replace(/^<p\b[^>]*>/,''));
 const privateKeys=new Set(['filePath','path','storagePath','directory']);
@@ -82,6 +83,19 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
   let closed=false,stopping=false,scheduled=false;
   const working=new Map(),articleKey=(userId,id)=>json([userId,id]);
   const latestRequest=(userId,id)=>database.prepare('SELECT * FROM source_preparation_requests WHERE user_id=? AND document_id=? ORDER BY generation DESC LIMIT 1').get(userId,id);
+  const currentRequestId=(userId,id)=>{
+    const request=latestRequest(userId,id);
+    return request?.deleted_at?null:request?.id||null;
+  };
+  function liveSourceNodes(userId,id){
+    const nodes=new Set();let requestId;
+    for(const {execution} of working.values()){
+      if(execution.userId!==userId||execution.documentId!==id||execution.signal.aborted)continue;
+      if(requestId===undefined)requestId=currentRequestId(userId,id);
+      if(execution.requestId===requestId)for(const key of execution.nodes.keys())nodes.add(key);
+    }
+    return nodes;
+  }
   const requestEnabled=(userId,id)=>!latestRequest(userId,id)?.deleted_at;
   const targetKey=target=>target.mode==='correction'?`correction:${target.sourceId}`:`reading:${target.index}`;
   function requestTargets(request,resolve=false){
@@ -258,7 +272,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     const label=['text_pdf','scan_pdf'].includes(row.type)?page?`PDF 第${page}页`:`PDF 来源 ${row.position+1}`:['photo','screenshot'].includes(row.type)?`图片 ${row.position+1}`:row.type==='epub'?`EPUB 段落组 ${row.position+1}`:`原文段落组 ${row.position+1}`;
     return {id:row.source_id,type:row.type,position:row.position,...(page?{page}:{}),label};
   };
-  function readingDiagnostics(userId,id,rows,page) {
+  function readingDiagnostics(userId,id,rows,page,requestId) {
     const failures=database.prepare("SELECT t.*,a.source_id,a.position,s.type,s.original_json FROM source_step_attempts t JOIN article_sources a ON a.scope_id=t.scope_id JOIN sources s ON s.id=a.source_id WHERE a.user_id=? AND a.document_id=? AND t.state IN ('failed','requires_review') ORDER BY t.updated_at DESC,t.rowid DESC LIMIT 5").all(userId,id);
     const recentFailures=failures.map(item=>({id:item.id,source:sourceIdentity(item),step:item.step,at:item.finished_at||item.updated_at,execution:decode(item.execution_json,{}),diagnostic:decode(item.diagnostic_json),message:item.message}));
     if(page?.ready)return {current:null,recentFailures};
@@ -276,10 +290,12 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     const stage=stages[row.next_step],ranges=page?globalRefs(row,page.ranges).filter(ref=>ref.sourceId===row.source_id):null;
     const attempt=database.prepare('SELECT * FROM source_step_attempts WHERE scope_id=? AND input_version=? ORDER BY rowid DESC').all(row.scope_id,row.version).find(item=>{
       if(!item.step.startsWith(stage))return false;
+      if(activeAttemptStates.includes(item.state)&&(!requestId||item.request_id!==requestId||item.finished_at))return false;
       const match=/^annotate(?:_local)?:(\d+):(\d+)$/.exec(item.step);
       return !ranges||!match||ranges.some(range=>Number(match[1])<range.end&&Number(match[2])>range.start);
     });
-    const frozen=row.edit_session&&row.edit_expires>now(),live=row.status==='processing'&&['queued','running','retry_wait'].includes(attempt?.state);
+    // A completed annotation can leave the source pending while segmentation is still running.
+    const frozen=row.edit_session&&row.edit_expires>now(),live=activeAttemptStates.includes(attempt?.state);
     const failed=['failed','requires_review'].includes(row.status)&&(!attempt||['failed','requires_review'].includes(attempt.state));
     const state=frozen?'editing':failed?row.status:live?attempt.state:'pending';
     const current={state,step:attempt&&(live||failed)?attempt.step:stage,source:sourceIdentity(row)};
@@ -395,15 +411,17 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     else if(cursor<text.length)descriptors.push(history(sliceReadingHtml(html,cursor,text.length)));
     return createArticleSources(userId,id,descriptors);
   }
-  function sourceDetail(row,{internal=false,articleOffsets,articleBodyHash}={}) {
+  function sourceDetail(row,{internal=false,articleOffsets,articleBodyHash,liveNodes}={}) {
     const html=readHtml(row),before=articleOffsets?.get(row.source_id)??scopes(row.user_id,row.document_id).filter(other=>other.position<row.position).reduce((sum,other)=>sum+body.bodyText(readHtml(other)).length,0);
     const document=internal||articleBodyHash==null?requireDocument(row.user_id,row.document_id):null;
     articleBodyHash??=document.body_hash||hash(compose(scopes(row.user_id,row.document_id)));
     const preview=decode(row.preview_json,{});preview.type??=preview.kind;
     const steps=database.prepare('SELECT step,input_version AS inputVersion,status,error,updated_at AS updatedAt FROM source_steps WHERE scope_id=? ORDER BY updated_at,step').all(row.scope_id);
-    return {id:row.source_id,scopeId:row.scope_id,type:row.type,localRange:decode(row.range_json),position:row.position,...(internal?{documentTitle:document.title}:{}),version:row.version,checked:row.checked_version===row.version,checkedVersion:row.checked_version,status:row.status,processing:row.status==='processing',manual:!!row.manual,editing:!!row.edit_session&&row.edit_expires>now(),preview,original:internal?decode(row.original_json,{}):publicMetadata(decode(row.original_json,{})),firstExtraction:decode(row.first_extraction_json),bodyHtml:html,text:body.bodyText(html),articleStart:before,articleEnd:before+body.bodyText(html).length,articleBodyHash,error:row.error||null,proposal:decode(row.proposal_json),steps,changes:database.prepare("SELECT version,step,body_html AS bodyHtml,execution_json AS executionJson,created_at AS createdAt FROM source_revisions WHERE scope_id=? ORDER BY version,created_at,CASE step WHEN 'extract' THEN 0 WHEN 'chapter_filter' THEN 1 ELSE 2 END").all(row.scope_id).map(({executionJson,...revision})=>({...revision,execution:decode(executionJson)}))};
+    const processing=row.status==='processing'||!internal&&row.status==='pending'&&steps.some(({step,inputVersion,status})=>
+      status==='running'&&inputVersion===row.version&&(liveNodes??=liveSourceNodes(row.user_id,row.document_id)).has(json([row.scope_id,inputVersion,step])));
+    return {id:row.source_id,scopeId:row.scope_id,type:row.type,localRange:decode(row.range_json),position:row.position,...(internal?{documentTitle:document.title}:{}),version:row.version,checked:row.checked_version===row.version,checkedVersion:row.checked_version,status:row.status,processing,manual:!!row.manual,editing:!!row.edit_session&&row.edit_expires>now(),preview,original:internal?decode(row.original_json,{}):publicMetadata(decode(row.original_json,{})),firstExtraction:decode(row.first_extraction_json),bodyHtml:html,text:body.bodyText(html),articleStart:before,articleEnd:before+body.bodyText(html).length,articleBodyHash,error:row.error||null,proposal:decode(row.proposal_json),steps,changes:database.prepare("SELECT version,step,body_html AS bodyHtml,execution_json AS executionJson,created_at AS createdAt FROM source_revisions WHERE scope_id=? ORDER BY version,created_at,CASE step WHEN 'extract' THEN 0 WHEN 'chapter_filter' THEN 1 ELSE 2 END").all(row.scope_id).map(({executionJson,...revision})=>({...revision,execution:decode(executionJson)}))};
   }
-  function listSources(userId,id) {const document=requireDocument(userId,id),rows=scopes(userId,id),articleOffsets=new Map();let offset=0;for(const row of rows){articleOffsets.set(row.source_id,offset);offset+=body.bodyText(readHtml(row)).length;}const articleBodyHash=document.body_hash||hash(compose(rows));return rows.map(row=>sourceDetail(row,{articleOffsets,articleBodyHash}));}
+  function listSources(userId,id) {const document=requireDocument(userId,id),rows=scopes(userId,id),articleOffsets=new Map();let offset=0;for(const row of rows){articleOffsets.set(row.source_id,offset);offset+=body.bodyText(readHtml(row)).length;}const articleBodyHash=document.body_hash||hash(compose(rows)),liveNodes=liveSourceNodes(userId,id);return rows.map(row=>sourceDetail(row,{articleOffsets,articleBodyHash,liveNodes}));}
   const getSource=(userId,id,sourceId)=>sourceDetail(scope(userId,id,sourceId));
   function assertVersion(row,version) {
     if(!Number.isSafeInteger(version)||version<1)throw fail(400,'缺少有效的来源版本。');
@@ -630,8 +648,9 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     });
     const complete=!!rows.length&&rows.every(row=>row.next_step>=4)&&pages.every(page=>page.ready)&&offset>=body.bodyText(compose(rows)).length;
     const position=complete&&pages.length?Math.min(currentIndex,pages.length-1):currentIndex,currentPage=pages[position]||null;
-    const diagnostics=readingDiagnostics(userId,id,rows,currentPage);
-    return {taskId:latestRequest(userId,id)?.deleted_at?null:latestRequest(userId,id)?.id||null,pages,currentPage,preparation:preparationProgress(rows,currentPage),diagnostics,bodyHash:hash(compose(rows)),index:position,position,complete,...(complete?{totalPages:pages.length}:{}),hasNext:!complete||position+1<pages.length,processing:rows.some(row=>row.status==='processing'),...(diagnostics.current?.error?{error:diagnostics.current.error.message}:{})};
+    const taskId=currentRequestId(userId,id);
+    const diagnostics=readingDiagnostics(userId,id,rows,currentPage,taskId);
+    return {taskId,pages,currentPage,preparation:preparationProgress(rows,currentPage),diagnostics,bodyHash:hash(compose(rows)),index:position,position,complete,...(complete?{totalPages:pages.length}:{}),hasNext:!complete||position+1<pages.length,processing:activeAttemptStates.includes(diagnostics.current?.state)||rows.some(row=>row.status==='processing'),...(diagnostics.current?.error?{error:diagnostics.current.error.message}:{})};
   }
   function readArticle(userId,id) {return hydrateDocument(userId,id);}
   function hydrateDocument(userId,rowOrId) {

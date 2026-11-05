@@ -1250,12 +1250,22 @@ test('annotation completed before segmentation keeps human ruby and merges the o
     f.service.persistDocumentMarks('u','a',source.bodyHtml.replace('日本語','<ruby data-origin="manual">日本語<rt>にっぽんご</rt></ruby>'));
     finishRuby();await new Promise(resolve=>setImmediate(resolve));
     assert.match(f.service.getSource('u','a','reverse').bodyHtml,/<rt>にっぽんご<\/rt>/);
-    assert.equal(f.service.readingPages('u','a').currentPage,null);
+    f.advance(2000);
+    const unfinished=f.service.readingPages('u','a');
+    assert.equal(unfinished.currentPage,null);
+    assert.equal(unfinished.diagnostics.current.step,'segment');
+    assert.equal(unfinished.diagnostics.current.state,'running','completing annotation must not hide live segmentation');
+    assert.equal(unfinished.diagnostics.current.elapsedMs,2000);
+    assert.deepEqual({reading:unfinished.processing,source:f.service.getSource('u','a','reverse').processing,
+      list:f.service.listSources('u','a')[0].processing},{reading:true,source:true,list:true});
     finishSegment();await f.service.drain();
     const result=f.service.getSource('u','a','reverse');
     assert.match(result.bodyHtml,/<rt>にっぽんご<\/rt>/);
     assert.equal(bodyRanges(result.bodyHtml).sentences.length,1);
-    assert.equal(f.service.readingPages('u','a').currentPage.ready,true);
+    assert.equal(result.processing,false);
+    const finished=f.service.readingPages('u','a');
+    assert.equal(finished.currentPage.ready,true);
+    assert.equal(finished.processing,false);
   }finally{finishSegment?.();finishRuby?.();f.close();}
 });
 
