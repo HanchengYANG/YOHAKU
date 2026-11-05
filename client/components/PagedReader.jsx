@@ -105,6 +105,7 @@ export default function PagedReader({ document, active = true, onEditSources, on
   const hasNext = matchesIndex ? snapshot?.hasNext : !!snapshot && (snapshot.pages?.some((item) => item.index > currentIndex) || !snapshot.complete);
   const emptyComplete = snapshot?.complete && !snapshot.pages?.length;
   const progress = matchesIndex ? snapshot?.preparation : null;
+  const preview = matchesIndex ? snapshot?.provisionalPreview : null;
   const percent = Number.isFinite(progress?.percent) ? Math.max(0,Math.min(100,Math.floor(progress.percent))) : null;
   const diagnostics = matchesIndex ? snapshot?.diagnostics : null;
   const preparation = readingPreparation({progress,current:diagnostics?.current,error:error || (matchesIndex ? snapshot?.error : null)});
@@ -126,7 +127,7 @@ export default function PagedReader({ document, active = true, onEditSources, on
       headingSourceIds={page.headingSourceIds}
       onEdit={() => onEditSources(page.sourceIds)} onSegment={null}
       onAsk={(request) => readerProps.onAsk?.({...request,selection:pageSelection(request.selection,page)})} />
-      : <section className="reading-preparation" aria-label="准备当前阅读页" aria-busy={!emptyComplete && preparation.busy}>
+      : <><section className="reading-preparation" aria-label="准备当前阅读页" aria-busy={!emptyComplete && preparation.busy}>
         <span className="eyebrow">准备阅读</span><h1>{document.title}</h1>
         <h2>{emptyComplete ? "当前文章没有正文" : preparation.state === "failed" ? "当前阅读页准备失败" : paused ? "当前阅读页尚未完成" : "正在准备当前阅读页"}</h2>
         {!emptyComplete && <div className={`reading-page-progress${paused ? " is-paused" : ""}`}>
@@ -142,7 +143,12 @@ export default function PagedReader({ document, active = true, onEditSources, on
         <div className="source-actions">{!emptyComplete && !preparation.busy && <button className="button secondary" onClick={() => {retryPending.current = true;setRetry((value) => value + 1);}}>重试准备</button>}
           {taskId && <a className="button subtle" href={`#tasks/${encodeURIComponent(taskId)}`}>查看后台任务</a>}
           <button className="button subtle" onClick={() => onEditSources(preparationSourceIds)}>校对正文</button></div>
-      </section>}
+      </section>
+      {!emptyComplete && preview?.text && <section className="reading-preparation reading-provisional" aria-label="已提取正文预览">
+        <h2>已提取正文预览</h2>
+        <p>{preview.source?.label && `${preview.source.label} · `}文字可能在校对后更新，准备完成后会自动显示正式阅读页。</p>
+        <div className="reading-provisional-text" lang="ja">{preview.text}{preview.truncated && "…"}</div>
+      </section>}</>}
     {recentFailures.length > 0 && <details className="reading-diagnostics reading-diagnostics-history"><summary>最近处理异常（{recentFailures.length}）</summary><div aria-label="最近处理异常记录"><p className="source-scope-note">以下是历史记录，不代表当前阅读页仍有错误。</p>{recentFailures.map((failure) => <section key={failure.id}><p>{failure.message}</p><DiagnosticFacts record={failure} /></section>)}</div></details>}
     {page?.ready && <nav className="reading-pagination" aria-label="页末阅读分页"><button className="button secondary" disabled={currentIndex === 0} onClick={() => change(currentIndex - 1)}>上一页</button><span>{readingPageLabel({index:currentIndex,complete:snapshot?.complete,totalPages:snapshot?.totalPages})}</span><button className="button primary" disabled={!hasNext || !page} onClick={() => change(currentIndex + 1)}>下一页</button></nav>}
   </div>;

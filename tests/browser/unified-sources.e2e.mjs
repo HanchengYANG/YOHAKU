@@ -69,13 +69,14 @@ async function fixture(page, options = {}) {
   return {calls,saves};
 }
 
-async function preparationFixture(page,{holdHeartbeat=false}={}) {
+async function preparationFixture(page,{holdHeartbeat=false,unpublished=false}={}) {
   await fixture(page);
   const state={stage:"correct",percent:null,completed:1,total:null,ready:false,polls:0,releaseHeartbeat:null,diagnostics:null,error:null};
   const snapshot=()=>{
-    const currentPage={id:"p0",index:0,ready:state.ready,bodyHtml:state.ready?(state.bodyHtml || html(original)):"",sourceIds:["s2"],start:6,end:6+original.length};
-    const pages=[currentPage,...(state.extraPages || [])];
+    const currentPage=unpublished&&!state.ready ? null : {id:"p0",index:0,ready:state.ready,bodyHtml:state.ready?(state.bodyHtml || html(original)):"",sourceIds:["s2"],start:6,end:6+original.length};
+    const pages=[...(currentPage?[currentPage]:[]),...(state.extraPages || [])];
     return {pages,currentPage,index:0,position:0,complete:state.ready,...(state.ready?{totalPages:pages.length}:{}),hasNext:pages.length>1,processing:!state.ready,...(state.bodyHash?{bodyHash:state.bodyHash}:{}),
+      ...(state.provisionalPreview?{provisionalPreview:state.provisionalPreview}:{}),
       preparation:{stage:state.ready?"ready":state.stage,percent:state.ready?100:state.percent,completed:state.completed,total:state.total},...(state.taskId?{taskId:state.taskId}:{}),...(state.diagnostics?{diagnostics:state.diagnostics}:{}),...(state.error?{error:state.error}:{})};
   };
   let firstHeartbeat=true;
@@ -188,6 +189,36 @@ test("reading preparation shows real progress then automatically displays the co
   state.ready=true;
   await expect(page.getByLabel("日语原文")).toContainText(original);
   await expect(progress).toHaveCount(0);expect(state.polls).toBeGreaterThan(1);
+});
+
+test("an unpublished reading page shows a plain provisional preview during slow correction",async({page})=>{
+  const state=await preparationFixture(page,{unpublished:true});
+  const source={id:"s2",type:"screenshot",label:"图片 1"};
+  state.diagnostics={current:{state:"running",step:"correct",source,elapsedMs:161000},recentFailures:[]};
+  state.provisionalPreview={text:"走査した本文。\n<em>次の行</em>",truncated:true,source:{label:source.label}};
+  await page.goto("/#doc");
+  const preparation=page.getByRole("region",{name:"准备当前阅读页",exact:true});
+  const preview=page.getByRole("region",{name:"已提取正文预览",exact:true});
+  await expect(preparation).toContainText("正在校正正文");
+  await expect(preparation).toHaveAttribute("aria-busy","true");
+  await expect(preview).toBeVisible();
+  await expect(preview).toContainText(source.label);
+  await expect(preview).toContainText("准备完成后会自动显示正式阅读页");
+  await expect(preview).toContainText("<em>次の行</em>…");
+  await expect(preview.locator("em")).toHaveCount(0);
+  expect(await preview.evaluate(element=>element.previousElementSibling?.getAttribute("aria-label"))).toBe("准备当前阅读页");
+  await expect(page.getByLabel("日语原文")).toHaveCount(0);
+  await expect(page.getByRole("button",{name:"对话记录",exact:true})).toHaveCount(0);
+  await preview.evaluate(element=>{
+    const range=document.createRange();range.selectNodeContents(element);
+    const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+  await expect(page.getByRole("dialog",{name:"划词提问",exact:true})).toHaveCount(0);
+
+  state.ready=true;state.bodyHtml=html("校正された本文。");state.diagnostics.current=null;
+  await expect(page.getByLabel("日语原文")).toContainText("校正された本文。");
+  await expect(preview).toHaveCount(0);
 });
 
 test("image chapter heading starts a new visual line without changing reader offsets",async({page})=>{
@@ -509,7 +540,8 @@ async function pagedFailureFixture(page) {
     const index=input.index ?? Number(url.searchParams.get("index") || 0);
     if(index===1)state.visited=true;
     const snapshot={pages,currentPage:pages[index],index,position:index,hasNext:index<2,complete:false,
-      ...(index===1 ? {error:"正文出现较大改动，请核对第二页。",preparation:{stage:"correct"},diagnostics:{current:{state:"requires_review",step:"correct",source:{id:"s1",type:"photo"}}}} : {})};
+      ...(index===1 ? {error:"正文出现较大改动，请核对第二页。",preparation:{stage:"correct"},diagnostics:{current:{state:"requires_review",step:"correct",source:{id:"s1",type:"photo"}}},
+        ...(state.provisionalPreview?{provisionalPreview:state.provisionalPreview}:{})} : {})};
     if(state.visited&&index!==1){
       state.held++;await returning;
       try{return await route.fulfill({json:snapshot});}finally{state.finishedHeld++;}
@@ -521,19 +553,26 @@ async function pagedFailureFixture(page) {
 
 test("returning to a prepared reading page reuses its ready body while another page response is delayed",async({page})=>{
   const state=await pagedFailureFixture(page);
+  const secondText="二頁だけの未確定な本文。";
+  state.provisionalPreview={text:secondText,truncated:false};
   try{
     await page.goto("/#doc");
     await expect(page.getByLabel("日语原文")).toContainText(original);
     const navigation=page.getByRole("navigation",{name:"阅读分页",exact:true});
     await navigation.getByRole("button",{name:"下一页",exact:true}).click();
     await expect(page.getByRole("alert")).toContainText("正文出现较大改动");
+    const preview=page.getByRole("region",{name:"已提取正文预览",exact:true});
+    await expect(preview).toContainText(secondText);
+    await expect(preview).not.toContainText(original);
     await navigation.getByText("文章目录",{exact:true}).click();
     await navigation.getByRole("button",{name:"第 3 页 · 准备中",exact:true}).click();
     await expect.poll(()=>state.held).toBeGreaterThan(0);
     await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(preview).toHaveCount(0);
     await expect(page.getByRole("region",{name:"准备当前阅读页",exact:true})).not.toContainText(/较大改动|暂停|待核对/);
     await navigation.getByRole("button",{name:"第 1 页",exact:true}).click();
     await expect(page.getByLabel("日语原文")).toContainText(original);
+    await expect(preview).toHaveCount(0);
     await expect(page.getByRole("region",{name:"准备当前阅读页",exact:true})).toHaveCount(0);
     await expect(navigation.getByRole("button",{name:"下一页",exact:true})).toBeEnabled();
   }finally{state.releaseReturn();state.releaseOther();}

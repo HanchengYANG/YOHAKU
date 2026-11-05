@@ -680,6 +680,28 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     }
     return {stage:page.ready?'ready':'annotate',percent:page.ready?100:total?Math.min(99,Math.floor(completed/total*100)):0,completed,total};
   }
+  function previewText(text,source) {
+    if(!text.trim())return null;
+    const limit=1000;
+    let excerpt=text.slice(0,limit);
+    if(text.length>limit&&/[\uD800-\uDBFF]$/u.test(excerpt))excerpt=excerpt.slice(0,-1);
+    return {text:excerpt,truncated:excerpt.length<text.length,...(source?{source}:{})};
+  }
+  function provisionalReadingPreview(rows,pages,page,position) {
+    if(page?.ready)return null;
+    if(page)return previewText(body.bodyText(page.bodyHtml));
+    if(position!==pages.length)return null;
+    // The first unpublished page starts after the stored prefix, even when
+    // the current diagnostic describes a later PDF source being prepared.
+    let covered=pages.reduce((total,item)=>total+item.ranges.reduce((length,ref)=>length+ref.end-ref.start,0),0);
+    for(const row of rows){
+      if(row.next_step===0)return null;
+      const length=sourceLength(row);
+      if(covered<length)return previewText(body.bodyText(readHtml(row)).slice(covered),sourceIdentity(row));
+      covered-=length;
+    }
+    return null;
+  }
   function readingPages(userId,id,index) {
     return withReadScope(()=>{
       const position=index===undefined?database.prepare('SELECT page_index FROM reading_positions WHERE user_id=? AND document_id=?').get(userId,id)?.page_index||0:Number(index);
@@ -701,7 +723,8 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     const position=complete&&pages.length?Math.min(currentIndex,pages.length-1):currentIndex,currentPage=pages[position]||null;
     const taskId=currentRequestId(userId,id);
     const diagnostics=readingDiagnostics(userId,id,rows,currentPage,taskId);
-    return {taskId,pages,currentPage,preparation:preparationProgress(rows,currentPage),diagnostics,bodyHash:hash(compose(rows)),index:position,position,complete,...(complete?{totalPages:pages.length}:{}),hasNext:!complete||position+1<pages.length,processing:activeAttemptStates.includes(diagnostics.current?.state)||rows.some(row=>row.status==='processing'),...(diagnostics.current?.error?{error:diagnostics.current.error.message}:{})};
+    const provisionalPreview=provisionalReadingPreview(rows,pages,currentPage,position);
+    return {taskId,pages,currentPage,preparation:preparationProgress(rows,currentPage),diagnostics,...(provisionalPreview?{provisionalPreview}:{}),bodyHash:hash(compose(rows)),index:position,position,complete,...(complete?{totalPages:pages.length}:{}),hasNext:!complete||position+1<pages.length,processing:activeAttemptStates.includes(diagnostics.current?.state)||rows.some(row=>row.status==='processing'),...(diagnostics.current?.error?{error:diagnostics.current.error.message}:{})};
   }
   function readArticle(userId,id) {return hydrateDocument(userId,id);}
   function hydrateDocument(userId,rowOrId) {

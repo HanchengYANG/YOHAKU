@@ -207,6 +207,82 @@ test('failed PDF lookahead is the unpublished page blocker while an existing pag
   }finally{f.close();}
 });
 
+test('a provisional preview of a published unready page uses only its current plain text',()=>{
+  const f=fixture();try{
+    const previous=('甲'.repeat(99)+'。').repeat(10),original=('乙'.repeat(99)+'。').repeat(10),current=original.slice(0,10)+'丙'+original.slice(11);
+    f.service.createArticleSources('u','a',[{id:'same-source',...ready(previous+original)}]);
+    const before=f.service.readingPages('u','a',1);
+    assert.equal(before.currentPage.ready,true);
+    assert.equal(before.provisionalPreview,undefined);
+    const source=f.service.getSource('u','a','same-source');
+    const editedHtml=source.bodyHtml.replace('乙'.repeat(11),'乙'.repeat(10)+'<ruby data-origin="manual">丙<rt>へい</rt></ruby>');
+    f.service.saveSource('u','a','same-source',{version:source.version,bodyHtml:editedHtml});
+    const reading=f.service.readingPages('u','a',1);
+    assert.equal(reading.currentPage.ready,false);
+    assert.match(reading.currentPage.bodyHtml,/<rt>へい<\/rt>/);
+    assert.equal(reading.provisionalPreview?.text,current);
+    assert.equal(reading.provisionalPreview.truncated,false);
+    assert.equal(reading.pages[0].id,before.pages[0].id);
+    assert.equal(bodyText(reading.pages[0].bodyHtml),previous);
+    assert.deepEqual(reading.currentPage.ranges,before.currentPage.ranges);
+    assert.equal(reading.bodyHash,createHash('sha256').update(previous+current).digest('hex'));
+    assert.equal(f.service.readingPages('u','a',0).provisionalPreview,undefined);
+  }finally{f.close();}
+});
+
+test('an unpublished provisional preview waits for its own extraction and excludes raw neighbors and proposals',async()=>{
+  const physical='別の章。現在の章。',current='現在の章。',proposal='未承認の提案。';
+  let finishExtraction;
+  const f=fixture({processSource:async(_u,request)=>{
+    if(request.step==='extract')return new Promise(resolve=>{finishExtraction=()=>resolve({bodyHtml:html(physical)});});
+    assert.equal(request.step,'correct');
+    return {requiresReview:true,proposalHtml:html(proposal),diff:{reason:'差分を確認してください。'}};
+  }});try{
+    const pdf={id:'shared-pdf',type:'scan_pdf',original:{page:7}};
+    f.service.createArticleSources('u','a',[
+      {...pdf,localRange:{start:'別の章。'.length}},
+      {id:'prefetched',type:'scan_pdf',text:'次の原頁。',original:{page:8}},
+    ]);
+    f.service.createArticleSources('u','b',[{...pdf,localRange:{start:0,end:'別の章。'.length}}]);
+    f.service.prepareSource('u','a','shared-pdf');
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.ok(finishExtraction);
+    const extracting=f.service.readingPages('u','a',0);
+    assert.equal(extracting.currentPage,null);
+    assert.equal(extracting.provisionalPreview,undefined);
+
+    finishExtraction();await f.service.drain();
+    const reviewed=f.service.getSource('u','a','shared-pdf'),reading=f.service.readingPages('u','a',0);
+    assert.equal(reviewed.firstExtraction.text,physical);
+    assert.equal(bodyText(reviewed.proposal.bodyHtml),proposal);
+    assert.equal(reading.diagnostics.current.state,'requires_review');
+    assert.equal(reading.currentPage,null);
+    assert.deepEqual(reading.provisionalPreview,{text:current,truncated:false,source:{id:'shared-pdf',type:'scan_pdf',position:0,page:7,label:'PDF 第7页'}});
+    assert.equal(f.service.readingPages('u','a',1).provisionalPreview,undefined);
+    assert.equal(f.service.readingPages('u','b',0).provisionalPreview,undefined,'shared physical OCR does not publish another article’s unextracted scope');
+    assert.throws(()=>f.service.readingPages('other-user','a',0),{status:404});
+
+    f.service.stop();
+    const saved=f.service.saveSource('u','a','shared-pdf',{version:reviewed.version,text:'手で確認した章。'});
+    assert.equal(f.service.readingPages('u','a',0).provisionalPreview?.text,saved.text);
+  }finally{
+    f.service.stop();finishExtraction?.();await f.service.drain();f.close();
+  }
+});
+
+test('provisional preview caps UTF-16 length without splitting a surrogate pair',()=>{
+  const f=fixture();try{
+    const prefix='甲'.repeat(999);
+    f.service.createArticleSources('u','a',[{type:'text',text:prefix+'𠮷。'}]);
+    f.service.createArticleSources('u','b',[{type:'text',text:prefix+'。'}]);
+    const truncated=f.service.readingPages('u','a',0).provisionalPreview,exact=f.service.readingPages('u','b',0).provisionalPreview;
+    assert.equal(truncated?.text,prefix);
+    assert.equal(truncated.truncated,true);
+    assert.equal(exact?.text,prefix+'。');
+    assert.equal(exact.truncated,false);
+  }finally{f.close();}
+});
+
 test('a failed or review-blocked PDF segmentation remains current ahead of pending lookahead correction',()=>{
   for(const status of ['failed','requires_review']){
     const f=fixture();try{
@@ -999,6 +1075,12 @@ test('a PDF chapter opens with a ready short first page while the next original 
     assert.equal(bodyText(published.bodyHtml),first+second);
     assert.equal(pending.pages.length,1);
     assert.equal(pending.complete,false);
+    assert.equal(pending.provisionalPreview,undefined);
+    const following=f.service.readingPages('u','a',1);
+    assert.equal(following.currentPage,null);
+    assert.equal(following.provisionalPreview?.text,tail);
+    assert.equal(following.provisionalPreview.source.id,'pdf-114');
+    assert.equal(f.service.readingPages('u','a',2).provisionalPreview,undefined);
     release();
     await f.service.drain();
     const finished=f.service.readingPages('u','a',1);
