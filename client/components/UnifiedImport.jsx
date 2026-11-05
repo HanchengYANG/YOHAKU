@@ -84,7 +84,6 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
         setAsBook((saved.asBook ?? !!result.chapterAttempted) && !["photo","screenshot"].includes(restoredType));
         setChapters(reuseEdits && Array.isArray(saved.chapters) ? saved.chapters : result.chapters || []);
         setExclusions(reuseEdits && Array.isArray(saved.exclusions) ? saved.exclusions : result.exclusions || []);
-        dirty();
       } catch (cause) {
         if (!stopped && cause.name !== "AbortError") {
           if (cause instanceof SyntaxError || [401,403,404].includes(cause.status)) forgetDraft();
@@ -99,7 +98,15 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
   },[storageKey,initialImportId]);
   useEffect(() => {
     if (restoring || loadedContext.current !== storageKey || !draft?.id || draft.status !== "staged") return;
-    try {sessionStorage.setItem(storageKey,JSON.stringify({id:draft.id,context,asBook,type,title,chapters,exclusions,chapterProcessingStatus:processing?.status || null}));onDirty?.(false);} catch {}
+    try {sessionStorage.setItem(storageKey,JSON.stringify({id:draft.id,context,asBook,type,title,chapters,exclusions,chapterProcessingStatus:processing?.status || null}));}
+    catch {
+      // A saved server draft is recoverable even when browser storage is unavailable.
+      const savedType = processing?.type || draft.detectedType;
+      const savedAsBook = !!(draft.chapterAttempted && savedType?.includes("pdf"));
+      if (title !== (draft.title || "") || type !== savedType || asBook !== savedAsBook ||
+        JSON.stringify(chapters) !== JSON.stringify(draft.chapters || []) || JSON.stringify(exclusions) !== JSON.stringify(draft.exclusions || [])) return;
+    }
+    onDirty?.(false);
   },[storageKey,restoring,draft?.id,draft?.status,processing?.status,asBook,type,title,chapters,exclusions]);
   useEffect(() => {
     if (!draft?.id || !chapterRunning) return;
@@ -132,7 +139,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
       const restoredType = result.chapterProcessing?.type || result.detectedType;
       setDraft(result);setType(restoredType);setTitle(result.title || "");
       setAsBook(!!result.chapterAttempted && restoredType?.includes("pdf"));
-      setChapters(result.chapters || []);setExclusions(result.exclusions || []);dirty();
+      setChapters(result.chapters || []);setExclusions(result.exclusions || []);
     } catch (cause) {setError(cause.message);}
     finally {setBusy(false);}
   };
@@ -149,8 +156,8 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
         if (initialTargetId) body.append("targetId",initialTargetId);
         result = await readApiResult(await fetch("/api/imports", {method:"POST",body}));
       }
-      setDraft(result); setType(result.detectedType); setTitle(title || result.title || "");
-      setChapters(result.chapters || []);setExclusions(result.exclusions || []); dirty();
+      setDraft(result); setType(result.detectedType); setTitle(result.title || title);
+      setChapters(result.chapters || []);setExclusions(result.exclusions || []);
     } catch (cause) { setError(cause.message); }
     finally { setBusy(false); }
   };
@@ -159,7 +166,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
     setBusy(true); setError("");
     try {
       const result = await api(`/imports/${encodeURIComponent(draft.id)}/chapters`, {method:"POST",body:JSON.stringify({type,title})});
-      setDraft(result); setChapters(result.chapters || []);setExclusions(result.exclusions || []); dirty();
+      setDraft(result);setTitle(result.title || title);setChapters(result.chapters || []);setExclusions(result.exclusions || []);
     } catch (cause) {
       setError(cause.message);
       try {const result = await api(`/imports/${encodeURIComponent(draft.id)}`);setDraft(result);setChapters(result.chapters || []);setExclusions(result.exclusions || []);}catch{}
@@ -180,6 +187,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
     finally { setBusy(false); }
   };
   const updateChapter = (index, patch) => { setChapters((current) => current.map((item,i) => i === index ? {...item,...patch} : item)); dirty(); };
+  const editChapterStructure = (next) => { if (next !== chapters) {setChapters(next);dirty();} };
   return <section className="unified-import editor-page" aria-label="统一导入">
     <div className="source-heading"><div><span className="eyebrow">统一导入</span><h1>添加阅读资料</h1></div>
       <button className="button subtle" disabled={busy} onClick={onCancel}>返回</button></div>
@@ -238,18 +246,18 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
           <label className="source-checkbox"><input type="checkbox" checked={!chapter.needsReview} disabled={structureLocked} onChange={(e) => updateChapter(index,{needsReview:!e.target.checked})} />已核对章节边界</label>
           {chapter.needsReview && <span className="source-status">边界待核对</span>}
           <div className="source-chapter-actions">
-            <button type="button" className="text-button" disabled={structureLocked || index === 0} onClick={() => setChapters(moveChapter(chapters,index,-1))}>上移</button>
-            <button type="button" className="text-button" disabled={structureLocked || index === chapters.length - 1} onClick={() => setChapters(moveChapter(chapters,index,1))}>下移</button>
-            <button type="button" className="text-button" disabled={structureLocked || index === chapters.length - 1} onClick={() => setChapters(mergeChapter(chapters,index))}>与下一章合并</button>
+            <button type="button" className="text-button" disabled={structureLocked || index === 0} onClick={() => editChapterStructure(moveChapter(chapters,index,-1))}>上移</button>
+            <button type="button" className="text-button" disabled={structureLocked || index === chapters.length - 1} onClick={() => editChapterStructure(moveChapter(chapters,index,1))}>下移</button>
+            <button type="button" className="text-button" disabled={structureLocked || index === chapters.length - 1} onClick={() => editChapterStructure(mergeChapter(chapters,index))}>与下一章合并</button>
             <button type="button" className="text-button" disabled={structureLocked || chapter.endPage <= chapter.startPage} onClick={() => {
               const value = window.prompt("从哪个 PDF 实际页开始拆为新章节？", String(Math.floor((chapter.startPage + chapter.endPage + 1) / 2)));
-              if (value !== null) setChapters(splitChapter(chapters,index,Number(value)));
+              if (value !== null) editChapterStructure(splitChapter(chapters,index,Number(value)));
             }}>拆分</button>
           </div>
           {draft.files?.[0] && <ChapterPagePreview importId={draft.id} file={draft.files[0]} chapter={chapter}
             nextChapter={chapters[index + 1]} index={index} totalPages={draft.files[0].info?.pageCount || processing?.totalPages || Math.max(...chapters.map((item) => item.endPage))} />}
         </div>)}
-        <button type="button" className="text-button" disabled={structureLocked} onClick={() => setChapters([...chapters,{id:crypto.randomUUID(),title:`章节 ${chapters.length + 1}`,startPage:1,endPage:1,excluded:false,needsReview:true}])}>添加章节</button>
+        <button type="button" className="text-button" disabled={structureLocked} onClick={() => editChapterStructure([...chapters,{id:crypto.randomUUID(),title:`章节 ${chapters.length + 1}`,startPage:1,endPage:1,excluded:false,needsReview:true}])}>添加章节</button>
         {!!exclusions.length && <section aria-label="建议排除的内容"><h3>建议排除的内容</h3><p>以下全部建议均可修改。取消勾选可将对应内容保留在正文中；原始文件和{type === "scan_pdf" ? "原始 OCR 结果" : "原始文字提取结果"}完整保留。</p>
           {exclusions.map((item,index) => <div key={item.id || `${item.page}:${item.startLine}:${item.endLine}:${index}`} className="source-chapter">
             <label className="source-checkbox"><input type="checkbox" checked={item.excluded !== false} disabled={structureLocked} onChange={(event) => {setExclusions((current) => current.map((entry,i) => i === index ? {...entry,excluded:event.target.checked} : entry));dirty();}} />排除 PDF 第 {item.page} 页，第 {item.startLine}–{item.endLine} 行</label>

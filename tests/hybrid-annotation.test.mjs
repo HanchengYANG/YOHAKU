@@ -263,7 +263,7 @@ test('首次语义格式失败只纠错一次，原资料和人工来源读音�
     for(const key of Object.keys(options))assert.equal(input[key],options[key],key);
     assert.equal(input.annotationMode,'proofread');
     assert.deepEqual(targetsIn(input.prompt).map(target=>target.surface),['食']);
-    const execution={operationId:`op-${calls.length}`,providerId:'provider',model:'model',queueMs:calls.length===1?10:20,elapsedMs:calls.length===1?30:40,authorization:'must-not-be-copied'};
+    const execution={operationId:`op-${calls.length}`,providerId:'provider',model:'model',queueMs:calls.length===1?10:20,elapsedMs:calls.length===1?30:40,authorization:'must-not-be-copied',usage:{inputTokens:2,outputTokens:3,totalTokens:5,reasoningTokens:1,cachedInputTokens:0,raw:'must-not-be-copied'},maxOutputTokens:32768,reasoningParameterSent:false};
     if(calls.length===1)return {value:{changes:[{id:0,r:'私密RAW_OUTPUT'}],uncertain:[]},execution};
     assert.match(input.prompt,/invalid_reading/);assert.match(input.prompt,/允许.*\[0\]/);assert.match(input.prompt,/平假名/);assert.match(input.prompt,/重复/);assert.doesNotMatch(input.prompt,/私密RAW_OUTPUT/);
     return {value:{changes:[{id:0,r:'た'}],uncertain:[]},execution};
@@ -271,6 +271,7 @@ test('首次语义格式失败只纠错一次，原资料和人工来源读音�
   const result=await service.annotateBodies('u',{items:[{id:'a',bodyHtml:original}],...options});
   assert.equal(calls.length,2);assert.equal(result.metrics.llmCalls,2);assert.equal(result.executions.length,2);
   assert.equal(result.execution.elapsedMs,70);assert.equal(result.execution.queueMs,30);assert.equal(result.execution.operationId,'op-2');
+  assert.deepEqual(result.execution.usage,{inputTokens:4,outputTokens:6,totalTokens:10,reasoningTokens:2,cachedInputTokens:0});assert.equal(result.execution.maxOutputTokens,32768);assert.equal(result.execution.reasoningParameterSent,false);
   assert.doesNotMatch(JSON.stringify(result.executions),/must-not-be-copied|authorization/);
   assert.equal(bodyText(result.items[0].bodyHtml),bodyText(original));assert.deepEqual(bodyRanges(result.items[0].bodyHtml),bodyRanges(original));
   assert.deepEqual(readings(result.items[0].bodyHtml).map(({text,reading,origin})=>({text,reading,origin})),[{text:'東',reading:'あずま',origin:'manual'},{text:'京',reading:'きょう',origin:'source'},{text:'食',reading:'た',origin:'generated'}]);
@@ -285,11 +286,12 @@ for(const [reason,value] of [
   ['invalid_shape',{changes:[],uncertain:[],secret:'never-reflect-this'}],
 ])test(`持续${reason}整批失败并保留安全诊断、两次执行耗时与原快照`,async()=>{
   let calls=0;
-  const service=create({execute:async()=>{calls++;return {value,execution:{operationId:`op-${calls}`,elapsedMs:200,queueMs:50,rawResponse:'never-reflect-this'}};}});
+  const service=create({execute:async()=>{calls++;return {value,execution:{operationId:`op-${calls}`,elapsedMs:200,queueMs:50,rawResponse:'never-reflect-this',usage:{inputTokens:2,outputTokens:3,reasoningTokens:1},maxOutputTokens:32768,reasoningParameterSent:false}};}});
   const prepared=await service.prepareBodies([{id:'a',bodyHtml:html('食べる。')}]),before=JSON.stringify(prepared);
   await assert.rejects(service.proofreadPrepared('u',{prepared}),error=>{
     assert.equal(error.validationReason,reason);assert.equal(error.diagnostic.category,'invalid_response');
     assert.equal(error.execution.elapsedMs,400);assert.equal(error.execution.queueMs,100);assert.equal(error.execution.operationId,'op-2');
+    assert.deepEqual(error.execution.usage,{inputTokens:4,outputTokens:6,reasoningTokens:2});assert.equal(error.execution.maxOutputTokens,32768);assert.equal(error.execution.reasoningParameterSent,false);
     assert.doesNotMatch(JSON.stringify(error),/never-reflect-this|rawResponse/);return error.status===502;
   });
   assert.equal(calls,2);assert.equal(JSON.stringify(prepared),before);

@@ -50,7 +50,11 @@ async function fixture(page, options = {}) {
     }
     if(path==="/imports" && method==="GET")return respond({drafts:options.serverDrafts || []});
     if(path==="/imports" && method==="POST")return respond(importDraft);
-    if(path==="/imports/imp/chapters")return respond(options.asyncChapters ? {...importDraft,chapterProcessing:{status:options.queuedChapters ? "queued" : "extracting",completedPages:0,totalPages:10}} : {...importDraft,chapters:chapterProposal});
+    if(path==="/imports/imp/chapters"){
+      Object.assign(importDraft,{title:input.title || importDraft.title,chapterAttempted:true});
+      if(options.asyncChapters){importDraft.chapterProcessing={status:options.queuedChapters ? "queued" : "extracting",type:input.type,completedPages:0,totalPages:10};return respond(importDraft,202);}
+      importDraft.chapters=chapterProposal;return respond(importDraft);
+    }
     if(path==="/imports/imp" && method==="GET"){
       chapterPolls++;
       const chapterProcessing = options.keepExtracting || chapterPolls === 1 ? {status:"extracting",completedPages:3,totalPages:10}
@@ -89,6 +93,87 @@ async function preparationFixture(page,{holdHeartbeat=false}={}) {
   });
   return state;
 }
+
+async function firstPublicationFixture(page,{holdReturningGet=false,lateDocuments=false}={}) {
+  await fixture(page);
+  const state={phase:"review",version:7,bodyHtml:html(original),events:[],documentReads:0,pendingDocuments:0,heldGet:false};
+  const proposalHtml=html("AI 整段改写后的提议。");
+  let releaseDocuments,releaseGet;
+  const documentsGate=new Promise(resolve=>releaseDocuments=resolve),getGate=new Promise(resolve=>releaseGet=resolve);
+  state.releaseDocuments=releaseDocuments;state.releaseGet=releaseGet;
+  const record=(kind,data={})=>state.events.push({at:Date.now(),kind,...data});
+  const source=()=>({id:"s2",type:"text",position:0,version:state.version,checked:false,status:state.phase==="review"?"requires_review":state.phase==="ready"?"ready":"pending",processing:state.phase==="segment",manual:state.version>7,
+    bodyHtml:state.bodyHtml,preview:{type:"text",text:original},firstExtraction:{text:original},changes:[],articleStart:0,
+    ...(state.phase==="review"?{proposal:{bodyHtml:proposalHtml}}:{})});
+  const snapshot=()=>{
+    const currentPage=state.phase==="ready"?{id:"first-published-page",index:0,ready:true,bodyHtml:state.bodyHtml,sourceIds:["s2"],start:0,end:bodyText(state.bodyHtml).length}:null;
+    return {pages:currentPage?[currentPage]:[],currentPage,index:0,position:0,complete:!!currentPage,totalPages:currentPage?1:undefined,hasNext:false,processing:state.phase==="segment",bodyHash:`source-version-${state.version}`,taskId:"first-publication-task",
+      preparation:{stage:state.phase==="ready"?"ready":state.phase==="review"?"correct":"segment",percent:state.phase==="ready"?100:null},
+      diagnostics:{current:state.phase==="ready"?null:{state:state.phase==="review"?"requires_review":"queued",step:state.phase==="review"?"correct":"segment",source:{id:"s2",type:"text",label:"来源 1"}},recentFailures:[]},
+      ...(state.phase==="review"?{error:"正文出现较大改动，请核对来源。"}:{})};
+  };
+  await page.route("**/api/documents/doc",async route=>{
+    const reading=snapshot(),number=++state.documentReads;
+    const value={id:"doc",title:"首次发布边界",kind:"article",sourceWorkflow:true,revision:state.version,bodyHtml:state.bodyHtml,blocks:parseText(bodyText(state.bodyHtml)),reading};
+    record("document-start",{number,ready:!!reading.currentPage});
+    if(lateDocuments&&number>1){state.pendingDocuments++;await documentsGate;}
+    record("document-response",{number,ready:!!reading.currentPage});return route.fulfill({json:value});
+  });
+  await page.route("**/api/documents/doc/sources",route=>route.fulfill({json:{sources:[source()]}}));
+  await page.route(/\/api\/documents\/doc\/sources\/s2(?:\/(?:edit|prepare|checked))?$/,route=>{
+    const request=route.request();
+    if(request.method()==="PUT"){
+      state.bodyHtml=request.postDataJSON().bodyHtml;state.version++;state.phase="segment";record("manual-save",{version:state.version});
+    }
+    return route.fulfill({json:source()});
+  });
+  await page.route("**/api/documents/doc/reading-*",async route=>{
+    const request=route.request(),input=request.method()==="POST"?request.postDataJSON():null;
+    if(input?.active===false)return route.fulfill({json:{sessionId:"fixture"}});
+    const value=snapshot(),kind=input?"heartbeat":"get";record(`${kind}-start`,{ready:!!value.currentPage,mode:input?.mode});
+    if(!input&&holdReturningGet&&state.version>7&&!state.heldGet){state.heldGet=true;await getGate;}
+    record(`${kind}-response`,{ready:!!value.currentPage,mode:input?.mode});return route.fulfill({json:value});
+  });
+  state.publish=()=>{state.phase="ready";record("publish-page-zero");};
+  return state;
+}
+
+async function manuallyReviewFirstUnpublishedSource(page){
+  await page.goto("/#doc");
+  await expect(page.getByRole("region",{name:"准备当前阅读页",exact:true})).toContainText("正文出现较大改动");
+  await page.getByRole("button",{name:"校对正文",exact:true}).click();
+  await page.getByRole("button",{name:"核对并编辑此提议",exact:true}).click();
+  await page.getByLabel("来源正文",{exact:true}).fill("ＩＭＣへようこそ。");
+  await page.getByRole("button",{name:"保存正文",exact:true}).click();
+  await expect(page.getByRole("status").filter({hasText:"已保存，将仅补齐"})).toBeVisible();
+  await page.getByRole("button",{name:"返回阅读",exact:true}).click();
+  await expect(page.getByRole("region",{name:"准备当前阅读页",exact:true})).toContainText("等待分句");
+}
+
+test("first publication after manual review survives late empty document snapshots",async({page},info)=>{
+  const state=await firstPublicationFixture(page,{lateDocuments:true});
+  try{
+    await manuallyReviewFirstUnpublishedSource(page);
+    await expect.poll(()=>state.pendingDocuments).toBe(2);
+    state.publish();await expect(page.getByLabel("日语原文")).toContainText("ＩＭＣへようこそ。");
+    state.releaseDocuments();
+    await expect.poll(()=>state.events.filter(event=>event.kind==="document-response").length).toBe(3);
+    await expect(page.getByLabel("日语原文")).toContainText("ＩＭＣへようこそ。");
+    await expect(page.getByRole("region",{name:"准备当前阅读页",exact:true})).toHaveCount(0);
+  }finally{state.releaseDocuments();state.releaseGet();await info.attach("first-publication-events",{body:JSON.stringify(state.events,null,2),contentType:"application/json"});}
+});
+
+test("first publication after manual review recovers through heartbeat while its GET is hung",async({page},info)=>{
+  const state=await firstPublicationFixture(page,{holdReturningGet:true});
+  try{
+    await manuallyReviewFirstUnpublishedSource(page);await expect.poll(()=>state.heldGet).toBe(true);
+    state.publish();
+    await expect(page.getByLabel("日语原文")).toContainText("ＩＭＣへようこそ。",{timeout:12000});
+    expect(state.events.some(event=>event.kind==="heartbeat-response"&&event.mode==="reading"&&event.ready)).toBe(true);
+    state.releaseGet();
+    await expect(page.getByLabel("日语原文")).toContainText("ＩＭＣへようこそ。");
+  }finally{state.releaseDocuments();state.releaseGet();await info.attach("first-publication-events",{body:JSON.stringify(state.events,null,2),contentType:"application/json"});}
+});
 
 test("reading preparation shows real progress then automatically displays the completed page",async({page},info)=>{
   const state=await preparationFixture(page);await page.goto("/#doc");
@@ -757,6 +842,75 @@ test("leaving async chapter preparation stops UI polling without cancelling the 
   await page.waitForTimeout(2200);
   expect(state.calls.filter((call)=>call.path === "/imports/imp" && call.method === "GET")).toHaveLength(reads);
   expect(state.calls.filter((call)=>call.path.includes("/imports/") && call.method === "DELETE")).toHaveLength(0);
+});
+
+async function simulateUnavailableImportDraftCache(page,{blocked=true,restore=false}={}){
+  await page.addInitScript(({blocked,restore})=>{
+    const context={initialBookId:null,initialTargetId:null};
+    const prefix="yohaku:import-draft:";
+    if(restore)sessionStorage.setItem(`${prefix}${JSON.stringify(context)}`,JSON.stringify({id:"imp",context}));
+    const original=Storage.prototype.setItem;
+    window.__blockImportDraftWrites=blocked;window.__rejectedImportDraftWrites=0;
+    Storage.prototype.setItem=function(key,value){
+      if(this===sessionStorage&&key.startsWith(prefix)&&window.__blockImportDraftWrites){
+        window.__rejectedImportDraftWrites++;throw new DOMException("Import draft storage quota reached","QuotaExceededError");
+      }
+      return original.call(this,key,value);
+    };
+  },{blocked,restore});
+}
+
+async function leaveSavedImportWithoutDialog(page){
+  await expect.poll(()=>page.evaluate(()=>window.__rejectedImportDraftWrites)).toBeGreaterThan(0);
+  const prompts=[];page.on("dialog",async dialog=>{prompts.push(dialog.message());await dialog.accept();});
+  await page.getByRole("button",{name:"返回",exact:true}).click();
+  await expect(page.getByLabel("统一导入")).toHaveCount(0);
+  expect(prompts).toEqual([]);
+}
+
+test("an uploaded PDF draft can be left when its browser cache cannot be written",async({page})=>{
+  await simulateUnavailableImportDraftCache(page);
+  const state=await fixture(page,{importType:"scan_pdf"});await page.goto("/");await showShelf(page);
+  await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await page.getByLabel("选择来源文件",{exact:true}).setInputFiles({name:"saved.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-saved-fixture")});
+  await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
+  await expect(page.getByLabel("确认来源类型",{exact:true})).toHaveValue("scan_pdf");
+  await leaveSavedImportWithoutDialog(page);
+  expect(state.calls.filter(call=>call.path==="/imports"&&call.method==="POST")).toHaveLength(1);
+});
+
+test("a server accepted PDF chapter job can be left when its browser cache cannot be written",async({page})=>{
+  await simulateUnavailableImportDraftCache(page);
+  const state=await startScannedBook(page,{keepExtracting:true});
+  await expect(page.getByLabel("PDF 分章进度")).toContainText("全书本地 OCR：3 / 10 页");
+  await leaveSavedImportWithoutDialog(page);
+  expect(state.calls.filter(call=>call.path==="/imports/imp/chapters"&&call.method==="POST").map(call=>call.input)).toEqual([{type:"scan_pdf",title:"扫描书籍"}]);
+  expect(state.calls.filter(call=>call.path.startsWith("/imports/")&&call.method==="DELETE")).toHaveLength(0);
+});
+
+for(const restore of [true,false])test(`${restore?"restored":"resumed"} server PDF drafts can be left when their browser cache cannot be written`,async({page})=>{
+  await simulateUnavailableImportDraftCache(page,{restore});
+  const pending={id:"imp",title:"可继续的扫描书籍",detectedType:"scan_pdf",status:"staged",chapterAttempted:true,context:{bookId:null,targetId:null},chapterProcessing:{status:"extracting",type:"scan_pdf",completedPages:3,totalPages:10}};
+  const state=await fixture(page,{importType:"scan_pdf",keepExtracting:true,draft:pending,serverDrafts:[pending]});await page.goto("/");await showShelf(page);
+  await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  if(!restore)await page.getByRole("button",{name:"继续导入：可继续的扫描书籍",exact:true}).click();
+  await expect(page.getByLabel("PDF 分章进度")).toContainText("全书本地 OCR：3 / 10 页");
+  await leaveSavedImportWithoutDialog(page);
+  expect(state.calls.filter(call=>call.path.startsWith("/imports")&&call.method==="POST")).toHaveLength(0);
+});
+
+test("an added chapter still warns before leaving if its only copy is in the editor",async({page})=>{
+  await simulateUnavailableImportDraftCache(page,{blocked:false});
+  await startScannedBook(page);
+  await expect(page.getByLabel("章节 1 标题",{exact:true})).toHaveValue("第一章");
+  await page.evaluate(()=>{window.__blockImportDraftWrites=true;});
+  await page.getByRole("button",{name:"添加章节",exact:true}).click();
+  await expect(page.getByLabel("章节 3 标题",{exact:true})).toHaveValue("章节 3");
+  await expect.poll(()=>page.evaluate(()=>window.__rejectedImportDraftWrites)).toBeGreaterThan(0);
+  const prompts=[];page.on("dialog",async dialog=>{prompts.push(dialog.message());await dialog.dismiss();});
+  await page.getByRole("button",{name:"返回",exact:true}).click();
+  expect(prompts).toHaveLength(1);expect(prompts[0]).toContain("还没有保存");
+  await expect(page.getByLabel("章节 3 标题",{exact:true})).toHaveValue("章节 3");
 });
 
 test("reopening an import after refresh restores its draft and resumes existing OCR progress",async({page})=>{

@@ -3,6 +3,7 @@ import * as body from '../shared/article-html.mjs';
 import { parseText, serializeBlocks } from '../shared/document.mjs';
 import { paginateReadingText, sliceReadingHtml, changedTextRange } from '../shared/reading-pages.mjs';
 import { diagnosticForError } from './ai/diagnostics.mjs';
+import { executionUsage } from './ai/execution-usage.mjs';
 import { mergeReadings } from './source-merge.mjs';
 import { createSourceTaskAdapter } from './source-task-adapter.mjs';
 
@@ -164,14 +165,14 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
   }
   const hasAnnotationBatch=()=>typeof ai.annotateBodies==='function'||typeof ai.prepareAnnotationBodies==='function'&&typeof ai.proofreadAnnotationBodies==='function';
   const transaction=work=>{const name=`source_${randomUUID().replaceAll('-','')}`;database.exec(`SAVEPOINT ${name}`);try{const result=work();database.exec(`RELEASE ${name}`);return result;}catch(error){database.exec(`ROLLBACK TO ${name}; RELEASE ${name}`);throw error;}};
-  // Keep only execution identifiers and timings. SDK errors and results can
+  // Keep only execution identifiers, timings and safe usage counters. SDK errors and results can
   // contain requests, credentials and the entire source document.
   function executionMetadata(value={}) {
     const result={};
     for(const key of ['operationId','role','providerId','model'])if(typeof value?.[key]==='string'&&value[key].length<=240&&!/[\r\n]/.test(value[key]))result[key]=value[key];
     for(const key of ['configurationVersion','queueMs','elapsedMs','retryCount','retryWaitMs','retryDelayMs'])if(Number.isFinite(value?.[key])&&value[key]>=0)result[key]=value[key];
     for(const key of ['queuedAt','startedAt','nextRetryAt'])if(typeof value?.[key]==='string'&&Number.isFinite(Date.parse(value[key])))result[key]=new Date(value[key]).toISOString();
-    return result;
+    return {...result,...executionUsage(value)};
   }
   function startAttempt(row,step,execution) {
     const id=randomUUID(),started=stamp();

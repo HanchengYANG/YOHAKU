@@ -17,6 +17,7 @@ import { createNdlOcr } from "../ocr/ndl.mjs";
 import { createLocalRuby } from "../ocr/ruby.mjs";
 import { createHybridAnnotation } from "./hybrid-annotation.mjs";
 import { diagnosticForError } from "./diagnostics.mjs";
+import { executionUsage } from "./execution-usage.mjs";
 import {
   CORRECTION_SCHEMA,
   expandOcrCorrection,
@@ -196,7 +197,7 @@ export function attachAIRoutes({
     model: result?.model || route.model || null, configurationVersion: route.configurationVersion,
     ...(route.timing?.() || {}),
     ...(route.reasoning ? { reasoning: route.reasoning } : {}),
-    ...(route.annotationMode ? { annotationMode: route.annotationMode } : {}) });
+    ...(route.annotationMode ? { annotationMode: route.annotationMode } : {}),...executionUsage(result) });
   // A queued step resolves again when its provider slot opens. If its provider
   // changed while waiting, release that slot and join the new provider queue.
   async function withRole(userId, role, work, options = {}) {
@@ -243,7 +244,7 @@ export function attachAIRoutes({
           assertOpen(signal);
           return { value };
         }
-        catch (error) { error.execution = execution(route); throw error; }
+        catch (error) { error.execution = {...execution(route),...executionUsage(error.execution)}; throw error; }
       }, options);
       if (!result.redirected) { transition("idle"); return result.value; }
       transition("queued"); startedAt = undefined;
@@ -1232,7 +1233,7 @@ export function attachAIRoutes({
       const cancelled = signal.aborted && signal.reason instanceof Error ? signal.reason : cause;
       const error = cancelled && typeof cancelled === 'object' ? cancelled : fail(502, "AI 步骤失败，请重试当前步骤。");
       error.diagnostic = diagnosticForError(error, { signal });
-      error.execution = { ...execution({ ...route, ...error.execution }), ...timing() };
+      error.execution = { ...execution({ ...route, ...error.execution },error.execution), ...timing() };
       throw error;
     } finally {
       sourceOperations.delete(completed);
@@ -1250,10 +1251,10 @@ export function attachAIRoutes({
       ...(pixels ? { image: `data:${image.mimeType};base64,${pixels.toString("base64")}` } : input.image ? { image: input.image } : {}) });
     assertOpen(route.signal);
     if (result.completed !== true) throw Object.assign(fail(502, "AI 步骤未完成，已保存的正文和处理结果保留。"),
-      { diagnostic: { code: 'AI_INCOMPLETE_OUTPUT', category: 'incomplete_output' } });
+      { diagnostic: { code: 'AI_INCOMPLETE_OUTPUT', category: 'incomplete_output' },execution:execution(route,result) });
     let value;
     try { value = JSON.parse(result.text); }
-    catch (cause) { throw Object.assign(fail(502, "AI 返回格式不完整，请重试当前步骤。"), { diagnostic: diagnosticForError(cause) }); }
+    catch (cause) { throw Object.assign(fail(502, "AI 返回格式不完整，请重试当前步骤。"), { diagnostic: diagnosticForError(cause),execution:execution(route,result) }); }
     return { value, execution: execution(route, result) };
   });
   const hybridAnnotation = createHybridAnnotation({ localRuby, execute: executeSourceStep });

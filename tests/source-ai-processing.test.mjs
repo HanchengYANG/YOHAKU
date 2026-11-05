@@ -262,7 +262,7 @@ test('分句遗漏独立分隔符时最多纠错一次，保留原文标记并�
     calls.push(input);assert.equal(user,'u');assert.equal(role,'segmentation');
     for(const key of Object.keys(options))assert.equal(input[key],options[key],key);
     assert.equal(JSON.parse(input.prompt.split('\n输入正文：\n')[1].split('\n')[0]),text);
-    const execution={operationId:`split-${calls.length}`,role,queueMs:calls.length===1?5:7,elapsedMs:calls.length===1?10:15,requestHeaders:'never-copy-headers'};
+    const execution={operationId:`split-${calls.length}`,role,queueMs:calls.length===1?5:7,elapsedMs:calls.length===1?10:15,requestHeaders:'never-copy-headers',usage:{inputTokens:2,outputTokens:3,totalTokens:5,reasoningTokens:1,cachedInputTokens:0,raw:'never-copy-headers'},maxOutputTokens:32768,reasoningParameterSent:false};
     if(calls.length===1)return {value:{sentences:[text.replace('**','')],extra:'MODEL_OUTPUT_SHOULD_NOT_REENTER_PROMPT'},execution};
     assert.match(input.prompt,/text_mismatch/);assert.match(input.prompt,/\*\*/);assert.match(input.prompt,/换行/);assert.doesNotMatch(input.prompt,/MODEL_OUTPUT_SHOULD_NOT_REENTER_PROMPT/);
     return {value:{sentences:text.match(/[^\n]*\n|[^\n]+$/g)},execution};
@@ -272,15 +272,17 @@ test('分句遗漏独立分隔符时最多纠错一次，保留原文标记并�
   assert.deepEqual(bodyRanges(result.bodyHtml).qa,bodyRanges(original).qa);assert.deepEqual(bodyRanges(result.bodyHtml).sources,bodyRanges(original).sources);
   assert.deepEqual(htmlToBlocks(result.bodyHtml).flatMap(block=>block.segments.filter(segment=>segment.reading)).map(({text,reading,origin})=>({text,reading,origin})),[{text:'東京',reading:'とうきょう',origin:'manual'},{text:'日本',reading:'にほん',origin:'source'}]);
   assert.equal(result.execution.elapsedMs,25);assert.equal(result.execution.queueMs,12);assert.equal(result.execution.operationId,'split-2');
+  assert.deepEqual(result.execution.usage,{inputTokens:4,outputTokens:6,totalTokens:10,reasoningTokens:2,cachedInputTokens:0});assert.equal(result.execution.maxOutputTokens,32768);assert.equal(result.execution.reasoningParameterSent,false);
   assert.doesNotMatch(JSON.stringify(result.execution),/requestHeaders|never-copy-headers/);
 });
 
 for(const [reason,value] of [['invalid_shape',{sentences:[]}],['text_mismatch',{sentences:['改写的正文。']}]])test(`分句持续${reason}仍失败，不提交句界且保留安全累计执行详情`,async()=>{
   let calls=0;const original='<p data-paragraph-id="p">原文。\n**\n末尾。</p>',input={step:'segment',bodyHtml:original},before=JSON.stringify(input);
-  const processor=createSourceProcessor({execute:async()=>{calls++;return {value,execution:{role:'segmentation',operationId:`op-${calls}`,elapsedMs:120,queueMs:30,rawResponse:'must-not-copy'},requestHeaders:{authorization:'must-not-copy'}};}});
+  const processor=createSourceProcessor({execute:async()=>{calls++;return {value,execution:{role:'segmentation',operationId:`op-${calls}`,elapsedMs:120,queueMs:30,rawResponse:'must-not-copy',usage:{inputTokens:2,outputTokens:3,reasoningTokens:1},maxOutputTokens:32768,reasoningParameterSent:false},requestHeaders:{authorization:'must-not-copy'}};}});
   await assert.rejects(processor.processSource('u',input),error=>{
     assert.equal(error.validationReason,reason);assert.equal(error.diagnostic.category,'invalid_response');assert.equal(error.status,502);
     assert.equal(error.execution.elapsedMs,240);assert.equal(error.execution.queueMs,60);assert.equal(error.execution.operationId,'op-2');
+    assert.deepEqual(error.execution.usage,{inputTokens:4,outputTokens:6,reasoningTokens:2});assert.equal(error.execution.maxOutputTokens,32768);assert.equal(error.execution.reasoningParameterSent,false);
     assert.equal(error.result.expectedText,bodyText(original));assert.deepEqual(error.result.value,value);assert.deepEqual(error.result.execution,error.execution);
     assert.doesNotMatch(JSON.stringify(error.result),/must-not-copy|rawResponse|authorization/);return true;
   });

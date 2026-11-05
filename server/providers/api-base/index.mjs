@@ -8,6 +8,7 @@ import { createModelTests } from "./model-tests.mjs";
 import { effortOptions, validateModelReasoning } from "../reasoning.mjs";
 import { normalizeReasoning, reasoningKey } from "../../../shared/ai-roles.mjs";
 import { diagnosticForError } from '../../ai/diagnostics.mjs';
+import { executionUsage,usageFromSDK } from '../../ai/execution-usage.mjs';
 
 // Exact deployed model IDs covered by the service's published reasoning tiers.
 const documentedEfforts = Object.freeze({
@@ -202,6 +203,7 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
       requests.add(requestController);
       const timeoutSignal = AbortSignal.timeout(timeoutMs);
       const abortSignal = AbortSignal.any([requestController.signal, timeoutSignal, ...(signal ? [signal] : [])]);
+      let requestExecution={};
       try {
         return await raceWithSignal(async () => {
         const account = await (model ? credentialStatus() : auth.status());
@@ -229,6 +231,7 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
           maxOutputTokens: CODIX_MODELS.find((entry) => entry.id === selectedModel)?.limit.output || 16384,
           maxRetries: 0, abortSignal, ...(schema ? { output: Output.json() } : {}),
           ...(selectedReasoning ? { providerOptions: { apiBase: { reasoningEffort: selectedReasoning.effort } } } : {}) };
+        requestExecution=executionUsage({maxOutputTokens:options.maxOutputTokens,reasoningParameterSent:!!selectedReasoning,reasoningEffort:selectedReasoning?.effort});
         let result, text;
         if (onEvent && !schema) {
           // Consume the SDK's full stream so errors cannot become saved answers.
@@ -244,6 +247,7 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
           }
         } else {
           result = await generateText(options);
+          requestExecution={...requestExecution,...executionUsage({usage:usageFromSDK(await result.usage)})};
           const finishReason = await result.finishReason;
           if(finishReason !== 'stop' || !result.text?.trim())throw Object.assign(fail(502, "AI 输出为空、被截断或未完整完成，未保存部分结果，请重试。"),{
             diagnostic:{code:'AI_INCOMPLETE_OUTPUT',category:'incomplete_output',...(typeof finishReason==='string'?{finishReason}:{})},
@@ -251,16 +255,24 @@ export function createAPIBaseConnection({ storageDir, fetchImpl = globalThis.fet
           text = schema ? JSON.stringify(result.output) : result.text;
         }
         abortSignal.throwIfAborted();
+        requestExecution={...requestExecution,...executionUsage({usage:usageFromSDK(await result.usage)})};
         if (await result.finishReason !== "stop" || !text?.trim())
           throw Object.assign(fail(502, "AI 输出为空、被截断或未完整完成，未保存部分结果，请重试。"),{diagnostic:{code:'AI_INCOMPLETE_OUTPUT',category:'incomplete_output',finishReason:await result.finishReason}});
         const response = await result.response;
         abortSignal.throwIfAborted();
         lastError = null;
         return { text, completed: true, threadId: null, model: response.modelId || selectedModel,
-          reasoningEffort: selectedReasoning?.effort ?? null, sources: [], webSearch: { enabled: false, performed: false } };
+          reasoningEffort: selectedReasoning?.effort ?? null, ...requestExecution, sources: [], webSearch: { enabled: false, performed: false } };
         }, abortSignal);
       } catch (cause) {
         const error = publicError(cause, abortSignal, image, timeoutSignal);
+        const seen=new Set();let current=cause;
+        while(current&&typeof current==='object'&&!seen.has(current)&&seen.size<12){
+          seen.add(current);const usage=usageFromSDK(current.usage);
+          if(usage){requestExecution={...requestExecution,usage};break;}
+          current=current.cause;
+        }
+        if(Object.keys(requestExecution).length)error.execution=executionUsage(requestExecution);
         lastError = error.message;
         throw error;
       } finally { requests.delete(requestController); }

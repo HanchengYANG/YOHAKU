@@ -46,6 +46,43 @@ async function setup(t, options = {}) {
   };
 }
 
+test('API execution diagnostics retain only reported token counts and actual request parameters',async t=>{
+  const f=await setup(t),model='Deepseek/deepseek-v4-flash-0731';await f.configure({model});
+  f.reply(()=>Response.json({model,choices:[{message:{role:'assistant',content:'{"text":"synthetic"}'},finish_reason:'stop'}],
+    usage:{prompt_tokens:100,completion_tokens:40,total_tokens:140,prompt_tokens_details:{cached_tokens:25},completion_tokens_details:{reasoning_tokens:30},authorization:'private-usage-field'}}));
+  const input={model,prompt:'Synthetic JSON',schema:{type:'object'}};
+  const result=await f.connection.runtime.run(input);
+  assert.deepEqual(result.usage,{inputTokens:100,outputTokens:40,totalTokens:140,reasoningTokens:30,cachedInputTokens:25});
+  assert.equal(result.maxOutputTokens,32768);assert.equal(result.reasoningParameterSent,false);
+  assert.equal(Object.hasOwn(f.requests.at(-1).body,'reasoning_effort'),false);
+  assert.doesNotMatch(JSON.stringify(result.usage),/authorization|private-usage-field|raw/);
+  const explicit=await f.connection.runtime.run({...input,reasoning:{effort:'none'}});
+  assert.equal(explicit.reasoningParameterSent,true);assert.equal(explicit.reasoningEffort,'none');
+  assert.equal(f.requests.at(-1).body.reasoning_effort,'none');
+});
+
+test('length and invalid JSON failures preserve safe token usage and output budget without raw responses',async t=>{
+  const f=await setup(t),model='Deepseek/deepseek-v4-flash-0731';await f.configure({model});
+  for(const [finish,content,category] of [['length','{"text":"partial"}','incomplete_output'],['stop','private-invalid-json','invalid_json']]){
+    f.reply(()=>Response.json({choices:[{message:{role:'assistant',content},finish_reason:finish}],usage:{prompt_tokens:12,completion_tokens:32768,total_tokens:32780,completion_tokens_details:{reasoning_tokens:32760}},privateResponse:'never-persist-response'}));
+    await assert.rejects(f.connection.runtime.run({model,prompt:'Synthetic JSON',schema:{type:'object'}}),error=>{
+      assert.equal(error.diagnostic.category,category);
+      assert.deepEqual(error.execution?.usage,{inputTokens:12,outputTokens:32768,totalTokens:32780,reasoningTokens:32760});
+      assert.equal(error.execution.maxOutputTokens,32768);assert.equal(error.execution.reasoningParameterSent,false);
+      assert.doesNotMatch(JSON.stringify(error),/private-invalid-json|never-persist-response|fixture-only-codix-private-key/);return true;
+    });
+  }
+});
+
+test('missing or partially reported provider usage is not presented as zero token counts',async t=>{
+  const f=await setup(t);await f.configure();
+  for(const usage of [undefined,{prompt_tokens:7}]){
+    f.reply(()=>Response.json({choices:[{message:{role:'assistant',content:'{"ok":true}'},finish_reason:'stop'}],...(usage?{usage}:{})}));
+    const result=await f.connection.runtime.run({model:'codiX-agent',prompt:'Synthetic JSON',schema:{type:'object'}});
+    assert.deepEqual(result.usage,usage?{inputTokens:7}:undefined);
+  }
+});
+
 test("iliad codix未配置时不发送请求，状态给出固定地址与七个模型且不创建密钥文件", async (t) => {
   const { connection, requests, storageDir } = await setup(t);
   const status = await connection.status();

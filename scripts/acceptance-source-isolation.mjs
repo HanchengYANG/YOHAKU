@@ -8,6 +8,7 @@ import {join,resolve} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {createApp} from '../server/app.mjs';
 import {createProviderConnection} from '../server/providers/index.mjs';
+import {attachReadingObserver} from './acceptance-reading-observer.mjs';
 
 const dataDir=resolve(process.env.DATA_DIR||'data');
 const controlPath=resolve(process.env.ISOLATION_CONTROL||'artifacts/isolation-control.json');
@@ -55,6 +56,7 @@ for(const method of ['processSource']){
   };
 }
 const server=instance.app.listen(Number(process.env.PORT||4317),'127.0.0.1',()=>console.log('GUI isolation acceptance backend listening'));
+attachReadingObserver(server,{control,record});
 let stopping=false;
 async function stop(){if(stopping)return;stopping=true;const beforeClose=new Promise(resolve=>server.close(resolve));await instance.shutdown({beforeClose});process.exitCode=0;}
 process.once('SIGINT',stop);process.once('SIGTERM',stop);

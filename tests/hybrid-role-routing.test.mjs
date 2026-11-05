@@ -47,6 +47,21 @@ async function fixture(t,{reasoning,supportsNone=true,run,capacity}={}){
 }
 const items=[{id:'source-range',bodyHtml:'<p data-paragraph-id="p">日本語。</p>'}];
 
+test('source role results and parsing/provider failures preserve safe execution usage',async t=>{
+  let mode='success';const usage={inputTokens:10,outputTokens:30,totalTokens:40,reasoningTokens:25,cachedInputTokens:0,raw:{authorization:'never-persist'}};
+  const controls={usage,maxOutputTokens:32768,reasoningParameterSent:false,requestHeaders:'never-persist'};
+  const f=await fixture(t,{run:async input=>{
+    if(mode==='provider')throw Object.assign(new Error('provider failure'),{diagnostic:{code:'AI_INCOMPLETE_OUTPUT',category:'incomplete_output',finishReason:'length'},execution:controls});
+    return {completed:mode!=='incomplete',model:input.model,text:mode==='json'?'{':JSON.stringify(mode==='value'?{text:123}:{text:'日本語。'}),...controls};
+  }});
+  const input={step:'correct',bodyHtml:'<p>日本語。</p>'},expected={inputTokens:10,outputTokens:30,totalTokens:40,reasoningTokens:25,cachedInputTokens:0};
+  const successful=await f.instance.ai.processSource(f.owner,input);assert.deepEqual(successful.execution.usage,expected);
+  for(mode of ['json','value','incomplete','provider'])await assert.rejects(f.instance.ai.processSource(f.owner,input),error=>{
+    assert.deepEqual(error.execution.usage,expected,mode);assert.equal(error.execution.maxOutputTokens,32768);assert.equal(error.execution.reasoningParameterSent,false);
+    assert.doesNotMatch(JSON.stringify(error.execution),/never-persist|requestHeaders|authorization|raw/);return true;
+  });
+});
+
 test('混合注音在模型支持时默认快速查错，不改变保存的角色配置',async t=>{
   const f=await fixture(t);
   assert.equal(typeof f.instance.ai.annotateBodies,'function');

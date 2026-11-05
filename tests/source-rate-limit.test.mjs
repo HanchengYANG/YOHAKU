@@ -11,11 +11,12 @@ import { attachAIRoutes } from '../server/ai/routes.mjs';
 import { createAPIBaseConnection } from '../server/providers/api-base/index.mjs';
 import { ROLE_IDS } from '../shared/ai-roles.mjs';
 import { createSourceService } from '../server/sources.mjs';
+import { attachTaskRoutes } from '../server/tasks.mjs';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 
-async function fixture(t, { respond, ...options } = {}) {
+async function fixture(t, { respond,responseUsage,responseFinishReason='stop', ...options } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'yohaku-rate-limit-'));
   const database = new DatabaseSync(':memory:');
   database.exec("CREATE TABLE users(id TEXT PRIMARY KEY,is_admin INTEGER,created_at TEXT);INSERT INTO users VALUES('u',1,'2026-01-01');");
@@ -38,7 +39,7 @@ async function fixture(t, { respond, ...options } = {}) {
     const output = role === 'correction' ? { text } : role === 'segmentation' ? { sentences: text.match(/[^。]*。|[^。]+$/gu) || [] } : { changes: [], uncertain: [] };
     response.writeHead(status, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify(status === 200
-      ? { model: 'controlled-http', choices: [{ message: { role: 'assistant', content: JSON.stringify(output) }, finish_reason: 'stop' }] }
+      ? { model: 'controlled-http', choices: [{ message: { role: 'assistant', content: JSON.stringify(output) }, finish_reason: typeof responseFinishReason==='function'?responseFinishReason(role):responseFinishReason }],...(responseUsage?{usage:responseUsage}:{}) }
       : { error: { message: 'Controlled HTTP failure', type: 'rate_limit_error' } }));
   });
   upstream.listen(0, '127.0.0.1');
@@ -49,7 +50,7 @@ async function fixture(t, { respond, ...options } = {}) {
   await provider.configure({ apiKey: 'fixture-only-private-api-key' });
   assert.equal((await provider.testModel('codiX-agent', { role: 'correction' })).passed, true);
   const local = { close() {}, annotate() { throw new Error('Local annotation is not used by correction tests'); } };
-  const ai = attachAIRoutes({ app: express(), database, storageDir: directory, services: provider,
+  const app=express(),ai = attachAIRoutes({ app, database, storageDir: directory, services: provider,
     mangaOcr: local, ndlOcr: local, localRuby: local, ...options });
   database.prepare('INSERT INTO ai_role_configurations VALUES(?,?,?,?)').run('u', 1, JSON.stringify({
     annotationReferenceImage: false,
@@ -65,7 +66,7 @@ async function fixture(t, { respond, ...options } = {}) {
     database.close();
     await rm(directory, { recursive: true, force: true });
   });
-  return { ai, calls, database, cleanup, correct(text, input = {}) {
+  return { ai, app,calls, database, cleanup, correct(text, input = {}) {
     return ai.processSource('u', { source: { id: text, type: 'text' }, step: 'correct',
       bodyHtml: `<p>${text}</p>`, groupKey: text, ...input });
   } };
@@ -96,6 +97,27 @@ test('HTTP 429 退避释放资源，其他章节先完成，退避不消耗执�
   assert.equal(result.execution.retryCount, 1);
   assert.ok(result.execution.retryWaitMs >= 280);
   assert.ok(result.execution.elapsedMs < 200, '执行计时不应包含退避时间');
+});
+
+for(const truncated of [false,true])test(`real HTTP usage survives ${truncated?'length failure':'successful source processing'} through unified task responses`,async t=>{
+  const usage={prompt_tokens:12,completion_tokens:40,total_tokens:52,completion_tokens_details:{reasoning_tokens:35},prompt_tokens_details:{cached_tokens:4},rawResponse:'private-provider-response'};
+  const f=await fixture(t,{responseUsage:usage,responseFinishReason:role=>truncated&&role==='correction'?'length':'stop',localRuby:{close(){},async annotate(){return {annotations:[]};}}});
+  f.database.exec(`CREATE TABLE documents(id TEXT PRIMARY KEY,owner_id TEXT,title TEXT,kind TEXT,orientation TEXT,blocks_json TEXT,plain_text TEXT,body_html TEXT,body_hash TEXT,revision INTEGER,created_at TEXT,updated_at TEXT,source_images_json TEXT,source_image_id TEXT,recognition_json TEXT);
+    INSERT INTO documents VALUES('usage-article','u','用量文章','article','horizontal','[]','','<p></p>','',1,'2026-01-01','2026-01-01','[]',NULL,NULL);`);
+  const sources=createSourceService({database:f.database,ai:f.ai,requireDocument:(user,id)=>f.database.prepare('SELECT * FROM documents WHERE owner_id=? AND id=?').get(user,id),fromRow:row=>({id:row.id,bodyHtml:row.body_html,blocks:JSON.parse(row.blocks_json),revision:row.revision})});
+  f.cleanup.push(async()=>{sources.stop();await sources.drain();sources.close();});
+  f.app.use(express.json());f.app.use((req,_res,next)=>{req.user={id:'u'};next();});
+  attachTaskRoutes({app:f.app,database:f.database,adapters:[sources.taskAdapter]});
+  const server=f.app.listen(0,'127.0.0.1');await once(server,'listening');f.cleanup.push(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));});
+  sources.createArticleSources('u','usage-article',[{id:'usage-source',type:'text',text:'日本語。'}]);
+  const request=sources.heartbeat('u','usage-article',{index:0});await sources.drain();
+  const response=await fetch(`http://127.0.0.1:${server.address().port}/api/tasks/${request.taskId}`),task=await response.json();assert.equal(response.status,200);
+  const correction=task.steps.find(step=>step.step==='correct');
+  assert.equal(correction.status,truncated?'failed':'completed');
+  assert.deepEqual(correction.execution.usage,{inputTokens:12,outputTokens:40,totalTokens:52,reasoningTokens:35,cachedInputTokens:4});
+  assert.equal(correction.execution.maxOutputTokens,32768);assert.equal(correction.execution.reasoningParameterSent,false);
+  if(truncated){assert.equal(correction.diagnostic.finishReason,'length');assert.equal(f.calls.length,1,'usage diagnostics must not introduce a retry');}
+  assert.doesNotMatch(JSON.stringify(task),/private-provider-response|fixture-only-private-api-key|rawResponse/);
 });
 
 test('HTTP 429 自动重试有界，非 429 错误不自动重试', async t => {

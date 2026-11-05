@@ -1,5 +1,6 @@
 import { bodyText, bodyRanges, htmlToBlocks, normalizeBodyHtml, syncBodyReadings } from '../../shared/article-html.mjs';
 import { serializeBlocks } from '../../shared/document.mjs';
+import { executionUsage,summarizeExecutionUsage } from './execution-usage.mjs';
 
 const fail = (message) => Object.assign(new Error(message), { status: 502, expose: true });
 const HAN = /[\p{Script=Han}〆]+/gu;
@@ -224,6 +225,7 @@ function safeExecution(value){
     if(Number.isSafeInteger(value.reasoning.budgetTokens)&&value.reasoning.budgetTokens>0&&value.reasoning.budgetTokens<=1000000)reasoning.budgetTokens=value.reasoning.budgetTokens;
     if(Object.keys(reasoning).length)result.reasoning=reasoning;
   }
+  Object.assign(result,executionUsage(value));
   return Object.keys(result).length?result:null;
 }
 function executionSummary(executions){
@@ -238,7 +240,7 @@ function executionSummary(executions){
       const first=known.find(value=>value[key]);if(first)result[key]=first[key];
     }
   }
-  return result;
+  return {...result,...summarizeExecutionUsage(known)};
 }
 
 function replaceReading(readings, target, reading) {
