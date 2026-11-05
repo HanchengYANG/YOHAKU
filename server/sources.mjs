@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import * as body from '../shared/article-html.mjs';
 import { parseText, serializeBlocks } from '../shared/document.mjs';
-import { paginateReadingText, sliceReadingHtml, changedTextRange } from '../shared/reading-pages.mjs';
+import { paginateReadingText, sliceReadingHtml, changedTextRange, remapReadingOffset } from '../shared/reading-pages.mjs';
 import { ocrRegionBlockType } from '../shared/ocr-correction.mjs';
 import { diagnosticForError } from './ai/diagnostics.mjs';
 import { executionUsage } from './ai/execution-usage.mjs';
@@ -463,7 +463,6 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
   function remapPages(row,before,after,replace) {
     const pages=database.prepare('SELECT * FROM reading_pages WHERE document_id=? AND user_id=?').all(row.document_id,row.user_id);
     const change=changedTextRange(before,after);
-    const anchor=(value,isEnd)=>value===0&&!isEnd?0:value<change.start?value:value>=change.oldEnd?value+change.delta:isEnd?change.newEnd:change.start;
     const global=pages.map(page=>({page,refs:globalRefs(row,decode(page.ranges_json,[]))}));
     replace();
     for(const {page,refs} of global) {
@@ -472,7 +471,8 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
       for(let i=0;i<refs.length;i++) {
         const ref=refs[i];if(ref.sourceId!==row.source_id){mapped.push(ref);continue;}
         let end=ref.end;while(i+1<refs.length&&refs[i+1].sourceId===row.source_id&&refs[i+1].start===end)end=refs[++i].end;
-        const start=Math.max(0,Math.min(after.length,anchor(ref.start,false))),to=Math.max(start,Math.min(after.length,anchor(end,true)));
+        const start=Math.max(0,Math.min(after.length,remapReadingOffset(ref.start,change,false)));
+        const to=Math.max(start,Math.min(after.length,remapReadingOffset(end,change,true)));
         mapped.push(...localRefs(row,start,to));
       }
       database.prepare('UPDATE reading_pages SET ranges_json=? WHERE id=?').run(json(mapped),page.id);

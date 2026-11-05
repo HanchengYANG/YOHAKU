@@ -366,6 +366,35 @@ test('one source spans multiple reading pages and editing expands only affected 
   } finally {f.close();}
 });
 
+for(const {name,start,end,replacement,cut} of [
+  {name:'replacement starting at the boundary',start:1000,end:1001,replacement:'丙丁',cut:1000},
+  {name:'replacement crossing the boundary',start:998,end:1002,replacement:'変更',cut:1000},
+  {name:'insertion at the boundary',start:1000,end:1000,replacement:'追加',cut:1002},
+  {name:'deletion crossing the boundary',start:998,end:1002,replacement:'',cut:998},
+])test(`published page ranges stay contiguous after ${name}`,()=>{
+  const f=fixture();try{
+    const text=['甲','乙','戊'].map(char=>(char.repeat(99)+'。').repeat(10)).join('');
+    f.service.createArticleSources('u','a',[{id:'source',...ready(text)}]);
+    const original=f.service.readingPages('u','a',0).pages;
+    assert.deepEqual(original.map(page=>[page.start,page.end]),[[0,1000],[1000,2000],[2000,3000]]);
+    const edited=text.slice(0,start)+replacement+text.slice(end),delta=edited.length-text.length;
+    const source=f.service.getSource('u','a','source');
+    const saved=f.service.saveSource('u','a','source',{version:source.version,text:edited});
+    const {pages}=f.service.readingPages('u','a',1);
+    assert.deepEqual(pages.map(page=>page.id),original.map(page=>page.id));
+    assert.deepEqual(pages.map(page=>page.ranges.map(({start,end})=>[start,end])),[[[0,cut]],[[cut,2000+delta]],[[2000+delta,edited.length]]]);
+    assert.deepEqual(pages.map(page=>bodyText(page.bodyHtml)),[edited.slice(0,cut),edited.slice(cut,2000+delta),edited.slice(2000+delta)]);
+    assert.equal(pages.map(page=>bodyText(page.bodyHtml)).join(''),saved.text);
+    const selection=f.service.validateSelection('u','a',{readingPageId:pages[1].id,pageLocalStart:0,pageLocalEnd:2,sourceIds:['source'],sourceVersions:{source:saved.version}});
+    assert.equal(selection.scopeValidated,true);
+    assert.deepEqual(selection.sourceRanges,[{sourceId:'source',start:cut,end:cut+2,version:saved.version}]);
+    assert.equal(edited.slice(selection.start,selection.end),bodyText(pages[1].bodyHtml).slice(0,2));
+
+    f.restart();
+    assert.deepEqual(f.service.readingPages('u','a',1).pages.map(({id,ranges})=>({id,ranges})),pages.map(({id,ranges})=>({id,ranges})));
+  }finally{f.close();}
+});
+
 test('page can reference multiple sources and source previews do not run AI',async()=>{
   let calls=0;const f=fixture({processSource:async()=>{calls++;return {};}});try {
     f.service.createArticleSources('u','a',[ready(('あ'.repeat(99)+'。').repeat(6)),ready(('い'.repeat(99)+'。').repeat(6))]);

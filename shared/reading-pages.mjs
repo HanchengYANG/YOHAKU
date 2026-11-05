@@ -81,8 +81,14 @@ export function changedTextRange(before,after) {
   while(oldEnd>start&&newEnd>start&&before[oldEnd-1]===after[newEnd-1]){oldEnd--;newEnd--;}
   return {start,oldEnd,newEnd,delta:after.length-before.length};
 }
+export function remapReadingOffset(offset,{start,oldEnd,newEnd,delta},isEnd) {
+  if((!isEnd&&offset===0)||offset<start)return offset;
+  if(offset>=oldEnd)return offset+delta;
+  // Both pages use the same cut. A replacement belongs to the page where
+  // it starts, so a cut within it moves to its new end.
+  return offset===start?start:newEnd;
+}
 export function remapReadingRanges(pages,{sourceId,paragraphId,before,after}) {
   const change=changedTextRange(before,after);
-  const anchor=(offset,isEnd)=>!isEnd&&offset===0?0:offset<change.start?offset:offset>=change.oldEnd?offset+change.delta:isEnd?change.newEnd:change.start;
-  return pages.map(page=>({...page,ranges:(page.ranges||[]).map(range=>range.sourceId!==sourceId||(paragraphId&&range.paragraphId!==paragraphId)?{...range}:{...range,start:Math.max(0,anchor(range.start,false)),end:Math.max(0,anchor(range.end,true))})}));
+  return pages.map(page=>({...page,ranges:(page.ranges||[]).map(range=>range.sourceId!==sourceId||(paragraphId&&range.paragraphId!==paragraphId)?{...range}:{...range,start:Math.max(0,remapReadingOffset(range.start,change,false)),end:Math.max(0,remapReadingOffset(range.end,change,true))})}));
 }
