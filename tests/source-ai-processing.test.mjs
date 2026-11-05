@@ -16,7 +16,7 @@ test('来源处理为照片、正文校正、分句及两条注音路径转发�
   const check=input=>{for(const key of ['onStatus','signal','groupKey','getPriority'])assert.equal(input[key],metadata[key],key);};
   const processor=createSourceProcessor({
     recognizePhoto:async(_user,_image,options)=>{check(options);options.onStatus({state:'queued',role:'ocr'});return {text:'原文。'};},
-    execute:async(_user,role,input)=>{check(input);input.signal.throwIfAborted();input.onStatus({state:'running',role});return {value:role==='correction'?{text:'原文。'}:role==='segmentation'?{sentences:['原文。']}:{blocks:[{words:[{t:'原文',r:'げんぶん'}]}]}};}
+    execute:async(_user,role,input)=>{check(input);input.signal.throwIfAborted();input.onStatus({state:'running',role});return {value:role==='correction'?{edits:[]}:role==='segmentation'?{sentences:['原文。']}:{blocks:[{words:[{t:'原文',r:'げんぶん'}]}]}};}
   });
   await processor.processSource('u',{source:{type:'photo',original:{imageId:'image'}},step:'extract',...metadata});
   for(const step of ['correct','segment','annotate'])await processor.processSource('u',{step,bodyHtml:'<p>原文。</p>',...metadata});
@@ -48,7 +48,7 @@ for(const [name,bodyHtml] of [
   const processor=createSourceProcessor({execute:async(_user,role,input)=>{
     calls++;assert.equal(role,'correction');
     assert.equal(JSON.parse(input.prompt.split('\n目标正文：\n').at(-1)),'今日は晴れです。');
-    return {value:{text:'今日は晴です。'}};
+    return {value:{edits:[{original:'晴れ',replacement:'晴'}]}};
   }});
   const result=await processor.processSource('u',{step:'correct',source:{position:0,documentTitle:'五花より……'},bodyHtml});
   assert.equal(calls,1);assert.equal(result.requiresReview,undefined);
@@ -60,7 +60,7 @@ test('confirmed title protection preserves original marks and keeps context out 
   const processor=createSourceProcessor({execute:async(_user,_role,input)=>{
     assert.equal(JSON.parse(input.prompt.split('\n目标正文：\n').at(-1)),'今日は晴れです。');
     assert.match(input.prompt,/前の文|次の文/);assert.doesNotMatch(input.prompt,/title-sentence|question|<ruby|ごか/);
-    return {value:{text:'今日は晴です。'}};
+    return {value:{edits:[{original:'晴れ',replacement:'晴'}]}};
   }});
   const result=await processor.processSource('u',{step:'correct',source:{position:0,documentTitle:'五花より……'},bodyHtml,context:{before:'前の文',after:'次の文'}});
   assert.equal(bodyText(result.bodyHtml),'五花より……\n今日は晴です。');
@@ -79,7 +79,7 @@ test('later sources and titles without an exact whitespace-normalized match are 
   for(const source of [{position:1,documentTitle:'五花より……'},{documentTitle:'五花より……'},{position:0,documentTitle:'五花より・・・'},{position:0,documentTitle:''}]){
     let calls=0;const processor=createSourceProcessor({execute:async(_user,_role,input)=>{
       calls++;assert.equal(JSON.parse(input.prompt.split('\n目标正文：\n').at(-1)),'五花より……\n今日は晴れです。');
-      return {value:{text:'五時より……\n今日は晴です。'}};
+      return {value:{edits:[{original:'五花',replacement:'五時'},{original:'晴れ',replacement:'晴'}]}};
     }});
     const result=await processor.processSource('u',{step:'correct',source,bodyHtml:'<p>五花より……<br>今日は晴れです。</p>'});
     assert.equal(calls,1);assert.equal(bodyText(result.bodyHtml),'五時より……\n今日は晴です。');
@@ -87,7 +87,7 @@ test('later sources and titles without an exact whitespace-normalized match are 
 });
 
 test('protecting a confirmed title does not hide dangerous body deletion from review',async()=>{
-  const processor=createSourceProcessor({execute:async()=>({value:{text:'今日は晴れです。'}})});
+  const processor=createSourceProcessor({execute:async()=>({value:{edits:[{original:'\n明日は雨です。',replacement:''}]}})});
   const bodyHtml='<p data-paragraph-id="title">五花より……</p><p data-paragraph-id="first">今日は晴れです。</p><p data-paragraph-id="second">明日は雨です。</p>';
   const result=await processor.processSource('u',{step:'correct',source:{position:0,documentTitle:'五花より……'},bodyHtml});
   assert.equal(result.requiresReview,true);assert.equal(bodyText(result.bodyHtml),bodyText(bodyHtml));
@@ -100,16 +100,20 @@ const screenshotBody=`<p>${screenshotHeading}</p><p>今日は晴れです。</p>
 for(const [name,modelHeading] of [['exact','マイク・ミラーです'],['trimmed','　マイク・ミラーです ']])test(`screenshot correction restores a dropped OCR heading numeral: ${name}`,async()=>{
   const processor=createSourceProcessor({execute:async(_user,_role,input)=>{
     assert.equal(JSON.parse(input.prompt.split('\n目标正文：\n').at(-1)),bodyText(screenshotBody));
-    return {value:{text:`${modelHeading}\n今日は晴です。`}};
+    return {value:{edits:[{original:screenshotHeading,replacement:modelHeading},{original:'晴れ',replacement:'晴'}]}};
   }});
   const result=await processor.processSource('u',{step:'correct',source:{type:'screenshot',position:2},context:{firstOcrLineIsHeading:true},bodyHtml:screenshotBody});
   assert.equal(result.requiresReview,undefined);
   assert.equal(bodyText(result.bodyHtml),`${screenshotHeading}\n今日は晴です。`);
 });
 
-test('restoring a dropped screenshot heading numeral still sends an omitted paragraph to review',async()=>{
+test('restoring a dropped screenshot heading numeral still sends an explicit paragraph deletion to review',async()=>{
   const original=screenshotBody+'<p>明日は長い会議に出かける予定です。</p>';
-  const processor=createSourceProcessor({execute:async()=>({value:{text:'マイク・ミラーです\n今日は晴です。'}})});
+  const processor=createSourceProcessor({execute:async()=>({value:{edits:[
+    {original:screenshotHeading,replacement:'マイク・ミラーです'},
+    {original:'晴れ',replacement:'晴'},
+    {original:'\n明日は長い会議に出かける予定です。',replacement:''},
+  ]}})});
   const result=await processor.processSource('u',{step:'correct',source:{type:'screenshot',position:2},context:{firstOcrLineIsHeading:true},bodyHtml:original});
   assert.equal(result.requiresReview,true);
   assert.equal(bodyText(result.bodyHtml),bodyText(original));
@@ -123,7 +127,7 @@ for(const [name,type,firstOcrLineIsHeading,modelHeading] of [
   ['internal whitespace in a screenshot heading','screenshot',true,'マイク・ ミラーです'],
 ])test(`screenshot heading correction does not restore a numeral for ${name}`,async()=>{
   const corrected=`${modelHeading}\n今日は晴です。`;
-  const processor=createSourceProcessor({execute:async()=>({value:{text:corrected}})});
+  const processor=createSourceProcessor({execute:async()=>({value:{edits:[{original:screenshotHeading,replacement:modelHeading},{original:'晴れ',replacement:'晴'}]}})});
   const result=await processor.processSource('u',{step:'correct',source:{type,position:2},context:{firstOcrLineIsHeading},bodyHtml:screenshotBody});
   assert.equal(result.requiresReview,undefined);
   assert.equal(bodyText(result.bodyHtml),corrected);
@@ -138,7 +142,8 @@ test('PDF correction does not copy the preceding page tail into an unchanged dia
   const corrected=raw.replace('サン\nトス','サントス');
   let prompt;
   const processor=createSourceProcessor({execute:async(_user,_role,input)=>{
-    prompt=input.prompt;return {value:{text:'「そ'+corrected}};
+    prompt=input.prompt;
+    return {value:{edits:[{original:continuation,replacement:'「そ'+continuation},{original:'サン\nトス',replacement:'サントス'}]}};
   }});
   const result=await processor.processSource('u',{step:'correct',source:pdfSource,bodyHtml:`<p>${raw.replaceAll('\n','<br>')}</p>`,context:{before:openDialogue,previousPdfPage:true}});
   assert.equal(bodyText(result.bodyHtml),corrected);
@@ -156,7 +161,8 @@ for(const [name,source,before,original,corrected,previousPdfPage=true] of [
   ['a longer repeated phrase',pdfSource,'「じゃあ、こうしてから',continuation+'\nサントスさんの目が、もう涙でぬれていた。','「こうしてから'+continuation+'\nサントスさんの目が、もう涙でぬれていた。'],
   ['repeated sentence punctuation',pdfSource,'「彼はそう言いました。',continuation,'「。'+continuation],
 ])test(`PDF seam protection does not suppress ${name}`,async()=>{
-  const processor=createSourceProcessor({execute:async()=>({value:{text:corrected}})});
+  const edit={original:original.split('\n',1)[0],replacement:corrected.split('\n',1)[0]};
+  const processor=createSourceProcessor({execute:async()=>({value:{edits:[edit]}})});
   const result=await processor.processSource('u',{step:'correct',source,bodyHtml:`<p>${original.replaceAll('\n','<br>')}</p>`,context:{before,...(previousPdfPage?{previousPdfPage}: {})}});
   assert.equal(bodyText(result.bodyHtml),corrected);
   assert.equal(result.requiresReview,undefined);
@@ -164,7 +170,10 @@ for(const [name,source,before,original,corrected,previousPdfPage=true] of [
 
 test('protecting the PDF continuation still requires review of a deleted paragraph',async()=>{
   const original=`<p>${continuation}</p><p>馬は足にけがをしてしまうと、生き続けるのが難しくなる。</p>`;
-  const processor=createSourceProcessor({execute:async()=>({value:{text:'「そ'+continuation}})});
+  const processor=createSourceProcessor({execute:async()=>({value:{edits:[
+    {original:continuation,replacement:'「そ'+continuation},
+    {original:'\n馬は足にけがをしてしまうと、生き続けるのが難しくなる。',replacement:''},
+  ]}})});
   const result=await processor.processSource('u',{step:'correct',source:pdfSource,bodyHtml:original,context:{before:openDialogue,previousPdfPage:true}});
   assert.equal(result.requiresReview,true);
   assert.equal(bodyText(result.bodyHtml),bodyText(original));
@@ -199,17 +208,62 @@ test('成功提取的空白文字PDF原页跳过校正；空白OCR仍需人工�
   await assert.rejects(processor.processSource('u',{source:{type:'scan_pdf'},step:'correct',bodyHtml:'<p></p>'}),/手动录入/);
 });
 
-test('校正只写目标正文，相邻上下文不被保存且危险结果保留原文', async () => {
+test('校正补丁按原始位置应用，保留未提及的正文及其中的手工注音和标记',async()=>{
+  const bodyHtml='<p data-paragraph-id="first">青い空。</p><p data-paragraph-id="middle"><span data-sentence-id="kept-sentence"><mark data-qa-group-ids="kept-question"><ruby data-origin="manual">東京<rt>とうきょう</rt></ruby></mark>。</span></p><p data-paragraph-id="last">街を見た。<br>次はそのまま。</p>';
+  const processor=createSourceProcessor({execute:async(_user,role,input)=>{
+    assert.equal(role,'correction');
+    assert.deepEqual(input.schema.required,['edits']);
+    assert.equal(input.schema.additionalProperties,false);
+    assert.deepEqual([...input.schema.properties.edits.items.required].sort(),['original','replacement']);
+    assert.equal(input.schema.properties.edits.items.additionalProperties,false);
+    assert.equal(JSON.parse(input.prompt.split('\n目标正文：\n').at(-1)),bodyText(bodyHtml));
+    return {value:{edits:[{original:'街',replacement:'町'},{original:'青い',replacement:'街の青い'}]}};
+  }});
+  const result=await processor.processSource('u',{step:'correct',bodyHtml});
+  const expected='街の青い空。\n東京。\n町を見た。\n次はそのまま。',start=expected.indexOf('東京');
+  assert.equal(result.requiresReview,undefined);
+  assert.equal(result.text,expected);
+  assert.equal(bodyText(result.bodyHtml),expected);
+  assert.deepEqual(bodyRanges(result.bodyHtml).qa,[{id:'kept-question',start,end:start+2,text:'東京'}]);
+  assert.deepEqual(bodyRanges(result.bodyHtml).sentences,[{id:'kept-sentence',start,end:start+3,text:'東京。'}]);
+  assert.deepEqual(htmlToBlocks(result.bodyHtml).find(block=>block.id==='middle').segments[0],{text:'東京',reading:'とうきょう',origin:'manual'});
+});
+
+test('校正补丁有无效、不唯一或重叠的范围时整批拒绝',async()=>{
+  const bodyHtml='<p data-paragraph-id="unchanged">今日は晴れ。明日は雨。雨。あああ。</p>';
+  const input={step:'correct',bodyHtml,context:{before:'前の原頁。'}},valid={original:'晴れ',replacement:'晴'};
+  for(const [name,value] of [
+    ['旧的全文返回',{text:'今日は晴。'}],
+    ['额外的顶层字段',{edits:[valid],text:'任意改写。'}],
+    ['额外的修改字段',{edits:[valid,{original:'あああ',replacement:'あい',confidence:1}]}],
+    ['无效的替换类型',{edits:[valid,{original:'あああ',replacement:null}]}],
+    ['空的原文',{edits:[valid,{original:'',replacement:'追加'}]}],
+    ['邻页片段',{edits:[valid,{original:'前の原頁。',replacement:'前文。'}]}],
+    ['重复片段',{edits:[valid,{original:'雨',replacement:'雪'}]}],
+    ['自身重叠的重复片段',{edits:[valid,{original:'ああ',replacement:'い'}]}],
+    ['两个修改覆盖同一原文',{edits:[valid,{original:'今日は晴れ',replacement:'今日は晴'}]}],
+    ['仅存在于前一个替换结果的文字',{edits:[{original:'晴れ',replacement:'雪'},{original:'雪',replacement:'曇り'}]}],
+  ]){
+    let calls=0;
+    const processor=createSourceProcessor({execute:async()=>{calls++;return {value};}});
+    await assert.rejects(processor.processSource('u',input),{status:502},name);
+    assert.equal(calls,1,name);
+    assert.equal(input.bodyHtml,bodyHtml,name);
+  }
+});
+
+test('显式删除整句的校正补丁进入核对，相邻上下文和当前正文均保留', async () => {
   let input;
   const processor = createSourceProcessor({ execute: async (_u, role, value) => {
     assert.equal(role, 'correction'); input = value;
-    return { value: { text: '今日は晴れ。' }, execution: { role } };
+    return { value: { edits: [{ original: '明日は雨。', replacement: '' }] }, execution: { role } };
   } });
   const original = '<p data-paragraph-id="p">今日は晴れ。明日は雨。</p>';
   const result = await processor.processSource('u', { step: 'correct', bodyHtml: original, context: { before: '前の文。', after: '後の文。' } });
   assert.equal(bodyText(result.bodyHtml), '今日は晴れ。明日は雨。');
   assert.equal(bodyText(result.proposalHtml), '今日は晴れ。');
   assert.equal(result.requiresReview, true);
+  assert.equal(result.diff.reason,'校正可能删除整句正文');
   assert.match(input.prompt, /前の文/);
 });
 
@@ -314,7 +368,7 @@ test('invalid segmentation retains only the expected text, model value and execu
 test('来源注音交由混合批次服务处理，正文校正仍由独立角色完成',async()=>{
   const calls=[];
   const processor=createSourceProcessor({
-    execute:async(_user,role,input)=>{assert.equal(role,'correction');return {value:{text:'日本語。'},execution:{role}};},
+    execute:async(_user,role,input)=>{assert.equal(role,'correction');return {value:{edits:[]},execution:{role}};},
     annotateBodies:async(user,input)=>{
       calls.push({user,input});
       return {items:input.items.map(item=>({...item,bodyHtml:item.bodyHtml,uncertain:[]})),execution:{role:'annotation',annotationMode:'proofread'},metrics:{llmCalls:1}};

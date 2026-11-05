@@ -23,7 +23,9 @@ test('source correction receives the confirmed document title internally and pro
   const calls=[],metadata=[];
   const processor=createSourceProcessor({execute:async(_user,_role,input)=>{
     const text=JSON.parse(input.prompt.split('\n目标正文：\n').at(-1));calls.push(text);
-    return {value:{text:text.replace('五花','五時').replace('晴れ','晴')}};
+    const edits=[{original:'晴れ',replacement:'晴'}];
+    if(text.includes('五花'))edits.unshift({original:'五花',replacement:'五時'});
+    return {value:{edits}};
   }});
   const f=fixture({processSource:async(user,input)=>{
     if(input.step==='correct'){metadata.push(input.source);return processor.processSource(user,input);}
@@ -55,10 +57,7 @@ for(const [name,{earlier={},later={},rubyOnly=false,protect=false}] of [
   ['a clipped target start', {later:{localRange:{start:1}}}],
 ])test(`PDF seam protection uses physical source provenance: ${name}`,async()=>{
   const before='「ダーキーは足にけがをしてしまって、そ',target='れからすぐ、死んでしまいました」',contexts=[];
-  const processor=createSourceProcessor({execute:async(_user,_role,input)=>{
-    const original=JSON.parse(input.prompt.split('\n目标正文：\n').at(-1));
-    return {value:{text:'「そ'+original}};
-  }});
+  const processor=createSourceProcessor({execute:async()=>({value:{edits:[{original:'れからすぐ',replacement:'「それからすぐ'}]}})});
   const f=fixture({processSource:async(user,input)=>{
     if(input.step==='correct'){contexts.push(input.context);return processor.processSource(user,input);}
     return {bodyHtml:input.step==='segment'?applySentenceBoundaries(input.bodyHtml,[bodyText(input.bodyHtml)]):input.bodyHtml};

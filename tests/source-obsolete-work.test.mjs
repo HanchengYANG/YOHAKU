@@ -56,7 +56,7 @@ async function fixture(t, { holdSharedAnnotation = false, holdLocalText, rateLim
         response.once('close', () => { disconnected = !response.writableEnded; });
         await reply.promise;
       }
-      value = { text: text === original ? '古い本文。' : text };
+      value = { edits: text === original ? [{ original: '旧い', replacement: '古い' }] : [] };
     } else if (prompt.includes('\n输入正文：\n')) {
       const text = JSON.parse(prompt.split('\n输入正文：\n').at(-1).split('\n')[0]);
       value = { sentences: text.match(/[^。]*。|[^。]+$/gu) || [] };
@@ -73,7 +73,7 @@ async function fixture(t, { holdSharedAnnotation = false, holdLocalText, rateLim
     response.end(JSON.stringify({ model, choices: [{
       message: { role: 'assistant', content: JSON.stringify(value) }, finish_reason: 'stop',
     }] }));
-    if (value.text === '古い本文。') lateReply.resolve();
+    if (value.edits?.length) lateReply.resolve();
   });
   t.after(async () => {
     reply.resolve();

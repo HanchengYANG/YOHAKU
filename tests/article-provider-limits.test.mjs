@@ -43,7 +43,7 @@ test('正文和新问答、续问共享同篇文章的两个 HTTP 名额，其�
     }
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify({ model: 'controlled-http', choices: [{ message: { role: 'assistant',
-      content: isTest ? '{"ok":true}' : isSource ? JSON.stringify({ text }) : '测试解释。' }, finish_reason: 'stop' }] }));
+      content: isTest ? '{"ok":true}' : isSource ? '{"edits":[]}' : '测试解释。' }, finish_reason: 'stop' }] }));
   });
   upstream.listen(0, '127.0.0.1');
   await once(upstream, 'listening');

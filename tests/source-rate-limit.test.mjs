@@ -37,7 +37,7 @@ async function fixture(t, { respond,responseUsage,responseFinishReason='stop', .
     calls.push(text);
     const details = { text, calls, role, input };
     const status = await respond?.(details) || 200;
-    const output = role === 'correction' ? { text } : role === 'segmentation' ? { sentences: text.match(/[^。]*。|[^。]+$/gu) || [] } : { changes: [], uncertain: [] };
+    const output = role === 'correction' ? { edits: [] } : role === 'segmentation' ? { sentences: text.match(/[^。]*。|[^。]+$/gu) || [] } : { changes: [], uncertain: [] };
     response.writeHead(status, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify(status === 200
       ? { model: 'controlled-http', choices: [{ message: { role: 'assistant', content: JSON.stringify(output) }, finish_reason: typeof responseFinishReason==='function'?responseFinishReason(role,details):responseFinishReason }],...(responseUsage?{usage:responseUsage}:{}) }

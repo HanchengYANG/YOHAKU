@@ -52,7 +52,7 @@ test('source role results and parsing/provider failures preserve safe execution 
   const controls={usage,maxOutputTokens:32768,reasoningParameterSent:false,requestHeaders:'never-persist'};
   const f=await fixture(t,{run:async input=>{
     if(mode==='provider')throw Object.assign(new Error('provider failure'),{diagnostic:{code:'AI_INCOMPLETE_OUTPUT',category:'incomplete_output',finishReason:'length'},execution:controls});
-    return {completed:mode!=='incomplete',model:input.model,text:mode==='json'?'{':JSON.stringify(mode==='value'?{text:123}:{text:'日本語。'}),...controls};
+    return {completed:mode!=='incomplete',model:input.model,text:mode==='json'?'{':JSON.stringify(mode==='value'?{edits:123}:{edits:[]}),...controls};
   }});
   const input={step:'correct',bodyHtml:'<p>日本語。</p>'},expected={inputTokens:10,outputTokens:30,totalTokens:40,reasoningTokens:25,cachedInputTokens:0};
   const successful=await f.instance.ai.processSource(f.owner,input);assert.deepEqual(successful.execution.usage,expected);
@@ -99,7 +99,7 @@ test('本地候选准备独立于AI授权，复核才进入提供方授权检查
 test('来源步骤区分排队和执行，operationId贯穿事件和结果',async t=>{
   let release,entered;
   const gate=new Promise(resolve=>{release=resolve;}),started=new Promise(resolve=>{entered=resolve;});
-  const f=await fixture(t,{capacity:1,run:async(input,count)=>{if(count===1){entered();await gate;}return {completed:true,model:input.model,text:JSON.stringify({text:'日本語。'})};}});
+  const f=await fixture(t,{capacity:1,run:async(input,count)=>{if(count===1){entered();await gate;}return {completed:true,model:input.model,text:JSON.stringify({edits:[]})};}});
   const firstEvents=[],secondEvents=[];
   const input={step:'correct',bodyHtml:'<p>日本語。</p>',source:{type:'plain_text'}};
   const first=f.instance.ai.processSource(f.owner,{...input,onStatus:event=>firstEvents.push(event)});
@@ -152,10 +152,10 @@ test('来源步骤在调用及授权失败时保留安全诊断和执行身份',
 });
 
 test('状态回调失败不影响AI结果，JSON错误和未完成输出有独立诊断',async t=>{
-  let response={completed:true,model:'ruby',text:JSON.stringify({text:'日本語。'})};
+  let response={completed:true,model:'ruby',text:JSON.stringify({edits:[{original:'語',replacement:'文'}]})};
   const f=await fixture(t,{run:async()=>response});
   const input={step:'correct',bodyHtml:'<p>日本語。</p>',onStatus:()=>{throw new Error('closed observer');}};
-  const result=await f.instance.ai.processSource(f.owner,input);assert.equal(result.text,'日本語。');
+  const result=await f.instance.ai.processSource(f.owner,input);assert.equal(result.text,'日本文。');
   response={completed:true,model:'ruby',text:'{'};
   await assert.rejects(f.instance.ai.processSource(f.owner,input),error=>error.diagnostic.category==='invalid_json'&&!!error.execution.operationId);
   response={completed:false,model:'ruby',text:'{}'};
@@ -165,7 +165,7 @@ test('状态回调失败不影响AI结果，JSON错误和未完成输出有独�
 test('排队期间修改角色配置后，授权失败记录实际的新路线',async t=>{
   let release,entered;
   const gate=new Promise(resolve=>{release=resolve;}),started=new Promise(resolve=>{entered=resolve;});
-  const f=await fixture(t,{capacity:1,run:async input=>{entered();await gate;return {completed:true,model:input.model,text:JSON.stringify({text:'日本語。'})};}});
+  const f=await fixture(t,{capacity:1,run:async input=>{entered();await gate;return {completed:true,model:input.model,text:JSON.stringify({edits:[]})};}});
   const input={step:'correct',bodyHtml:'<p>日本語。</p>'},events=[];
   const first=f.instance.ai.processSource(f.owner,input);await started;
   const second=f.instance.ai.processSource(f.owner,{...input,onStatus:event=>events.push(event)}).catch(error=>error);

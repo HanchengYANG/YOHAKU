@@ -14,7 +14,7 @@ import { parseText } from '../shared/document.mjs';
 import { SENTENCE_SCHEMA } from '../shared/sentences.mjs';
 import { ANNOTATION_SCHEMA } from '../shared/ocr-correction.mjs';
 
-async function fixture(t,{connected=true,ndlOcr,beforeRun,chapterProposal,correctedText}={}) {
+async function fixture(t,{connected=true,ndlOcr,beforeRun,chapterProposal,correctionEdits=[]}={}) {
   const dataDir=await mkdtemp(join(tmpdir(),'yohaku-source-api-')),calls=[];
   const modelIds=['vision','correction-model','sentence-model','ruby-model','chat-model'];
   const checkedAt=new Date().toISOString();
@@ -31,7 +31,7 @@ async function fixture(t,{connected=true,ndlOcr,beforeRun,chapterProposal,correc
         else if(input.schema===SENTENCE_SCHEMA){const text=JSON.parse(input.prompt.split('输入正文：\n').at(-1).split('\n')[0]);value={sentences:text.match(/[^。]*。|[^。]+$/gu)||[text]};}
         else if(input.schema?.properties?.changes)value={changes:[],uncertain:[]};
         else if(input.schema===ANNOTATION_SCHEMA){const targets=JSON.parse(input.prompt.split('输入目标：\n').at(-1).split('\n')[0]);value={blocks:targets.map(({text})=>({words:[{t:text,r:'にほんご'}]}))};}
-        else if(input.schema){value={text:input.model==='correction-model'&&correctedText!==undefined?correctedText:JSON.parse(input.prompt.split('目标正文：\n').at(-1))};}
+        else if(input.schema?.properties?.edits)value={edits:correctionEdits};
         return {completed:true,text:value?JSON.stringify(value):'語句の説明。',model:input.model,threadId:'source-api-thread'};
       }} };
   }
@@ -299,7 +299,7 @@ test('screenshot local OCR saves real regions before provider authorization and 
 test('keeping current source text rejects stale proposals and resumes the existing task without applying AI edits',async t=>{
   const original='日本語の原文です。\n削除してはいけない本文。',proposed='日本語の原文です。';
   let extractions=0;
-  const f=await fixture(t,{correctedText:proposed,ndlOcr:{async recognize(){
+  const f=await fixture(t,{correctionEdits:[{original:'\n削除してはいけない本文。',replacement:''}],ndlOcr:{async recognize(){
     extractions++;
     return {text:original,blocks:parseText(original.replace('日本語','{日本語|ニホンゴ}'))};
   },close(){}}});

@@ -24,8 +24,10 @@ const instance=createApp({dataDir,callbackUri,aiServices:(ownerId,providerId)=>{
   const wrap=work=>async input=>{
     let target;
     try {
-      const parts=input.prompt.split('目标正文：\n');
-      if(parts.length>1)target=JSON.parse(parts.at(-1));
+      if(input.schema?.properties?.edits){
+        const parts=input.prompt.split('目标正文：\n');
+        if(parts.length>1)target=JSON.parse(parts.at(-1));
+      }
     } catch {}
     const scopes=typeof target==='string'?pendingSources.get(target):null;
     const scope=scopes?.size===1?scopes.values().next().value:null;

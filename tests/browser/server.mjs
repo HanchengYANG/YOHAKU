@@ -36,8 +36,10 @@ const runtime = {
       } else if (schema === ANNOTATION_SCHEMA) {
         const targets = JSON.parse(prompt.split('输入目标：\n').at(-1).split('\n')[0]);
         value = { blocks: targets.map(({ text }) => ({ words: [{ t: text, r: null }] })) };
-      } else if (schema?.properties?.text && prompt.includes('目标正文：\n')) {
-        value = { text: JSON.parse(prompt.split('目标正文：\n').at(-1)) };
+      } else if (schema?.properties?.edits && prompt.includes('目标正文：\n')) {
+        const target = JSON.parse(prompt.split('目标正文：\n').at(-1));
+        if (typeof target !== "string") throw new Error("Invalid correction fixture input.");
+        value = { edits: [] };
       } else throw new Error('Base fixture only supports source text preparation.');
       return { completed: true, text: JSON.stringify(value), model: "BASE-SEGMENTATION-TEST-DOUBLE" };
     } finally { busy = false; }
