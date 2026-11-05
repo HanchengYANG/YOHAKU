@@ -185,6 +185,24 @@ test("preparation detail shows dependency and execution states without running d
   await page.screenshot({path:`artifacts/unified-task-detail-${info.project.name}.png`,fullPage:true});
 });
 
+for(const type of ["import","preparation","image"])test(`${type} task duration is labeled as elapsed lifecycle time without changing recorded execution time`,async({page})=>{
+  const state=await fixture(page);
+  state.task={...state.task,type,status:"completed",state:type==="image"?"ready":"completed",archived:true,createdAt,updatedAt:"2026-11-04T11:00:00Z",
+    ...(type==="image"?{startedAt:createdAt,completedAt:"2026-11-04T10:00:03Z",appliedDocumentId:"doc",items:[{id:"photo",name:"原图",hasRecognition:true,hasAnnotation:true}],counts:{total:1,uploaded:1,completed:1}}:{}),
+    steps:[{id:"correct",title:"正文校对",status:"completed",execution:{queueMs:1200,elapsedMs:2000}}]};
+  const expected=type==="image"?"3 秒":"60 分 0 秒";
+  await page.goto("/#tasks");
+  const card=page.locator(`[data-task-id="${state.task.id}"]`);
+  await expect(card).toContainText(`历时 ${expected}`);
+  await page.goto("/#tasks/prepare-14");
+  const detail=page.getByRole("region",{name:"任务状态",exact:true});
+  await expect(detail.locator(".task-statistics")).toContainText(`历时 ${expected}`);
+  if(type!=="image"){
+    await expect(detail).toContainText("排队 1 秒");await expect(detail).toContainText("执行 2 秒");
+    await expect(detail).toContainText(/历时.*排队.*核对/);
+  }
+});
+
 test("timeout task retries only via server capability and latest version",async({page})=>{
   const state=await fixture(page);state.task={...state.task,status:"timeout",state:"timeout",canRetry:true,canDelete:true,error:"远端步骤执行超时，成功校对已保留。",steps:[{id:"correct",title:"正文校对",status:"completed"},{id:"segment",title:"分句",status:"timeout",error:"执行超过180秒"}]};
   await page.goto("/#tasks/prepare-14");

@@ -752,13 +752,19 @@ test("授权设置主流程（OAuth 为明确测试替身，不向官方发送�
   await expect(page.getByText("尚未授权", { exact: true })).toBeVisible();
 });
 
-test("后台完成时间持久保存，打开校对原图的加载不延长任务用时", async ({ page }) => {
-  await enableTestAccount(page); await openImageImport(page);
+test("后台完成时间持久保存，打开校对原图的加载不延长任务历时", async ({ page }) => {
+  await enableTestAccount(page);
+  const response = await page.request.post("/api/image-tasks", { data: { idempotencyKey: `completion-duration-${Date.now()}` } });
+  expect(response.ok()).toBe(true);
+  const draft = await response.json(); activeTasks.add(draft.id);
+  // Existing image drafts remain resumable through their task link.
+  await page.goto(`/#tasks/${draft.id}`);
+  await expect(page.getByRole("heading", { name: "导入照片或截图", exact: true })).toBeVisible();
   await setImageControls({ delayMs: 120 });
   await page.getByLabel("选择日语图片", { exact: true }).setInputFiles(imagePath);
   const id = await submitImageTask(page), completed = await waitTask(page, id);
   expect(Date.parse(completed.completedAt)).toBeGreaterThan(Date.parse(completed.startedAt));
-  await expect(page.locator(".task-statistics")).toContainText("用时");
+  await expect(page.locator(".task-statistics")).toContainText("历时");
   let releaseImage;
   const gate = new Promise((resolve) => { releaseImage = resolve; });
   await page.route(/\/api\/images\/[^/]+\/raw(?:\?.*)?$/, async (route) => { await gate; await route.continue(); });

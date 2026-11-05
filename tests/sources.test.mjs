@@ -1075,3 +1075,57 @@ test('task history retains successful correction timing across the corrected bod
     assert.equal(correction.inputVersion,1);assert.equal(correction.version,2);
   }finally{f.close();}
 });
+
+for(const localStep of ['extract','annotate_local'])for(const outcome of ['completed','failed'])test(`${localStep} ${outcome} persists actual local execution separately from resource queue time`,async()=>{
+  let f;
+  const localTiming=(onStatus,itemId)=>{
+    onStatus({state:'queued',queuedAt:new Date(1000).toISOString(),queueMs:0,elapsedMs:0,...(itemId?{itemId}:{})});
+    f.advance(3000);
+    onStatus({state:'running',queuedAt:new Date(1000).toISOString(),startedAt:new Date(4000).toISOString(),queueMs:3000,elapsedMs:0,...(itemId?{itemId}:{})});
+    f.advance(8000);
+    if(outcome==='failed')throw Object.assign(new Error('controlled local failure'),{expose:true});
+  };
+  f=fixture({processSource:async(_user,input)=>{
+    if(input.step==='extract'){localTiming(input.onStatus);return {bodyHtml:html('日本語。')};}
+    return {bodyHtml:input.step==='segment'?applySentenceBoundaries(input.bodyHtml,[bodyText(input.bodyHtml)]):input.bodyHtml};
+  },...(localStep==='annotate_local'?{
+    prepareAnnotationBodies:async(items,{onStatus})=>{localTiming(onStatus,items[0].id);return {items};},
+    proofreadAnnotationBodies:async(_user,{prepared})=>({items:prepared.items,execution:{role:'annotation',queueMs:50,elapsedMs:100}})
+  }:{})});
+  try{
+    f.service.createArticleSources('u','a',[localStep==='extract'?{id:'source',type:'screenshot'}:{id:'source',type:'text',text:'日本語。',needsCorrection:false}]);
+    f.service.heartbeat('u','a',{index:0});await f.service.drain();
+    const attempt=f.database.prepare('SELECT * FROM source_step_attempts WHERE step LIKE ? ORDER BY rowid LIMIT 1').get(localStep+'%'),execution=JSON.parse(attempt.execution_json);
+    assert.equal(attempt.state,outcome);assert.equal(execution.queueMs,3000);assert.equal(execution.elapsedMs,8000);
+    assert.equal(Date.parse(attempt.finished_at)-Date.parse(attempt.started_at),8000);
+  }finally{f.close();}
+});
+
+test('a local failure while still waiting records queue time without inventing execution time',async()=>{
+  let f;f=fixture({processSource:async(_user,input)=>{
+    input.onStatus({state:'queued',queuedAt:new Date(1000).toISOString(),queueMs:0,elapsedMs:0});f.advance(5000);throw new Error('queue stopped');
+  }});
+  try{
+    f.service.createArticleSources('u','a',[{id:'source',type:'screenshot'}]);f.service.heartbeat('u','a',{index:0});await f.service.drain();
+    const attempt=f.database.prepare("SELECT * FROM source_step_attempts WHERE step='extract'").get(),execution=JSON.parse(attempt.execution_json);
+    assert.equal(attempt.state,'failed');assert.equal(attempt.started_at,null);assert.equal(execution.queueMs,5000);assert.equal(execution.elapsedMs,0);
+  }finally{f.close();}
+});
+
+for(const elapsedMs of [1200,0])test(`final remote timing ${elapsedMs} remains authoritative even when processing wall time is much longer`,async()=>{
+  let f;const timing={role:'correction',providerId:'api_base',model:'configured',queueMs:700,elapsedMs,retryWaitMs:300,retryCount:1};
+  f=fixture({processSource:async(_user,input)=>{
+    if(input.step==='correct'){
+      input.onStatus({state:'queued',queuedAt:new Date(1000).toISOString(),queueMs:0,elapsedMs:0});f.advance(5000);
+      input.onStatus({state:'running',queuedAt:new Date(1000).toISOString(),startedAt:new Date(6000).toISOString(),queueMs:5000,elapsedMs:0});f.advance(9000);
+      return {bodyHtml:input.bodyHtml,execution:timing};
+    }
+    return {bodyHtml:input.step==='segment'?applySentenceBoundaries(input.bodyHtml,[bodyText(input.bodyHtml)]):input.bodyHtml};
+  }});
+  try{
+    f.service.createArticleSources('u','a',[{id:'source',type:'text',text:'原文。'}]);f.service.heartbeat('u','a',{index:0});await f.service.drain();
+    const attempt=f.database.prepare("SELECT * FROM source_step_attempts WHERE step='correct'").get(),execution=JSON.parse(attempt.execution_json);
+    for(const [key,value] of Object.entries(timing))assert.equal(execution[key],value,key);
+    assert.equal(Date.parse(attempt.finished_at)-Date.parse(attempt.started_at),9000);
+  }finally{f.close();}
+});

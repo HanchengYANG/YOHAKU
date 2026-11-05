@@ -191,8 +191,13 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
       if(closed)return;
       const attempt=database.prepare('SELECT * FROM source_step_attempts WHERE id=?').get(id);
       if(!attempt||!['queued','running','retry_wait'].includes(attempt.state))return;
-      const execution={...decode(attempt.execution_json,{}),...executionMetadata(value?.execution)},finished=stamp();
+      const finalExecution=executionMetadata(value?.execution),execution={...decode(attempt.execution_json,{}),...finalExecution},finished=stamp();
       const startedAt=execution.startedAt||attempt.started_at,queuedAt=execution.queuedAt||attempt.queued_at;
+      const counter={running:'elapsedMs',queued:'queueMs',retry_wait:'retryWaitMs'}[attempt.state];
+      if(counter&&!Number.isFinite(finalExecution[counter])){
+        const updatedAt=Date.parse(attempt.updated_at);
+        if(Number.isFinite(updatedAt))execution[counter]=(Number.isFinite(execution[counter])?execution[counter]:0)+Math.max(0,now()-updatedAt);
+      }
       if(!Number.isFinite(execution.elapsedMs)&&startedAt)execution.elapsedMs=Math.max(0,now()-Date.parse(startedAt));
       const diagnostic=['failed','requires_review'].includes(state)?diagnosticForError(value):null;
       const message=state==='failed'?(value?.expose&&typeof value.message==='string'?value.message.slice(0,500):'来源处理失败，请重试或查看诊断信息。'):state==='requires_review'?'正文出现较大改动，请核对差异。':null;

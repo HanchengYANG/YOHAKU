@@ -358,7 +358,13 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
       }else if(asBook&&isPdf(type)){
         for(const chapter of chapters){const article=createImportedArticle(req.user.id,{title:chapter.title,kind:'book',bookId});attach(article,descriptors(draft,draft.files[0],type,chapter));}
       }else if(asBook&&type==='epub'){
-        for(const file of draft.files)for(const chapter of file.info.chapters||[]){const article=createImportedArticle(req.user.id,{title:chapter.title,kind:'book',bookId});attach(article,descriptors(draft,file,type,{chapter}));}
+        for(const file of draft.files)for(const chapter of file.info.chapters||[]){
+          const values=descriptors(draft,file,type,{chapter});
+          // Image-only cover/navigation spines have no extracted body groups.
+          // Keep them in the original EPUB, without creating an empty article.
+          if(!values.length)continue;
+          const article=createImportedArticle(req.user.id,{title:chapter.title,kind:'book',bookId});attach(article,values);
+        }
         if(!created.length)throw fail(422,'EPUB 章节尚未提取成功，请检查解析环境后重新上传。');
       }else{
         const article=createImportedArticle(req.user.id,{title,kind:bookId?'book':'article',bookId});
@@ -382,17 +388,18 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
   }
   function taskFor(userId,id){
     const draft=taskDraft(userId,id),processing=draft.chapterProcessing||{},inspection=draft.inspectionProcessing||{},parseErrors=draft.files.filter(file=>file.info?.error);
+    const pageTask=isPdf(draft.detectedType)&&!!(draft.chapterAttempted||draft.chapterProcessing);
     const status=draft.status==='confirmed'?'completed':['queued','running'].includes(inspection.status)?inspection.status:
       parseErrors.length?(parseErrors.some(file=>file.inspection?.status==='timeout')?'timeout':'failed'):
       ['failed','timeout'].includes(inspection.status)?inspection.status:
       ['failed','timeout'].includes(processing.status)?processing.status:['extracting','proposing'].includes(processing.status)?'running':
       processing.status==='queued'?'queued':processing.status==='done'?'requires_review':'draft';
     const total=processing.totalPages||draft.files[0]?.info?.pageCount||draft.files.length,completed=processing.completedPages||0;
-    const steps=[{id:'extract',step:'extract',title:isPdf(draft.detectedType)?'本地 PDF 提取':'文件解析',
-      status:parseErrors.length||['queued','running'].includes(inspection.status)?'dependency_wait':completed===total||!isPdf(draft.detectedType)?'completed':processing.status==='extracting'?'running':['failed','timeout'].includes(status)?status:'dependency_wait',
-      progress:{completed,total,unit:isPdf(draft.detectedType)?'page':'file'},startedAt:processing.startedAt,error:completed<total?draft.chapterError:null,
-      ...(processing.startedAt&&processing.extractionFinishedAt?{execution:{elapsedMs:Date.parse(processing.extractionFinishedAt)-Date.parse(processing.startedAt)}}:{})}];
-    if(isPdf(draft.detectedType)){
+    const steps=pageTask?[{id:'extract',step:'extract',title:'本地 PDF 提取',
+      status:parseErrors.length||['queued','running'].includes(inspection.status)?'dependency_wait':completed===total?'completed':processing.status==='extracting'?'running':['failed','timeout'].includes(status)?status:'dependency_wait',
+      progress:{completed,total,unit:'page'},startedAt:processing.startedAt,error:completed<total?draft.chapterError:null,
+      ...(processing.startedAt&&processing.extractionFinishedAt?{execution:{elapsedMs:Date.parse(processing.extractionFinishedAt)-Date.parse(processing.startedAt)}}:{})}]:[];
+    if(pageTask){
       const type=processing.type||draft.detectedType,path=`$.byType.${type}`;
       const cached=new Map(database.prepare('SELECT page,created_at,json_type(result_json,?) AS cached,json_extract(result_json,?) AS elapsed_ms FROM import_page_extractions WHERE import_id=? AND file_id=?')
         .all(path,path+'.execution.elapsedMs',draft.id,draft.files[0].id).filter(row=>row.cached).map(row=>[row.page,row]));
@@ -400,21 +407,24 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
         status:row?'completed':processing.status==='extracting'&&page===completed+1?'running':['failed','timeout'].includes(status)&&page===completed+1?status:'dependency_wait',
         ...(row?{finishedAt:row.created_at,execution:row.elapsed_ms==null?{}:{elapsedMs:row.elapsed_ms}}:{}),...(page===completed+1?{error:draft.chapterError}:{}),};});
     }
-    if(isPdf(draft.detectedType))steps.push({id:'chapters',step:'chapters',title:'分章核对',status:processing.status==='done'?'completed':
+    if(pageTask)steps.push({id:'chapters',step:'chapters',title:'分章核对',status:processing.status==='done'?'completed':
       processing.status==='proposing'?(processing.providerState==='queued'?'resource_wait':'running'):completed===total&&['failed','timeout'].includes(status)?status:'dependency_wait',
       execution:draft.execution||processing.execution,error:completed===total?draft.chapterError:null,
       startedAt:processing.proposalStartedAt,finishedAt:processing.finishedAt});
-    const parseSteps=draft.files.map(file=>({id:`parse:${file.id}`,step:'parse',title:file.name,status:file.inspection?.status||(file.info?.error?'failed':'completed'),
+    const parseSteps=draft.files.map(file=>({id:`parse:${file.id}`,step:'parse',title:file.name,status:file.info?.error?(file.inspection?.status==='timeout'?'timeout':'failed'):file.inspection?.status||'completed',
       execution:file.inspection?.execution,error:file.info?.error||null,finishedAt:file.inspection?.finishedAt}));
     steps.unshift({id:'parse',step:'parse',title:'原始文件解析',status:['queued','running'].includes(inspection.status)?inspection.status:parseErrors.some(file=>file.inspection?.status==='timeout')?'timeout':parseErrors.length?'failed':inspection.status==='failed'?'failed':'completed',
       children:parseSteps,error:inspection.error||parseErrors[0]?.info.error||null,progress:{completed:parseSteps.filter(step=>step.status==='completed').length,total:parseSteps.length,unit:'file'}});
+    steps.push({id:'confirm',step:'confirm',title:'确认导入',status:draft.status==='confirmed'?'completed':parseErrors.length||['queued','running','failed','timeout'].includes(inspection.status)||['queued','extracting','proposing'].includes(processing.status)?'dependency_wait':'requires_review'});
+    const progress=pageTask&&!parseErrors.length&&!['queued','running'].includes(inspection.status)?{completed,total,unit:'page'}:
+      {completed:parseSteps.filter(step=>step.status==='completed').length+(draft.status==='confirmed'?1:0),total:parseSteps.length+1,unit:'step'};
     return {id,type:'import',importId:draft.id,generation:draft.generation,version:draft.version,title:draft.title,
       status:processing.status==='proposing'&&processing.providerState==='queued'?'resource_wait':status,state:status,createdAt:database.prepare('SELECT created_at FROM import_drafts WHERE id=?').get(draft.id).created_at,
       updatedAt:database.prepare('SELECT updated_at FROM import_drafts WHERE id=?').get(draft.id).updated_at,
       documentId:draft.result?.firstDocumentId||null,bookId:draft.result?.bookId||draft.context?.bookId||null,
       archived:draft.status==='confirmed',canRetry:['failed','timeout'].includes(status)&&!jobs.has(draft.id),
       canDelete:['failed','timeout'].includes(status)&&!jobs.has(draft.id),canOpenResult:true,
-      progress:parseErrors.length||['queued','running'].includes(inspection.status)?{completed:parseSteps.filter(step=>step.status==='completed').length,total:parseSteps.length,unit:'file'}:{completed,total,unit:isPdf(draft.detectedType)?'page':'file'},steps,error:parseErrors[0]?.info.error||inspection.error||draft.chapterError||null,execution:draft.execution,
+      progress,steps,error:parseErrors[0]?.info.error||inspection.error||draft.chapterError||null,execution:draft.execution,
       files:draft.files.map(publicFile),draft:present(draft)};
   }
   const taskAdapter={type:'import',

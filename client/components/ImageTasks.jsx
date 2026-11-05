@@ -72,7 +72,8 @@ function BackgroundTaskDetail({task,busy,error,onBack,onDocumentOpen,onImportOpe
       <span className={`task-state is-${status}`}>{taskStateLabel(task)}</span>
       <p className="task-status-copy" role="status">{message}</p>
       {errorMessage(task.error) && <p className="task-item-error" role="alert">{errorMessage(task.error)}</p>}
-      <div className="task-statistics"><span>{taskSummary(task)}</span>{taskDuration(task) && <span>用时 <strong>{taskDuration(task)}</strong></span>}</div>
+      <div className="task-statistics"><span>{taskSummary(task)}</span>{taskDuration(task) && <span>历时 <strong>{taskDuration(task)}</strong></span>}</div>
+      <p className="task-note">历时可能包含排队、依赖等待和人工核对，执行耗时见各步骤。</p>
       <ExecutionTiming execution={task.execution} />
       <ExecutionDetails execution={task.execution} />
       <div className="task-actions">
@@ -107,7 +108,7 @@ export function TaskList({ onOpen, onNew, onDocumentOpen }) {
         <div className="task-card-main"><span className="task-type">{taskTypeLabel(task)}</span><span className={`task-state is-${task.appliedDocumentId ? "saved" : taskStatus(task)}`}>{taskStateLabel(task)}</span><h2><button className="task-title-button" type="button" onClick={() => onOpen(task.id)}>{taskDisplayName(task)}</button></h2>
           <p>{taskSummary(task)}</p>
           {segmentation && <p data-task-phase="segment" data-status-kind={segmentation.statusKind}>{segmentation.status}</p>}
-          <small>{dateLabel(task.submittedAt || task.createdAt)}{task.state !== "draft" && taskDuration(task) ? ` · 用时 ${taskDuration(task)}` : ""}</small></div>
+          <small>{dateLabel(task.submittedAt || task.createdAt)}{task.state !== "draft" && taskDuration(task) ? ` · 历时 ${taskDuration(task)}` : ""}</small></div>
         <button className="button subtle" type="button" onClick={() => documentId ? onDocumentOpen?.(documentId) : onOpen(task.id)}>{documentId ? "打开文章" : "查看任务"}<Icon name="arrow" size={16} /></button>
       </article>; })}
     </div>
@@ -211,7 +212,7 @@ export function TaskDetail({ taskId, onOpenDraft, onImportOpen, onReady, onBack,
     {actionError && <div className="stage2-error" role="alert">{actionError}</div>}
     {task && <>
       <div className="task-status-panel"><span className={`task-state is-${task.appliedDocumentId ? "saved" : taskStatus(task)}`}>{taskStateLabel(task)}</span><p className="task-status-copy" role="status">{task.appliedDocumentId ? "结果已保存，任务已自动归档。可打开文章继续阅读或校对。" : manualStep ? taskStatus(manualStep)==="queued" ? "当前手动注音正在等待执行资源，已完成结果会保留。" : "当前手动注音仍在后台执行，完成后可继续校对。已完成结果会保留。" : task.state === "ready" ? "识别、注音与整批分句均已完成，结果已保存为待校对草稿。校对并保存到文章后，任务会自动归档。" : task.state === "blocked" ? task.blockedReason || task.lastError || "等待网站 AI 恢复授权后继续处理。" : task.state === "needs_attention" ? isSegmenting ? "整批分句未完成，识别与注音结果已保留。可重试分句、人工处理或删除任务。" : "任务出错，已上传图片与成功结果已保留。可重试未完成步骤、人工处理或删除任务。" : ["paused", "cancelled"].includes(task.state) ? "此前暂停的任务保留了原图及已完成结果，可继续处理或人工校对。" : isSegmenting ? "图片识别与注音已完成，正在对整批正文分句。任务完成后才能开始校对，可以离开此页面等待。" : "任务已提交，可以离开此页面。锁屏、刷新或换设备不会取消任务。"}</p>
-        <div className="task-statistics"><span>图片 <strong>{counts.total}</strong> 张</span><span>已注音 <strong>{counts.completed}</strong> 张</span>{counts.failed > 0 && <span>待处理 <strong>{counts.failed}</strong> 张</span>}<span>用时 <strong>{taskDuration(task)}</strong></span></div>
+        <div className="task-statistics"><span>图片 <strong>{counts.total}</strong> 张</span><span>已注音 <strong>{counts.completed}</strong> 张</span>{counts.failed > 0 && <span>待处理 <strong>{counts.failed}</strong> 张</span>}<span>历时 <strong>{taskDuration(task)}</strong></span></div>
         {currentItem && <p className="task-current" role="status">当前：{currentItem.name || `照片 ${items.indexOf(currentItem) + 1}`} · {taskItemState(currentItem).status}</p>}
         {segmentation && <p className="task-current" role="status" data-task-phase="segment" data-status-kind={segmentation.statusKind}>{segmentation.status}</p>}
         {isSegmenting && task.segmentation?.error && <p className="task-item-error">{task.segmentation.error}</p>}

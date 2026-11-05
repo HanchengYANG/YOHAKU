@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { attachImportRoutes } from '../server/imports.mjs';
 import { renderImportedSource,inspectImportFile } from '../server/import-parsers.mjs';
 import { attachTaskRoutes } from '../server/tasks.mjs';
+import { execFileSync } from 'node:child_process';
 
 async function fixture(t,{proposal,extractChapterPage,renderSourcePreview,inspectFile}={}) {
   const storageDir=await mkdtemp(join(tmpdir(),'yohaku-import-test-'));
@@ -300,4 +301,60 @@ test('PDF page preview validates ownership, file type and actual integer page be
   const text=await f.request('/api/imports','POST',{text:'原文。'});
   assert.equal((await f.request(`/api/imports/${text.data.id}/files/${text.data.files[0].id}/pages/1`)).status,400);
   assert.equal(renders,0);assert.equal(f.extractions.length,0);assert.equal(f.proposals.length,0);
+});
+
+function progressEpub(){return execFileSync('python3',['-c',`import io,sys
+from zipfile import ZipFile
+b=io.BytesIO()
+with ZipFile(b,'w') as z:
+ z.writestr('mimetype','application/epub+zip')
+ z.writestr('META-INF/container.xml','<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>')
+ z.writestr('content.opf','<package><manifest><item id="c" href="c.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c"/></spine></package>')
+ z.writestr('c.xhtml','<html><head><title>章</title></head><body><p>日本語の原文。</p></body></html>')
+sys.stdout.buffer.write(b.getvalue())`]);}
+
+for(const type of ['photo','epub','text','scan_pdf'])test(`${type} import progress counts parsed files and confirmation without claiming source preparation`,async t=>{
+  const f=await fixture(t),count=type==='photo'?2:1;
+  let staged;
+  if(type==='text')staged=await f.request('/api/imports','POST',{text:'原文。',title:'資料'});
+  else{
+    const form=new FormData(),bytes=type==='epub'?progressEpub():type==='scan_pdf'?blankPdf(3):Buffer.from([137,80,78,71,13,10,26,10]);
+    for(let index=0;index<count;index++)form.append('files',new Blob([bytes],{type:type==='epub'?'application/epub+zip':type==='scan_pdf'?'application/pdf':'image/png'}),`${index}.${type==='epub'?'epub':type==='scan_pdf'?'pdf':'png'}`);
+    staged=await f.request('/api/imports','POST',form);
+  }
+  assert.equal(staged.status,201);const id=staged.data.id;
+  const draft=(await f.request(`/api/tasks/${id}`)).data;
+  assert.equal(draft.status,'draft');assert.equal(draft.archived,false);assert.deepEqual(draft.progress,{completed:count,total:count+1,unit:'step'});
+  assert.equal(draft.steps.find(step=>step.step==='confirm').status,'requires_review');
+  assert.equal(draft.steps.some(step=>step.step==='extract'),false,'on-demand source extraction is a separate task');
+  const saved=await f.request(`/api/imports/${id}/confirm`,'POST',{type,title:'資料',asBook:type==='epub'});assert.equal(saved.status,201);
+  const archived=(await f.request(`/api/tasks/${id}`)).data;
+  assert.equal(archived.status,'completed');assert.equal(archived.archived,true);assert.deepEqual(archived.progress,{completed:count+1,total:count+1,unit:'step'});
+  assert.equal(archived.steps.find(step=>step.step==='confirm').status,'completed');
+  assert.ok(f.attached.flatMap(item=>item.values).every(source=>source.status!=='ready'),'import completion must not mark source correction/annotation ready');
+  assert.equal(f.extractions.length,0);assert.equal(f.proposals.length,0);
+});
+
+test('a failed EPUB parse does not count parsing or confirmation as completed',async t=>{
+  const f=await fixture(t,{inspectFile:async()=>{throw Object.assign(new Error('parser unavailable'),{status:503,expose:true});}}),form=new FormData();
+  form.append('files',new Blob([progressEpub()],{type:'application/epub+zip'}),'book.epub');
+  const staged=await f.request('/api/imports','POST',form);assert.equal(staged.status,201);
+  const task=(await f.request(`/api/tasks/${staged.data.id}`)).data;
+  assert.equal(task.status,'failed');assert.equal(task.archived,false);assert.deepEqual(task.progress,{completed:0,total:2,unit:'step'});
+  assert.equal(task.steps.find(step=>step.step==='parse').status,'failed');assert.equal(task.steps.find(step=>step.step==='confirm').status,'dependency_wait');assert.equal(f.createCalls,0);
+});
+
+test('PDF chapter extraction progress stays page-based and reports partial OCR checkpoints',async t=>{
+  let release,entered;const gate=new Promise(resolve=>release=resolve),started=new Promise(resolve=>entered=resolve);t.after(()=>release());
+  const f=await fixture(t,{extractChapterPage:async source=>{if(source.original.page===2){entered();await gate;}return{text:'原文。'};}}),form=new FormData();
+  form.append('files',new Blob([blankPdf(3)],{type:'application/pdf'}),'book.pdf');
+  const staged=await f.request('/api/imports','POST',form),path=`/api/imports/${staged.data.id}`;
+  assert.equal((await f.request(path+'/chapters','POST',{type:'scan_pdf'})).status,202);await started;
+  const partial=(await f.request(`/api/tasks/${staged.data.id}`)).data;
+  assert.equal(partial.status,'running');assert.deepEqual(partial.progress,{completed:1,total:3,unit:'page'});assert.equal(partial.archived,false);
+  assert.deepEqual(partial.steps.find(step=>step.step==='extract').children.map(step=>step.status),['completed','running','dependency_wait']);
+  release();const completed=await f.waitChapters(path);
+  const review=(await f.request(`/api/tasks/${staged.data.id}`)).data;assert.equal(review.status,'requires_review');assert.deepEqual(review.progress,{completed:3,total:3,unit:'page'});assert.equal(review.archived,false);
+  assert.equal((await f.request(path+'/confirm','POST',{type:'scan_pdf',title:'本',asBook:true,chapters:completed.data.chapters})).status,201);
+  const saved=(await f.request(`/api/tasks/${staged.data.id}`)).data;assert.equal(saved.archived,true);assert.deepEqual(saved.progress,{completed:3,total:3,unit:'page'});
 });

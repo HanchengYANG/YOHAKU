@@ -138,7 +138,7 @@ export default function PagedReader({ document, active = true, onEditSources, on
         </div>}
         <p role={preparation.errorMessage ? "alert" : undefined}>{emptyComplete ? "可在校对正文中补充内容。" : preparation.errorMessage || (preparation.state === "requires_review" ? "请进入校对正文查看差异并确认。" : preparation.state === "editing" ? "当前来源正在人工编辑，保存后继续准备。" : "离开页面也会继续准备，完成后自动显示正文。")}</p>
         {diagnostics?.current && <details className="reading-diagnostics"><summary>处理详情</summary><DiagnosticFacts record={diagnostics.current} /></details>}
-        <div className="source-actions">{!emptyComplete && <button className="button secondary" onClick={() => {retryPending.current = true;setRetry((value) => value + 1);}}>重试准备</button>}
+        <div className="source-actions">{!emptyComplete && !preparation.busy && <button className="button secondary" onClick={() => {retryPending.current = true;setRetry((value) => value + 1);}}>重试准备</button>}
           {taskId && <a className="button subtle" href={`#tasks/${encodeURIComponent(taskId)}`}>查看后台任务</a>}
           <button className="button subtle" onClick={() => onEditSources(preparationSourceIds)}>校对正文</button></div>
       </section>}

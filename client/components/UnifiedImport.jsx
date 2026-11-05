@@ -47,6 +47,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [mode, setMode] = useState(initialText ? "text" : "files");
+  const fileInput = useRef(null);
   const pasted = useRef([]);
   const loadedContext = useRef(null);
   const dirty = () => onDirty?.(true);
@@ -143,6 +144,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
       if (mode === "text") result = await api("/imports", {method:"POST",body:JSON.stringify({text,title,bookId:initialBookId || undefined,targetId:initialTargetId || undefined})});
       else {
         const body = new FormData(); files.forEach((file) => body.append("files",file));
+        body.append("title",title);
         if (initialBookId) body.append("bookId",initialBookId);
         if (initialTargetId) body.append("targetId",initialTargetId);
         result = await readApiResult(await fetch("/api/imports", {method:"POST",body}));
@@ -193,18 +195,20 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
         </div>)}
       </section>}
       <div className="source-tabs" role="tablist" aria-label="导入方式">
-        <button role="tab" aria-selected={mode === "files"} className="button secondary" onClick={() => setMode("files")}>上传或粘贴文件</button>
-        <button role="tab" aria-selected={mode === "text"} className="button secondary" onClick={() => setMode("text")}>粘贴文字</button>
+        <button role="tab" aria-selected={mode === "files"} className="button secondary" disabled={busy} onClick={() => setMode("files")}>上传或粘贴文件</button>
+        <button role="tab" aria-selected={mode === "text"} className="button secondary" disabled={busy} onClick={() => setMode("text")}>粘贴文字</button>
       </div>
       <label className="source-field">资料标题<input value={title} disabled={busy} maxLength={160} onChange={(e) => {setTitle(e.target.value);dirty();}} /></label>
       {mode === "text" ? <label className="source-field">原文<textarea aria-label="导入原文" rows={14} disabled={busy} value={text} onChange={(e) => {setText(e.target.value);dirty();}} /></label>
         : <div className="source-file-drop" tabIndex={0} aria-label="上传或粘贴来源文件" onPaste={(event) => {
+          if (busy) return;
           const images = [...event.clipboardData.files];
-          if (images.length) { event.preventDefault(); pasted.current = [...pasted.current,...images];setFiles((current) => [...current,...images]);dirty(); }
+          if (images.length) { event.preventDefault(); pasted.current = [...pasted.current,...images];setFiles((current) => [...current,...images]);setError("");dirty(); }
         }}>
-          <label className="source-field">选择文件（一次仅支持同一类型）<input aria-label="选择来源文件" type="file" disabled={busy} multiple accept="image/png,image/jpeg,image/webp,application/pdf,application/epub+zip,text/plain,.txt,.epub,.pdf" onChange={(e) => {setFiles([...e.target.files]);dirty();}} /></label>
+          <div className="source-field"><span>选择文件（一次仅支持同一类型）</span><div><button type="button" className="button secondary" disabled={busy} onClick={() => fileInput.current?.click()}>从设备选择文件</button></div></div>
+          <input ref={fileInput} className="sr-only" tabIndex={-1} aria-label="选择来源文件" type="file" disabled={busy} multiple accept="image/png,image/jpeg,image/webp,application/pdf,application/epub+zip,text/plain,.txt,.epub,.pdf" onChange={(e) => {const selected = [...e.currentTarget.files];e.currentTarget.value = "";setFiles(selected);if(selected.length)setError("");dirty();}} />
           <p>也可点击此处后粘贴截图。图片可按顺序一次导入多张。</p>
-          {files.length > 0 && <ol className="source-file-list">{files.map((file,index) => <li key={`${index}-${file.name}`}>{file.name}<button type="button" className="text-button" aria-label={`移除 ${file.name}`} onClick={() => setFiles(files.filter((_,i) => i !== index))}>移除</button></li>)}</ol>}
+          {files.length > 0 && <ol className="source-file-list">{files.map((file,index) => <li key={`${index}-${file.name}`}>{file.name}<button type="button" className="text-button" disabled={busy} aria-label={`移除 ${file.name}`} onClick={() => setFiles(files.filter((_,i) => i !== index))}>移除</button></li>)}</ol>}
         </div>}
       <button className="button primary" disabled={busy || (mode === "text" ? !text.trim() : !files.length)} onClick={stage}>{busy ? "正在保存原始资料…" : "继续确认类型"}</button>
     </> : <>
@@ -253,7 +257,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
           </div>)}
         </section>}
       </div>}
-      <div className="source-actions"><button className="button subtle" disabled={busy} onClick={() => {forgetDraft();setDraft(null);setChapters([]);setExclusions([]);}}>重新选择</button>
+      <div className="source-actions"><button className="button subtle" disabled={busy} onClick={() => {forgetDraft();setDraft(null);setChapters([]);setExclusions([]);setError("");}}>重新选择</button>
         <button className="button primary" disabled={structureLocked || !title.trim() || (asBook && type.includes("pdf") && !chapters.some((chapter) => !chapter.excluded))} onClick={confirm}>{busy ? "正在创建资料…" : "确认导入"}</button></div>
     </>}
   </section>;

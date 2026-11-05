@@ -2,6 +2,8 @@ import { test, expect } from "@playwright/test";
 import { parseText } from "../../shared/document.mjs";
 import { blocksToHtml, initializeSentenceBoundaries, bodyText } from "../../shared/article-html.mjs";
 import sharp from "sharp";
+import {mkdir,writeFile} from "node:fs/promises";
+import {createServer} from "node:http";
 const html = (text) => initializeSentenceBoundaries(blocksToHtml(parseText(text)),[text]);
 const original = "今日は空を見た。";
 async function showShelf(page) {
@@ -138,6 +140,50 @@ test("reading preparation links to its existing background task",async({page})=>
   await expect(page.getByRole("link",{name:"查看后台任务",exact:true})).toHaveAttribute("href","#tasks/preparation-task");
 });
 
+test("queued running and automatic backoff preparation cannot submit a manual retry",async({page})=>{
+  const state=await preparationFixture(page);state.taskId="preparation-task";
+  state.diagnostics={current:{state:"queued",step:"correct",source:{id:"s2",label:"PDF 第27页"}},recentFailures:[]};
+  const requests=[];
+  await page.route("**/api/documents/doc/reading-session",route=>{
+    if(route.request().method()==="POST")requests.push(route.request().postDataJSON());
+    return route.fallback();
+  });
+  await page.goto("/#doc");
+  const preparation=page.getByRole("region",{name:"准备当前阅读页",exact:true});
+  for(const [status,label] of [["queued","排队中"],["running","处理中"],["retry_wait","等待自动重试"]]){
+    state.diagnostics.current={...state.diagnostics.current,state:status};
+    await expect(preparation).toContainText(label);
+    await expect(preparation.getByRole("button",{name:"重试准备",exact:true})).toHaveCount(0);
+    await expect(preparation.getByRole("link",{name:"查看后台任务",exact:true})).toHaveAttribute("href","#tasks/preparation-task");
+    await expect(preparation.getByRole("button",{name:"校对正文",exact:true})).toBeEnabled();
+  }
+  await expect.poll(()=>requests.filter(request=>request.active===true).length).toBeGreaterThan(0);
+  expect(requests.filter(request=>request.retry===true)).toHaveLength(0);
+});
+
+test("failed preparation allows one explicit retry and hides it once queued again",async({page})=>{
+  const state=await preparationFixture(page);state.taskId="preparation-task";state.error="远端正文校对失败";
+  state.diagnostics={current:{state:"failed",step:"correct",source:{id:"s2",label:"PDF 第27页"}},recentFailures:[]};
+  const requests=[];
+  await page.route("**/api/documents/doc/reading-session",route=>{
+    if(route.request().method()==="POST"){
+      const input=route.request().postDataJSON();requests.push(input);
+      if(input.retry){state.error=null;state.diagnostics.current={...state.diagnostics.current,state:"queued"};}
+    }
+    return route.fallback();
+  });
+  await page.goto("/#doc");
+  const preparation=page.getByRole("region",{name:"准备当前阅读页",exact:true});
+  await expect(preparation).toContainText("远端正文校对失败");
+  await expect(preparation.getByRole("link",{name:"查看后台任务",exact:true})).toBeVisible();
+  await preparation.getByRole("button",{name:"重试准备",exact:true}).click();
+  await expect.poll(()=>requests.filter(request=>request.retry===true).length).toBe(1);
+  await expect(preparation).toContainText("排队中");
+  await expect(preparation.getByRole("button",{name:"重试准备",exact:true})).toHaveCount(0);
+  state.ready=true;await expect(page.getByLabel("日语原文")).toContainText(original);
+  expect(requests.filter(request=>request.retry===true)).toHaveLength(1);
+});
+
 test("reopening a pending reading page restores its latest preparation progress",async({page})=>{
   const state=await preparationFixture(page);await page.goto("/#doc");
   const progress=page.getByRole("progressbar",{name:"当前阅读页准备进度",exact:true});
@@ -212,6 +258,7 @@ test("a legacy preparation failure stops its running label and indeterminate ani
   await expect(preparation).toContainText("已暂停");
   await expect(preparation).not.toContainText("处理中");
   await expect(preparation.locator(".is-indeterminate")).toHaveCount(0);
+  await expect(preparation.getByRole("button",{name:"重试准备",exact:true})).toBeEnabled();
 });
 
 test("a late pending heartbeat cannot replace an automatically loaded completed reading page",async({page})=>{
@@ -746,6 +793,110 @@ test("a selected file that has not been uploaded still warns before leaving",asy
   expect(dialogs).toHaveLength(1);expect(dialogs[0]).toMatch(/还没有保存/);
   await expect(page.getByLabel("统一导入")).toBeVisible();
   expect(state.calls.filter(call=>call.path==="/imports"&&call.method==="POST")).toHaveLength(0);
+});
+
+test("an image can be removed and selected again from the same native file path",async({page},info)=>{
+  await fixture(page,{importType:"photo"});
+  const png=await sharp({create:{width:12,height:12,channels:3,background:"white"}}).png().toBuffer();
+  await mkdir(info.outputDir,{recursive:true});const path=info.outputPath("same.png");await writeFile(path,png);
+  let uploaded;
+  // Chromium's intercepted postData omits disk-backed file bytes; inspect the actual HTTP upload.
+  const receiver=createServer(async(request,response)=>{
+    const chunks=[];for await(const chunk of request)chunks.push(chunk);uploaded=Buffer.concat(chunks);
+    response.writeHead(200,{"content-type":"application/json","access-control-allow-origin":"*"});
+    response.end(JSON.stringify({id:"imp",status:"staged",detectedType:"photo",allowedTypes:["photo"]}));
+  });
+  await new Promise(resolve=>receiver.listen(0,"127.0.0.1",resolve));
+  try{
+    await page.route("**/api/imports",route=>route.request().method()==="POST"?route.continue({url:`http://127.0.0.1:${receiver.address().port}/upload`}):route.fallback());
+    await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"导入资料",exact:true}).click();
+    const chooseButton=page.getByRole("button",{name:"从设备选择文件",exact:true});
+    const choose=async()=>{
+      await expect(chooseButton).toBeVisible();
+      const selected=page.waitForEvent("filechooser");await chooseButton.click();await(await selected).setFiles(path);
+    };
+    await choose();
+    await page.getByRole("button",{name:"移除 same.png",exact:true}).click();
+    await expect(page.getByRole("button",{name:"继续确认类型",exact:true})).toBeDisabled();
+    await choose();
+    await expect(page.locator(".source-file-list li")).toHaveCount(1);
+    await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
+    await expect(page.getByLabel("确认来源类型",{exact:true})).toHaveValue("photo");
+    expect(uploaded.includes(png)).toBe(true);
+    expect(uploaded.toString("latin1").match(/filename="same\.png"/g)).toHaveLength(1);
+  }finally{await new Promise(resolve=>receiver.close(resolve));}
+});
+
+test("file upload persists the entered title for a draft reopened without session storage",async({page})=>{
+  await fixture(page,{importType:"epub"});
+  const title="【持续回归】お目出たき人（EPUB）";
+  let uploaded,savedTitle="";
+  const draft=()=>({id:"imp",title:savedTitle,detectedType:"epub",allowedTypes:["epub"],status:"staged",context:{bookId:null,targetId:null}});
+  await page.route("**/api/imports",route=>{
+    if(route.request().method()!=="POST")return route.fulfill({json:{drafts:savedTitle?[draft()]:[]}});
+    uploaded=route.request().postDataBuffer().toString("utf8");
+    savedTitle=uploaded.match(/name="title"\r\n\r\n([^\r]*)/)?.[1] || "";
+    return route.fulfill({json:draft()});
+  });
+  await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await page.getByLabel("资料标题",{exact:true}).fill(title);
+  await page.getByLabel("选择来源文件",{exact:true}).setInputFiles({name:"pg31757-images.epub",mimeType:"application/epub+zip",buffer:Buffer.from("epub-fixture")});
+  await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
+  await expect(page.getByLabel("确认来源类型",{exact:true})).toHaveValue("epub");
+  expect(savedTitle).toBe(title);
+  await page.evaluate(()=>sessionStorage.clear());
+  await page.route("**/api/imports/imp",route=>route.fulfill({json:draft()}));
+  await page.reload();await showShelf(page);await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await page.getByRole("button",{name:`继续导入：${title}`,exact:true}).click();
+  await expect(page.getByLabel("资料标题",{exact:true})).toHaveValue(title);
+});
+
+test("a pending file upload locks file changes and preserves its server error until a new selection",async({page})=>{
+  await fixture(page,{importType:"photo"});
+  const png=await sharp({create:{width:12,height:12,channels:3,background:"white"}}).png().toBuffer();
+  let release,entered=false,uploaded;
+  const held=new Promise(resolve=>release=resolve);
+  await page.route("**/api/imports",async route=>{
+    if(route.request().method()!=="POST")return route.fallback();
+    entered=true;uploaded=route.request().postDataBuffer();await held;
+    return route.fulfill({status:503,json:{error:"当前上传未能保存，请重试。"}});
+  });
+  try{
+    await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"导入资料",exact:true}).click();
+    const input=page.getByLabel("选择来源文件",{exact:true});
+    await input.setInputFiles({name:"first.png",mimeType:"image/png",buffer:png});
+    await page.getByRole("button",{name:"继续确认类型",exact:true}).click();await expect.poll(()=>entered).toBe(true);
+    await expect(page.getByRole("button",{name:"移除 first.png",exact:true})).toBeDisabled();
+    await expect(input).toBeDisabled();
+    await expect(page.getByRole("button",{name:"从设备选择文件",exact:true})).toBeDisabled();
+    await expect(page.getByRole("tab",{name:"粘贴文字",exact:true})).toBeDisabled();
+    await expect(page.getByRole("tab",{name:"上传或粘贴文件",exact:true})).toBeDisabled();
+    await page.getByLabel("上传或粘贴来源文件",{exact:true}).evaluate((element,bytes)=>{
+      const data=new DataTransfer();data.items.add(new File([new Uint8Array(bytes)],"late.png",{type:"image/png"}));
+      element.dispatchEvent(new ClipboardEvent("paste",{bubbles:true,clipboardData:data}));
+    },[...png]);
+    await expect(page.locator(".source-file-list li")).toHaveCount(1);
+    await expect(page.locator(".source-file-list")).toContainText("first.png");
+    expect(uploaded.toString("latin1")).toContain('filename="first.png"');
+    expect(uploaded.toString("latin1")).not.toContain("late.png");
+    release();await expect(page.getByRole("alert")).toContainText("当前上传未能保存");
+    await input.setInputFiles({name:"new.png",mimeType:"image/png",buffer:png});
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(page.locator(".source-file-list")).toContainText("new.png");
+  }finally{release();}
+});
+
+test("choosing files again clears the previous import flow's error",async({page})=>{
+  await fixture(page,{importType:"epub"});
+  await page.route("**/api/imports/imp/confirm",route=>route.fulfill({status:400,json:{error:"请提供来源列表。"}}));
+  await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await page.getByLabel("选择来源文件",{exact:true}).setInputFiles({name:"old.epub",mimeType:"application/epub+zip",buffer:Buffer.from("epub-fixture")});
+  await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
+  await page.getByRole("button",{name:"确认导入",exact:true}).click();
+  await expect(page.getByRole("alert")).toContainText("请提供来源列表");
+  await page.getByRole("button",{name:"重新选择",exact:true}).click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByLabel("选择来源文件",{exact:true})).toBeEnabled();
 });
 
 test("a new tab without session cache resumes a server draft from the matching import context",async({page})=>{
