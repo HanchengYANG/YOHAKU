@@ -452,7 +452,14 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
       if(draft.inspectionProcessing)draft.inspectionProcessing={...draft.inspectionProcessing,status:'failed',error};
       draft.chapterError=error;persist(draft);
       database.prepare('UPDATE import_drafts SET task_deleted_at=?,version=version+1 WHERE id=? AND user_id=?').run(new Date().toISOString(),draft.id,userId);
-      jobs.get(draft.id)?.controller.abort();
+      const job=jobs.get(draft.id);
+      // The caller may still roll back its outer DELETE transaction. Abort is
+      // irreversible, so recheck committed state after that synchronous work.
+      if(job)queueMicrotask(()=>{
+        if(closed||database.isTransaction||jobs.get(draft.id)!==job)return;
+        const current=database.prepare('SELECT task_generation,task_deleted_at FROM import_drafts WHERE id=? AND user_id=?').get(draft.id,userId);
+        if(current?.task_deleted_at&&current.task_generation===job.generation)job.controller.abort();
+      });
     }
   }
   return {taskAdapter,invalidateTarget,close(){closed=true;for(const job of jobs.values())job.controller.abort();parserPool.close();if(!providedOcr)localOcr.close();},

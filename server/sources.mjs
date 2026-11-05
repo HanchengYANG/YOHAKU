@@ -133,7 +133,11 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     const request={id:randomUUID(),user_id:userId,document_id:id,generation:(previous?.generation||0)+1,target_json:target?json([target]):null};
     database.prepare('INSERT INTO source_preparation_requests(id,user_id,document_id,generation,created_at,updated_at,target_json) VALUES(?,?,?,?,?,?,?)').run(request.id,userId,id,request.generation,stamp(),stamp(),request.target_json);return request;
   }
-  const workValid=execution=>!execution||!execution.signal.aborted&&latestRequest(execution.userId,execution.documentId)?.id===execution.requestId;
+  const workValid=execution=>{
+    if(!execution)return true;
+    const request=latestRequest(execution.userId,execution.documentId);
+    return !execution.signal.aborted&&request?.id===execution.requestId&&!request.deleted_at;
+  };
   const optionsFor=execution=>execution?{signal:execution.signal,groupKey:articleKey(execution.userId,execution.documentId),getPriority:()=>database.prepare('SELECT 1 FROM reading_sessions WHERE user_id=? AND document_id=? AND active=1 AND expires_at>?').get(execution.userId,execution.documentId,now())?'foreground':'background'}:{};
   const overlapsWork=(row,step,range)=>[...working.values()].some(work=>work.reservations.some(ref=>{
     if(ref.scopeId!==row.scope_id||ref.version!==row.version)return false;
@@ -233,13 +237,13 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     }
     return retired;
   }
-  function abortRetiredWork(retired){
+  function abortRetiredWork(retired,reason=()=>new DOMException('来源正文版本已更新。','AbortError')){
     if(!retired.length)return;
     const abort=()=>{
       if(closed||database.isTransaction)return;
-      for(const work of retired)if(!work.execution.signal.aborted&&reservationsObsolete(work))work.controller.abort(new DOMException('来源正文版本已更新。','AbortError'));
+      for(const work of retired)if(!work.execution.signal.aborted&&reservationsObsolete(work))work.controller.abort(reason());
     };
-    // The normal source PUT commits its outermost savepoint synchronously.
+    // Source edits and deletions commit their outermost transaction synchronously.
     // If a caller owns a surrounding transaction, check after that stack
     // commits or rolls back; never cancel against uncommitted versions.
     if(database.isTransaction)queueMicrotask(abort);else abort();
@@ -1148,12 +1152,13 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     }
   }
   function deleteDocument(userId,id) {
+    const retired=[...working.values()].filter(work=>work.execution.userId===userId&&work.execution.documentId===id);
     database.prepare('UPDATE source_preparation_requests SET deleted_at=?,updated_at=? WHERE user_id=? AND document_id=?').run(stamp(),stamp(),userId,id);
-    for(const work of working.values())if(work.execution.userId===userId&&work.execution.documentId===id)work.controller.abort(fail(410,'文章已删除。'));
     const rows=scopes(userId,id);
     for(const row of rows)for(const table of ['source_fragments','source_revisions','source_steps','source_step_attempts','source_annotations'])database.prepare(`DELETE FROM ${table} WHERE scope_id=?`).run(row.scope_id);
     database.prepare('DELETE FROM article_sources WHERE user_id=? AND document_id=?').run(userId,id);
     for(const table of ['reading_pages','reading_positions','reading_sessions','source_preparation_jobs'])database.prepare(`DELETE FROM ${table} WHERE user_id=? AND document_id=?`).run(userId,id);
+    abortRetiredWork(retired,()=>fail(410,'文章已删除。'));
   }
   function attachRoutes(app) {
     const base='/api/documents/:id';

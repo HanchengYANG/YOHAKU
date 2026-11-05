@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import { mkdtemp,rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import sharp from 'sharp';
 import { createApp } from '../server/app.mjs';
 import { ensureSession,cookieFromResponse } from './helpers/session.mjs';
@@ -44,7 +45,7 @@ async function fixture(t,{connected=true,ndlOcr,beforeRun,chapterProposal}={}) {
   async function request(path,method='GET',body,expected=200){const multipart=body instanceof FormData;const response=await fetch(active.url+'/api'+path,{method,headers:{Cookie:active.cookie,Connection:'close',...(body&&!multipart?{'Content-Type':'application/json'}:{})},...(body?{body:multipart?body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(10000)});const value=response.status===204?null:await response.json();assert.equal(response.status,expected,JSON.stringify(value));return value;}
   async function configure(){return request('/ai/roles','PUT',{version:0,annotationReferenceImage:false,roles:{ocr:{providerId:'openai',model:'vision'},correction:{providerId:'api_base',model:'correction-model'},segmentation:{providerId:'openai',model:'sentence-model'},annotation:{providerId:'api_base',model:'ruby-model'},chat:{providerId:'openai',model:'chat-model'}}});}
   async function importText(text){const draft=await request('/imports','POST',{text,title:'统一导入'},201);return request(`/imports/${draft.id}/confirm`,'POST',{type:'text',title:'按需阅读'},201);}
-  return {request,calls,configure,importText,get url(){return active.url;},get instance(){return active.instance;},get user(){return active.user;},restart:async()=>{await stop();await start();}};
+  return {request,calls,configure,importText,dataDir,get url(){return active.url;},get instance(){return active.instance;},get user(){return active.user;},restart:async()=>{await stop();await start();}};
 }
 
 test('source tasks enforce ownership and running deletion; failed tombstones survive heartbeat/restart with original intact',{timeout:20000},async t=>{
@@ -89,6 +90,53 @@ test('deleting an empty book invalidates its running import proposal and preserv
   const restored=await f.request(`/imports/${draft.id}`);assert.equal(restored.chapterProcessing.status,'failed');
   assert.equal((await f.request('/books')).books.length,0);assert.equal((await f.request('/tasks?type=import')).tasks.length,0);
   const request=await fetch(f.url+draft.files[0].previewUrl,{headers:{Cookie:(await ensureSession(f.url)).cookie}});assert.equal(request.status,200);assert.deepEqual(Buffer.from(await request.arrayBuffer()),pdf);
+});
+
+for(const target of ['document','book'])for(const committed of [false,true])test(`${committed?'committed':'rolled-back'} ${target} deletion ${committed?'aborts':'preserves'} the same staged import proposal`,{timeout:15000},async t=>{
+  let release,entered,signal;
+  const gate=new Promise(resolve=>{release=resolve;}),started=new Promise(resolve=>{entered=resolve;});t.after(()=>release());
+  const chapterProposal={chapters:[{title:'原文',startPage:1,endPage:1,excluded:false,needsReview:false}],exclusions:[]};
+  const f=await fixture(t,{chapterProposal,beforeRun:async input=>{if(input.schema?.properties?.chapters){signal=input.signal;entered();await gate;}}});await f.configure();
+  const record=target==='book'?await f.request('/books','POST',{title:'导入目标'},201):await f.request('/documents','POST',{title:'导入目标',kind:'article',orientation:'horizontal',content:'原文。'},201);
+  const pdf=Buffer.from('%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] >> endobj\ntrailer << /Root 1 0 R /Size 4 >>\n%%EOF');
+  const form=new FormData();form.append('files',new Blob([pdf],{type:'application/pdf'}),'atomic-import.pdf');form.append(target==='book'?'bookId':'targetId',record.id);
+  const draft=await f.request('/imports','POST',form,201),path=`/${target==='book'?'books':'documents'}/${record.id}`;
+  await f.request(`/imports/${draft.id}/chapters`,'POST',{type:'text_pdf'},202);await started;
+  assert.ok(signal);assert.equal(signal.aborted,false);
+  const originalSignal=signal,database=new DatabaseSync(join(f.dataDir,'yohaku.sqlite'));
+  try{
+    const before=database.prepare('SELECT * FROM import_drafts WHERE id=?').get(draft.id);
+    if(!committed)database.exec(`CREATE TRIGGER reject_import_target_delete BEFORE DELETE ON ${target==='book'?'books':'documents'} BEGIN SELECT RAISE(ABORT,'fixture rejected final delete'); END;`);
+    try{await f.request(path,'DELETE',{revision:record.revision},committed?204:500);}
+    finally{if(!committed)database.exec('DROP TRIGGER reject_import_target_delete');}
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(signal,originalSignal,'deletion must not replace the existing provider attempt');
+    assert.equal(signal.aborted,committed,'only a committed target deletion may abort the import execution');
+    if(committed){
+      await f.instance.imports.drain();
+      const stopped=database.prepare('SELECT task_generation,task_deleted_at FROM import_drafts WHERE id=?').get(draft.id);
+      assert.equal(stopped.task_generation,before.task_generation);assert.ok(stopped.task_deleted_at);
+      await f.request(`/tasks/${draft.id}`,'GET',undefined,404);
+      await f.request(path,'GET',undefined,404);
+    }else{
+      assert.deepEqual(database.prepare('SELECT * FROM import_drafts WHERE id=?').get(draft.id),before,'rollback must restore the draft, checkpoints and live execution identity');
+      assert.equal((await f.request(`/tasks/${draft.id}`)).status,'running');
+      assert.equal((await f.request(path)).id,record.id);
+    }
+    release();await f.instance.imports.drain();
+    const result=await f.request(`/imports/${draft.id}`);
+    assert.equal(result.chapterProcessing.status,committed?'failed':'done');
+    assert.equal(f.calls.filter(call=>call.schema?.properties?.chapters).length,1,'a rolled-back deletion must reuse the original valid provider result');
+    if(committed){
+      assert.deepEqual(result.chapters,[],'late chapter results must not restore a deleted target');
+      await f.request(`/tasks/${draft.id}`,'GET',undefined,404);
+    }else{
+      assert.equal(result.chapters.length,1);assert.equal(result.chapters[0].title,'原文');
+      assert.equal((await f.request(`/tasks/${draft.id}`)).status,'requires_review');
+    }
+    const raw=await fetch(f.url+draft.files[0].previewUrl,{headers:{Cookie:(await ensureSession(f.url)).cookie}});
+    assert.equal(raw.status,200);assert.deepEqual(Buffer.from(await raw.arrayBuffer()),pdf);
+  }finally{database.close();}
 });
 
 test('reading API exposes safe role diagnostics and retains failures after retry and server restart',async(t)=>{
