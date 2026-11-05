@@ -1055,6 +1055,118 @@ test('PDF carry keeps published and manual sentence boundaries firm',async()=>{
   }
 });
 
+for(const edit of ['unchanged','ruby only','QA only'])test(`${edit} source save keeps an unpublished automatic PDF tail open for cross-source segmentation`,async()=>{
+  const left='前文。みんなそうしているん',right='です。終わり。',groups=[];
+  const f=fixture({
+    processSource:async(_u,request)=>{
+      if(request.step!=='segment')return {bodyHtml:request.bodyHtml};
+      groups.push({ids:(request.sources||[request.source]).map(source=>source.id),text:bodyText(request.bodyHtml)});
+      return {bodyHtml:applySentenceBoundaries(request.bodyHtml,bodyText(request.bodyHtml).match(/[^。]*。|[^。]+$/gu))};
+    },annotateBodies:async(_u,{items})=>({items}),
+  });try{
+    f.service.createArticleSources('u','a',[{id:'left',type:'text_pdf',text:left},{id:'right',type:'text_pdf',text:right}]);
+    const correction=f.service.prepareSource('u','a','left');await f.service.drain();
+    f.service.heartbeat('u','a',{sessionId:correction.sessionId,active:false});
+    const before=f.service.getSource('u','a','left');assert.equal(before.status,'ready');
+    assert.equal(f.service.readingPages('u','a',0).pages.length,0,'the automatic tail is still unpublished before saving');
+    let savedHtml=before.bodyHtml;
+    if(edit==='ruby only')savedHtml=savedHtml.replace('前文','<ruby data-origin="manual">前文<rt>まえぶん</rt></ruby>');
+    if(edit==='QA only')savedHtml=markBodyRange(savedHtml,3,6,'saved-qa');
+    const saved=f.service.saveSource('u','a','left',{version:before.version,bodyHtml:savedHtml});
+    assert.equal(saved.manual,true,'the public human-save provenance remains available');
+    assert.equal(saved.text,left);
+    await f.service.drain();
+    f.service.heartbeat('u','a',{index:0});await f.service.drain();
+    assert.ok(groups.some(group=>group.ids.includes('left')&&group.ids.includes('right')&&group.text==='みんなそうしているん'+right),'saving readings or marks must not prevent the automatic tail from joining the following physical PDF source');
+    const after=f.service.getSource('u','a','left'),next=f.service.getSource('u','a','right');
+    assert.equal(bodyRanges(after.bodyHtml).sentences.at(-1).id,bodyRanges(next.bodyHtml).sentences[0].id);
+    assert.equal(after.version,saved.version,'carrying automatic sentence boundaries does not change the saved body version');
+    if(edit==='ruby only')assert.ok(htmlToBlocks(after.bodyHtml).some(block=>block.segments.some(segment=>segment.text==='前文'&&segment.reading==='まえぶん'&&segment.origin==='manual')));
+    if(edit==='QA only')assert.deepEqual(bodyRanges(after.bodyHtml).qa.map(({id,start,end})=>({id,start,end})),[{id:'saved-qa',start:3,end:6}]);
+    const reading=f.service.readingPages('u','a',0);
+    assert.equal(reading.complete,true);assert.equal(reading.currentPage.ready,true);
+    assert.equal(reading.pages.map(page=>bodyText(page.bodyHtml)).join(''),left+right);
+  }finally{f.close();}
+});
+
+test('a ruby-only save preserves published PDF page identities while its unpublished tail joins the next source',async()=>{
+  const prefix=('あ'.repeat(99)+'。').repeat(9),tail='みんなそうしているん',left=prefix+tail,right='です。終わり。',groups=[];
+  const f=fixture({
+    processSource:async(_u,request)=>{
+      if(request.step!=='segment')return {bodyHtml:request.bodyHtml};
+      groups.push(bodyText(request.bodyHtml));
+      return {bodyHtml:applySentenceBoundaries(request.bodyHtml,bodyText(request.bodyHtml).match(/[^。]*。|[^。]+$/gu))};
+    },annotateBodies:async(_u,{items})=>({items}),
+  });try{
+    f.service.createArticleSources('u','a',[{id:'left',type:'scan_pdf',text:left},{id:'right',type:'scan_pdf',text:right}]);
+    const correction=f.service.prepareSource('u','a','left');await f.service.drain();
+    f.service.heartbeat('u','a',{sessionId:correction.sessionId,active:false});
+    const reading=f.service.readingPages('u','a',0),published=reading.pages.map(page=>({id:page.id,ranges:page.ranges}));
+    assert.equal(published.length,1);assert.equal(bodyText(reading.pages[0].bodyHtml),prefix);
+    const before=f.service.getSource('u','a','left'),saved=f.service.saveSource('u','a','left',{version:before.version,
+      bodyHtml:markBodyRange(before.bodyHtml.replace('あ','<ruby data-origin="manual">あ<rt>ア</rt></ruby>'),3,6,'published-qa')});
+    assert.deepEqual(f.service.readingPages('u','a',0).pages.map(page=>({id:page.id,ranges:page.ranges})),published);
+    await f.service.drain();f.restart();f.service.heartbeat('u','a',{index:1});await f.service.drain();
+    assert.ok(groups.includes(tail+right),'only the unpublished tail must be segmented again with the next source');
+    assert.equal(groups.filter(text=>text.includes(prefix)).length,1,'the published text must not be sent for segmentation again');
+    const finished=f.service.readingPages('u','a',1);
+    assert.deepEqual(finished.pages.slice(0,published.length).map(page=>({id:page.id,ranges:page.ranges})),published);
+    assert.equal(finished.pages.map(page=>bodyText(page.bodyHtml)).join(''),left+right);
+    const after=f.service.getSource('u','a','left');assert.equal(after.version,saved.version);
+    assert.ok(htmlToBlocks(after.bodyHtml).some(block=>block.segments.some(segment=>segment.text==='あ'&&segment.reading==='ア'&&segment.origin==='manual')));
+    assert.deepEqual(bodyRanges(after.bodyHtml).qa.map(mark=>mark.id),['published-qa']);
+  }finally{f.close();}
+});
+
+for(const edit of ['text','sentence boundaries'])test(`an explicit ${edit} edit keeps human PDF boundaries firm`,async()=>{
+  const left='前文。みんなそうしているん',right='です。終わり。',groups=[];
+  const f=fixture({
+    processSource:async(_u,request)=>{
+      if(request.step!=='segment')return {bodyHtml:request.bodyHtml};
+      groups.push((request.sources||[request.source]).map(source=>source.id));
+      return {bodyHtml:applySentenceBoundaries(request.bodyHtml,bodyText(request.bodyHtml).match(/[^。]*。|[^。]+$/gu))};
+    },annotateBodies:async(_u,{items})=>({items}),
+  });try{
+    f.service.createArticleSources('u','a',[{id:'left',type:'text_pdf',text:left},{id:'right',type:'text_pdf',text:right}]);
+    const correction=f.service.prepareSource('u','a','left');await f.service.drain();f.service.heartbeat('u','a',{sessionId:correction.sessionId,active:false});
+    const before=f.service.getSource('u','a','left');
+    const saved=f.service.saveSource('u','a','left',{version:before.version,...(edit==='text'?{text:left.replace('前文','人工文')}:
+      {bodyHtml:applySentenceBoundaries(before.bodyHtml,['前文。みんな','そうしているん'])})});
+    await f.service.drain();
+    const edited=f.service.getSource('u','a','left'),firm=bodyRanges(edited.bodyHtml).sentences.at(-1).id;
+    f.service.saveSource('u','a','left',{version:edited.version,bodyHtml:edited.bodyHtml.replace('文','<ruby data-origin="manual">文<rt>ぶん</rt></ruby>')});
+    await f.service.drain();f.restart();
+    f.service.heartbeat('u','a',{index:0});await f.service.drain();
+    const after=f.service.getSource('u','a','left'),next=f.service.getSource('u','a','right');
+    assert.equal(bodyRanges(after.bodyHtml).sentences.at(-1).id,firm,'reading must preserve explicitly human-edited sentence boundaries');
+    assert.notEqual(bodyRanges(next.bodyHtml).sentences[0].id,firm);
+    assert.equal(groups.some(ids=>ids.includes('left')&&ids.includes('right')),false);
+    assert.equal(after.text,saved.text);assert.equal(f.service.readingPages('u','a',0).complete,true);
+  }finally{f.close();}
+});
+
+test('legacy manual PDF sentence boundaries remain firm after the source schema migrates',async()=>{
+  const left='前文。みんなそうしているん',right='です。終わり。',groups=[];
+  const f=fixture({
+    processSource:async(_u,request)=>{groups.push((request.sources||[request.source]).map(source=>source.id));return {bodyHtml:applySentenceBoundaries(request.bodyHtml,bodyText(request.bodyHtml).match(/[^。]*。|[^。]+$/gu))};},
+    annotateBodies:async(_u,{items})=>({items}),
+  });try{
+    f.service.createArticleSources('u','a',[{id:'left',...ready(left),type:'text_pdf',manual:true},{id:'right',type:'text_pdf',text:right,needsCorrection:false}]);
+    const firm=bodyRanges(f.service.getSource('u','a','left').bodyHtml).sentences.at(-1).id;
+    // Reopen an actual pre-migration table, whose old `manual` provenance
+    // cannot distinguish a human sentence edit from other historical edits.
+    if(f.database.prepare('PRAGMA table_info(article_sources)').all().some(column=>column.name==='manual_boundaries'))f.database.exec('ALTER TABLE article_sources DROP COLUMN manual_boundaries');
+    f.restart();
+    const migrated=f.service.getSource('u','a','left');
+    f.service.saveSource('u','a','left',{version:migrated.version,bodyHtml:migrated.bodyHtml});await f.service.drain();
+    f.service.heartbeat('u','a',{index:0});await f.service.drain();
+    assert.equal(bodyRanges(f.service.getSource('u','a','left').bodyHtml).sentences.at(-1).id,firm);
+    assert.notEqual(bodyRanges(f.service.getSource('u','a','right').bodyHtml).sentences[0].id,firm);
+    assert.equal(groups.some(ids=>ids.includes('left')&&ids.includes('right')),false);
+    assert.equal(f.service.readingPages('u','a',0).complete,true);
+  }finally{f.close();}
+});
+
 test('PDF carry restores whole-word ruby and current QA without annotating completed source coverage again',async()=>{
   const left='前文。みんなそうしているん',right='です。終わり。',readings=html=>htmlToBlocks(html).flatMap(block=>block.segments.filter(segment=>segment.reading));
   let release,leftAnnotations=0;

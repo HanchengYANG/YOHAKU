@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import sharp from 'sharp';
 import { createApp } from '../server/app.mjs';
 import { ensureSession,cookieFromResponse } from './helpers/session.mjs';
-import { bodyText,bodyRanges,blocksToHtml } from '../shared/article-html.mjs';
+import { bodyText,bodyRanges,blocksToHtml,htmlToBlocks,syncBodyReadings } from '../shared/article-html.mjs';
 import { parseText } from '../shared/document.mjs';
 import { SENTENCE_SCHEMA } from '../shared/sentences.mjs';
 import { ANNOTATION_SCHEMA } from '../shared/ocr-correction.mjs';
@@ -185,6 +185,39 @@ test('an excluded PDF source keeps its exact OCR and does not block the first re
   assert.equal(reading.complete,false);
   assert.equal(prepared[1].text,'');
   assert.equal(prepared[1].firstExtraction.text,rawExcluded);
+});
+
+test('saving only PDF readings through the source API preserves cross-page sentences and manual ruby',async t=>{
+  const left='前文。みんなそうしているん',right='です。終わり。';
+  let extracted=0;
+  const f=await fixture(t,{chapterProposal:{chapters:[{title:'本文',startPage:1,endPage:2,needsReview:false}],exclusions:[]},
+    ndlOcr:{async recognize(){return {text:[left,right][extracted++],regions:[]};},close(){}}});
+  await f.configure();
+  const pdf=Buffer.from('%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] >> endobj\n4 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] >> endobj\ntrailer << /Root 1 0 R /Size 5 >>\n%%EOF');
+  const form=new FormData();form.append('files',new Blob([pdf],{type:'application/pdf'}),'ruby-tail.pdf');
+  const draft=await f.request('/imports','POST',form,201),importPath=`/imports/${draft.id}`;
+  await f.request(importPath+'/chapters','POST',{type:'scan_pdf'},202);await f.instance.imports.drain();
+  const proposal=await f.request(importPath);
+  const saved=await f.request(importPath+'/confirm','POST',{type:'scan_pdf',title:'本文',asBook:true,chapters:proposal.chapters,exclusions:[]},201);
+  const path=`/documents/${saved.firstDocumentId}`,{sources}=await f.request(path+'/sources');
+  const prepared=await f.request(`${path}/sources/${sources[0].id}/prepare`,'POST',{});await f.instance.sources.drain();
+  await f.request(path+'/reading-session','POST',{sessionId:prepared.sessionId,active:false});
+  const before=await f.request(`${path}/sources/${sources[0].id}`),blocks=htmlToBlocks(before.bodyHtml);
+  blocks[0].segments=[{text:'前文',reading:'まえぶん',origin:'manual'},{text:left.slice(2)}];
+  const editorHtml=syncBodyReadings(before.bodyHtml,blocks);
+  assert.deepEqual(bodyRanges(editorHtml).sentences,bodyRanges(before.bodyHtml).sentences);
+  const updated=await f.request(`${path}/sources/${sources[0].id}`,'PUT',{version:before.version,bodyHtml:editorHtml});
+  assert.equal(updated.manual,true,'the public edited state remains intact');
+  assert.equal(Object.hasOwn(updated,'manual_boundaries'),false,'boundary ownership stays private');
+  await f.request(path+'/reading-session','POST',{active:true,index:0});await f.instance.sources.drain();
+  const {sources:after}=await f.request(path+'/sources');
+  assert.equal(bodyRanges(after[0].bodyHtml).sentences.at(-1).id,bodyRanges(after[1].bodyHtml).sentences[0].id,'one sentence must span both original pages');
+  const ruby=htmlToBlocks(after[0].bodyHtml).flatMap(block=>block.segments).find(segment=>segment.text==='前文');
+  assert.equal(ruby.reading,'まえぶん');assert.equal(ruby.origin,'manual');
+  const reading=await f.request(path+'/reading-pages');
+  assert.equal(reading.currentPage.ready,true);assert.equal(reading.complete,true);
+  assert.equal(bodyText(reading.currentPage.bodyHtml),left+right);
+  assert.ok(f.calls.some(call=>call.schema===SENTENCE_SCHEMA&&call.prompt.includes('みんなそうしているんです。終わり。')));
 });
 
 test('a reading page spanning six PDF sources makes one hybrid proofreading request and persists local steps',async(t)=>{

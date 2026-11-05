@@ -20,6 +20,8 @@ const privateKeys=new Set(['filePath','path','storagePath','directory']);
 const publicMetadata=value=>Array.isArray(value)?value.map(publicMetadata):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).filter(([key])=>!privateKeys.has(key)).map(([key,item])=>[key,publicMetadata(item)])):value;
 const sourceHtml=value=>typeof value.bodyHtml==='string'?body.normalizeBodyHtml(value.bodyHtml):body.blocksToHtml(parseText(value.text??''));
 const paragraphs=html=>(body.normalizeBodyHtml(html).match(/<p\b[^>]*>[\s\S]*?<\/p>/g)||[]).map((html,index)=>({id:/data-paragraph-id="([^"]+)"/.exec(html)[1],position:index,html,text:body.bodyText(html)}));
+const manualBoundaries=row=>!!(row.manual_boundaries??row.manual);
+const sentenceLayout=html=>json(body.bodyRanges(html).sentences.map(({id,start,end})=>[id,start,end]));
 
 export function createSourceService({database,ai={},requireDocument,fromRow,now=()=>Date.now(),sessionTtlMs=45000}={}) {
   // Read operations are synchronous: reuse their immutable database snapshot,
@@ -57,6 +59,9 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
   // Running steps resume from their persisted inputs after restart. Durable
   // preparation requests outlive browser sessions; completed steps are reused.
   if(!database.prepare('PRAGMA table_info(article_sources)').all().some(column=>column.name==='range_json'))database.exec('ALTER TABLE article_sources ADD COLUMN range_json TEXT');
+  // NULL retains legacy manual boundary protection. New saves distinguish
+  // touched readings/marks from human changes to text or sentence boundaries.
+  if(!database.prepare('PRAGMA table_info(article_sources)').all().some(column=>column.name==='manual_boundaries'))database.exec('ALTER TABLE article_sources ADD COLUMN manual_boundaries INTEGER');
   for(const [column,type] of [['snapshot_json','TEXT'],['finished_at','TEXT'],['target_json','TEXT']])if(!database.prepare('PRAGMA table_info(source_preparation_requests)').all().some(value=>value.name===column))database.exec(`ALTER TABLE source_preparation_requests ADD COLUMN ${column} ${type}`);
   for(const table of ['source_step_attempts','source_preparation_jobs'])if(!database.prepare(`PRAGMA table_info(${table})`).all().some(value=>value.name==='request_id'))database.exec(`ALTER TABLE ${table} ADD COLUMN request_id TEXT`);
   database.exec('CREATE INDEX IF NOT EXISTS source_attempts_request ON source_step_attempts(request_id,scope_id,input_version,step)');
@@ -262,9 +267,9 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     // Before a page can be published, PDF segmentation can wait for the next
     // source's correction. Report that actual running dependency.
     let row=pending;
-    if(!page&&pending?.next_step===2&&!pending.manual&&!['failed','requires_review'].includes(pending.status)&&['text_pdf','scan_pdf'].includes(pending.type)){
+    if(!page&&pending?.next_step===2&&!manualBoundaries(pending)&&!['failed','requires_review'].includes(pending.status)&&['text_pdf','scan_pdf'].includes(pending.type)){
       const following=rows[rows.findIndex(row=>row.scope_id===pending.scope_id)+1];
-      if(following&&following.next_step<2&&!following.manual)row=following;
+      if(following&&following.next_step<2&&!manualBoundaries(following))row=following;
     }
     if(row===pending&&pending&&!['failed','requires_review'].includes(pending.status))row=relevant.find(row=>row.status==='processing'&&row.next_step<3)||pending;
     if(!row)return {current:null,recentFailures};
@@ -348,7 +353,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
         if(!existing)database.prepare('INSERT INTO sources VALUES(?,?,?,?,?,?,?)').run(sourceId,userId,type,json(original),json(preview),extraction?json(extraction):null,stamp());
         const scopeId=randomUUID(),ready=input.status==='ready',skip=input.needsCorrection===false||input.skipCorrection===true;
         const nextStep=ready?4:hasInput?(skip?2:1):0;
-        database.prepare('INSERT INTO article_sources(scope_id,document_id,user_id,source_id,position,version,status,next_step,manual,updated_at,range_json) VALUES(?,?,?,?,?,1,?,?,?,?,?)').run(scopeId,id,userId,sourceId,position++,ready?'ready':'pending',nextStep,input.manual?1:0,stamp(),localRange?json(localRange):null);
+        database.prepare('INSERT INTO article_sources(scope_id,document_id,user_id,source_id,position,version,status,next_step,manual,manual_boundaries,updated_at,range_json) VALUES(?,?,?,?,?,1,?,?,?,?,?,?)').run(scopeId,id,userId,sourceId,position++,ready?'ready':'pending',nextStep,input.manual?1:0,input.manual?1:0,stamp(),localRange?json(localRange):null);
         const row=scope(userId,id,sourceId);replaceFragments(row,initial);
         if(hasInput){
           const rawHtml=sourceHtml(extraction),rawLength=body.bodyText(rawHtml).length;
@@ -474,12 +479,13 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     const previous=readHtml(row),priorAnnotations=annotationRanges(row);let next=typeof input.bodyHtml==='string'?body.normalizeBodyHtml(input.bodyHtml):body.editBodyText(previous,input.text);const text=body.bodyText(next);
     if(text.length>200000)throw fail(400,'每个来源最多 200000 字。');
     const textChanged=text!==body.bodyText(previous),newVersion=row.version+1;
+    const firmBoundaries=manualBoundaries(row)||textChanged||sentenceLayout(previous)!==sentenceLayout(next);
     if(textChanged&&body.invalidateBodySentences){const change=changedTextRange(body.bodyText(previous),text);next=body.invalidateBodySentences(next,change.start,change.newEnd);}
     const nextStep=!text.trim()?4:!textChanged&&body.hasCompleteSentenceBoundaries(next)?3:2;
     const retired=transaction(()=>{
-      const changed=database.prepare("UPDATE article_sources SET version=?,checked_version=?,manual=1,status=?,next_step=?,error=NULL,proposal_json=NULL,updated_at=? WHERE scope_id=? AND version=?").run(newVersion,input.checked===true?newVersion:!textChanged&&row.checked_version===row.version?newVersion:null,nextStep>=4?'ready':'pending',nextStep,stamp(),row.scope_id,row.version);
+      const changed=database.prepare("UPDATE article_sources SET version=?,checked_version=?,manual=1,manual_boundaries=?,status=?,next_step=?,error=NULL,proposal_json=NULL,updated_at=? WHERE scope_id=? AND version=?").run(newVersion,input.checked===true?newVersion:!textChanged&&row.checked_version===row.version?newVersion:null,firmBoundaries?1:0,nextStep>=4?'ready':'pending',nextStep,stamp(),row.scope_id,row.version);
       if(changed.changes!==1)throw fail(409,'这个来源已修改，请保留当前文字并重新打开最新版本。');
-      const oldRow=row;row={...row,version:newVersion,next_step:nextStep};
+      const oldRow=row;row={...row,version:newVersion,next_step:nextStep,manual_boundaries:firmBoundaries?1:0};
       remapPages(row,body.bodyText(previous),text,()=>replaceFragments(row,next));
       preservedAnnotations(oldRow,row,body.bodyText(previous),text,priorAnnotations,previous);
       if(nextStep>=3&&annotationCovered(row,0,text.length))database.prepare("UPDATE article_sources SET status='ready',next_step=4 WHERE scope_id=?").run(row.scope_id);
@@ -539,7 +545,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     }
     // Existing published or human sentence boundaries are firm. Only a new
     // automatic PDF tail is reconsidered with the next physical source.
-    if(!parts.length||parts.some(({row})=>row.manual||!['text_pdf','scan_pdf'].includes(row.type)))return null;
+    if(!parts.length||parts.some(({row})=>manualBoundaries(row)||!['text_pdf','scan_pdf'].includes(row.type)))return null;
     return {start:last.start,end:text.length,parts};
   }
   function refreshPages(userId,id) {
@@ -794,15 +800,15 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
       if(row.edit_session&&row.edit_expires>now()&&(row.next_step<2||step==='annotate'&&hasAnnotationBatch()))continue;
       const ordered=scopes(row.user_id,row.document_id),index=ordered.findIndex(item=>item.scope_id===row.scope_id);
       let reserved=[row],segmentGroup,carry,annotationGroup=candidate.annotationGroup;
-      if(step==='segment'&&mode!=='correction'&&!row.manual&&['text_pdf','scan_pdf'].includes(row.type)){
+      if(step==='segment'&&mode!=='correction'&&!manualBoundaries(row)&&['text_pdf','scan_pdf'].includes(row.type)){
         const following=ordered[index+1];
-        if(following&&following.next_step<2&&!following.manual&&!['failed','requires_review'].includes(following.status)&&!(following.edit_session&&following.edit_expires>now())){
+        if(following&&following.next_step<2&&!manualBoundaries(following)&&!['failed','requires_review'].includes(following.status)&&!(following.edit_session&&following.edit_expires>now())){
           if(overlapsWork(following,stages[following.next_step]))continue;
           return {row:following,priority:candidate.priority,reserved:[following],requestTarget:candidate.requestTarget};
         }
         segmentGroup=[row];let length=body.bodyText(readHtml(row)).length;
         for(const following of ordered.slice(index+1)){
-          if(following.next_step!==2||following.manual||following.type!==row.type||length>=6000||overlapsWork(following,'segment')||phaseFailed(following,'segment'))break;
+          if(following.next_step!==2||manualBoundaries(following)||following.type!==row.type||length>=6000||overlapsWork(following,'segment')||phaseFailed(following,'segment'))break;
           segmentGroup.push(following);length+=body.bodyText(readHtml(following)).length;if(segmentGroup.length>=3)break;
         }
         carry=sentenceCarry(ordered.slice(0,index),publishedLength(row.user_id,row.document_id));
