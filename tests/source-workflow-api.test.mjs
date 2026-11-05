@@ -9,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import sharp from 'sharp';
 import { createApp } from '../server/app.mjs';
 import { ensureSession,cookieFromResponse } from './helpers/session.mjs';
-import { bodyText,bodyRanges,blocksToHtml,htmlToBlocks,syncBodyReadings,markBodyRange } from '../shared/article-html.mjs';
+import { applySentenceBoundaries,bodyText,bodyRanges,blocksToHtml,htmlToBlocks,syncBodyReadings,markBodyRange } from '../shared/article-html.mjs';
 import { parseText } from '../shared/document.mjs';
 import { SENTENCE_SCHEMA } from '../shared/sentences.mjs';
 import { ANNOTATION_SCHEMA } from '../shared/ocr-correction.mjs';
@@ -48,6 +48,77 @@ async function fixture(t,{connected=true,ndlOcr,beforeRun,chapterProposal,correc
   async function importText(text){const draft=await request('/imports','POST',{text,title:'统一导入'},201);return request(`/imports/${draft.id}/confirm`,'POST',{type:'text',title:'按需阅读'},201);}
   return {request,calls,configure,importText,dataDir,get url(){return active.url;},get instance(){return active.instance;},get user(){return active.user;},restart:async()=>{await stop();await start();}};
 }
+
+test('out-of-order reading heartbeats cannot change a newer demand or saved page',async t=>{
+  const f=await fixture(t);
+  const create=title=>f.request('/documents','POST',{title,kind:'article',orientation:'horizontal',content:'準備中。'},201);
+  const {id}=await create('阅读位置'),other=await create('其他资料');
+  const text=['甲','乙','丙'].map(char=>(char.repeat(99)+'。').repeat(10)).join('');
+  const sourceId='reading-position-source',bodyHtml=applySentenceBoundaries(blocksToHtml(parseText(text)),text.match(/[^。]*。/gu));
+  f.instance.sources.createArticleSources(f.user.id,id,[{id:sourceId,type:'text',bodyHtml,status:'ready',needsCorrection:false}]);
+  const path=`/documents/${id}`,sessionId='ordered-reading-session';
+  const beat=(event,session=sessionId,expected=200)=>f.request(`${path}/reading-session`,'POST',{sessionId:session,...event},expected);
+  const database=new DatabaseSync(join(f.dataDir,'yohaku.sqlite'),{readOnly:true});
+  const readSession=(session=sessionId)=>database.prepare('SELECT mode,source_id,page_index,active,expires_at,last_sequence FROM reading_sessions WHERE id=?').get(session);
+  const readBookmark=()=>database.prepare('SELECT page_id,page_index FROM reading_positions WHERE user_id=? AND document_id=?').get(f.user.id,id);
+  try{
+    await beat({index:0,sequence:1});
+    const second=await beat({index:1,sequence:3}),activeSecond=readSession();
+    assert.equal(activeSecond.active,1);
+    assert.equal(activeSecond.page_index,1);
+    assert.equal((await beat({active:false,sequence:2})).currentPage.id,second.currentPage.id);
+    assert.deepEqual(readSession(),activeSecond);
+
+    const third=await beat({index:2,sequence:5}),activeThird=readSession();
+    for(const sequence of [4,5,undefined]){
+      const ignored=await beat({index:0,sequence,retry:true});
+      assert.equal(ignored.index,2);
+      assert.equal(ignored.currentPage.id,third.currentPage.id);
+      assert.deepEqual(readSession(),activeThird);
+    }
+    assert.equal(database.prepare('SELECT COUNT(*) AS count FROM source_preparation_requests WHERE document_id=?').get(id).count,0,'stale retries do not create work');
+    assert.equal((await f.request(`${path}/reading-pages`)).index,2);
+    await f.request(`/documents/${other.id}/reading-session`,'POST',{sessionId,sequence:4,index:0},404);
+    assert.deepEqual(readSession(),activeThird);
+
+    await beat({active:false,sequence:7});
+    const stopped=readSession();assert.equal(stopped.active,0);
+    assert.equal((await beat({index:0,sequence:6})).index,2);
+    assert.deepEqual(readSession(),stopped);
+    assert.equal(readBookmark().page_index,2);
+    await beat({index:1,sequence:8});
+    assert.equal(readSession().active,1);
+    assert.equal(readBookmark().page_index,1);
+
+    await beat({active:false,sequence:2},'stop-arrives-first');
+    assert.equal((await beat({index:0,sequence:1},'stop-arrives-first')).index,1);
+    assert.equal(readSession('stop-arrives-first').active,0);
+    assert.equal(readBookmark().page_index,1);
+
+    await beat({index:0},'legacy-reader');
+    assert.equal(readBookmark().page_index,0);
+    await beat({index:1},'legacy-reader');
+    assert.equal(readBookmark().page_index,1);
+    await beat({mode:'correction',sourceId,index:0,sequence:1},'correction-session');
+    assert.equal(readSession('correction-session').mode,'correction');
+    assert.equal(readBookmark().page_index,1);
+    const clamped=await beat({index:99,sequence:9});
+    assert.equal(clamped.index,2);
+    assert.deepEqual({...readBookmark()},{page_id:clamped.currentPage.id,page_index:2});
+    for(const sequence of [0,1.5,Number.MAX_SAFE_INTEGER+1])await beat({index:0,sequence},sessionId,400);
+    assert.equal((await f.request(`${path}/reading-pages`)).index,2);
+
+    await f.restart();
+    const restored=readSession();
+    assert.equal(restored.active,0);
+    assert.equal(restored.last_sequence,9);
+    assert.equal((await beat({index:0,sequence:8})).index,2);
+    assert.deepEqual(readSession(),restored);
+    await beat({index:1,sequence:10});
+    assert.equal(readSession().active,1);
+    assert.equal(readBookmark().page_index,1);
+  }finally{database.close();}
+});
 
 test('source tasks enforce ownership and running deletion; failed tombstones survive heartbeat/restart with original intact',{timeout:20000},async t=>{
   let release,entered;const gate=new Promise(resolve=>{release=resolve;}),started=new Promise(resolve=>{entered=resolve;});

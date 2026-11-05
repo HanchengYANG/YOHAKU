@@ -323,23 +323,49 @@ test("failed preparation allows one explicit retry and hides it once queued agai
   const state=await preparationFixture(page);state.taskId="preparation-task";state.error="远端正文校对失败";
   state.diagnostics={current:{state:"failed",step:"correct",source:{id:"s2",label:"PDF 第27页"}},recentFailures:[]};
   const requests=[];
-  await page.route("**/api/documents/doc/reading-session",route=>{
+  let releaseRetry;
+  const retryGate=new Promise(resolve=>releaseRetry=resolve);
+  await page.route("**/api/documents/doc/reading-session",async route=>{
     if(route.request().method()==="POST"){
       const input=route.request().postDataJSON();requests.push(input);
-      if(input.retry){state.error=null;state.diagnostics.current={...state.diagnostics.current,state:"queued"};}
+      if(input.retry){
+        await retryGate;
+        state.error=null;state.diagnostics.current={...state.diagnostics.current,state:"queued"};
+      }
     }
     return route.fallback();
   });
-  await page.goto("/#doc");
-  const preparation=page.getByRole("region",{name:"准备当前阅读页",exact:true});
-  await expect(preparation).toContainText("远端正文校对失败");
-  await expect(preparation.getByRole("link",{name:"查看后台任务",exact:true})).toBeVisible();
-  await preparation.getByRole("button",{name:"重试准备",exact:true}).click();
-  await expect.poll(()=>requests.filter(request=>request.retry===true).length).toBe(1);
-  await expect(preparation).toContainText("排队中");
-  await expect(preparation.getByRole("button",{name:"重试准备",exact:true})).toHaveCount(0);
-  state.ready=true;await expect(page.getByLabel("日语原文")).toContainText(original);
-  expect(requests.filter(request=>request.retry===true)).toHaveLength(1);
+  try{
+    await page.goto("/#doc");
+    const preparation=page.getByRole("region",{name:"准备当前阅读页",exact:true});
+    await expect(preparation).toContainText("远端正文校对失败");
+    await expect(preparation.getByRole("link",{name:"查看后台任务",exact:true})).toBeVisible();
+    await preparation.getByRole("button",{name:"重试准备",exact:true}).click();
+    await expect.poll(()=>requests.filter(request=>request.retry===true).length).toBe(1);
+    const retry=requests.find(request=>request.retry===true);
+    const onlinePosts=await page.evaluate(async()=>{
+      const fetch=window.fetch;
+      let posts=0;
+      window.fetch=(url,options)=>{
+        if(typeof url==="string"&&url.endsWith("/reading-session")&&options?.method==="POST")posts++;
+        return fetch(url,options);
+      };
+      try{
+        window.dispatchEvent(new Event("online"));
+        await new Promise(resolve=>requestAnimationFrame(resolve));
+        return posts;
+      }finally{window.fetch=fetch;}
+    });
+    expect(onlinePosts).toBe(0);
+
+    releaseRetry();
+    await expect(preparation).toContainText("排队中");
+    await expect(preparation.getByRole("button",{name:"重试准备",exact:true})).toHaveCount(0);
+    await page.evaluate(()=>window.dispatchEvent(new Event("online")));
+    await expect.poll(()=>requests.some(request=>request.active===true&&!request.retry&&request.sequence>retry.sequence)).toBe(true);
+    state.ready=true;await expect(page.getByLabel("日语原文")).toContainText(original);
+    expect(requests.filter(request=>request.retry===true)).toHaveLength(1);
+  }finally{releaseRetry();}
 });
 
 test("reopening a pending reading page restores its latest preparation progress",async({page})=>{
@@ -668,6 +694,62 @@ test("unified text import confirms detected type before preparing the current pa
   await page.getByLabel("阅读分页",{exact:true}).getByRole("button",{name:"下一页"}).click();
   await expect(page.getByLabel("日语原文")).toContainText("次の読書ページ。");
   await expect(page.getByLabel("阅读分页",{exact:true})).toContainText("第 2 页");
+});
+
+test("reading heartbeats advance the same session across page changes and source correction",async({page})=>{
+  const secondText="次の読書ページ。";
+  await fixture(page,{source1:{type:"text",bodyHtml:html(secondText),preview:{type:"text",text:secondText}}});
+  const requests=[];
+  let firstHeartbeat,releaseFirstHeartbeat;
+  const firstHeartbeatGate=new Promise(resolve=>releaseFirstHeartbeat=resolve);
+  await page.route("**/api/documents/doc/reading-session",async route=>{
+    const request=route.request(),input=request.postDataJSON();
+    requests.push(input);
+    if(!firstHeartbeat&&input.active===true&&input.mode==="reading"&&input.index===0){
+      firstHeartbeat=request;
+      await firstHeartbeatGate;
+      const currentPage={id:"p0",index:0,ready:true,bodyHtml:html(original),sourceIds:["s2"],start:6,end:6+original.length};
+      return route.fulfill({json:{pages:[currentPage],currentPage,index:0,position:0,hasNext:true,complete:false}});
+    }
+    return route.fallback();
+  });
+  const activeReadingAt=(index,start=0)=>requests.slice(start).find(input=>input.active===true&&input.mode==="reading"&&input.index===index);
+  const stopAfter=(sessionId,start)=>requests.slice(start).find(input=>input.active===false&&input.sessionId===sessionId);
+
+  try{
+    await page.goto("/#doc");
+    const reader=page.getByLabel("日语原文",{exact:true});
+    await expect(reader).toContainText(original);
+    await expect.poll(()=>!!firstHeartbeat).toBe(true);
+    const first=activeReadingAt(0),nextStart=requests.length;
+    await page.getByRole("navigation",{name:"阅读分页",exact:true}).getByRole("button",{name:"下一页",exact:true}).click();
+    await expect(reader).toContainText(secondText);
+    await expect.poll(()=>!!stopAfter(first.sessionId,nextStart)&&!!activeReadingAt(1,nextStart)).toBe(true);
+    const pageStop=stopAfter(first.sessionId,nextStart),next=activeReadingAt(1,nextStart);
+    const lateResponse=page.waitForResponse(response=>response.request()===firstHeartbeat);
+    releaseFirstHeartbeat();
+    await (await lateResponse).finished();
+    await expect(reader).toContainText(secondText);
+
+    const correctionStart=requests.length;
+    await page.getByRole("button",{name:"校对正文",exact:true}).click();
+    await expect(page.getByLabel("切换校对来源",{exact:true})).toHaveValue("s1");
+    await expect.poll(()=>!!stopAfter(first.sessionId,correctionStart)).toBe(true);
+    const correctionStop=stopAfter(first.sessionId,correctionStart),returnStart=requests.length;
+    await page.getByRole("button",{name:"返回阅读",exact:true}).click();
+    await expect(reader).toContainText(secondText);
+    await expect.poll(()=>!!activeReadingAt(1,returnStart)).toBe(true);
+    const resumed=activeReadingAt(1,returnStart);
+
+    expect(next.sessionId).toBe(first.sessionId);
+    expect(resumed.sessionId).toBe(first.sessionId);
+    let previous=0;
+    for(const {sequence} of [first,pageStop,next,correctionStop,resumed]){
+      expect(Number.isSafeInteger(sequence)).toBe(true);
+      expect(sequence).toBeGreaterThan(previous);
+      previous=sequence;
+    }
+  }finally{releaseFirstHeartbeat();}
 });
 
 for(const save of [false,true])test(`returning from second-page source correction keeps the reading position after ${save ? "saving" : "cancelling"}`,async({page})=>{

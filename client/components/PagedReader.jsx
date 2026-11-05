@@ -33,7 +33,7 @@ function DiagnosticFacts({record}) {
   return <dl className="reading-diagnostic-facts">{rows.map(([label,value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>;
 }
 
-export default function PagedReader({ document, active = true, resumePosition = null, onEditSources, onPageChange, ...readerProps }) {
+export default function PagedReader({ document, session, active = true, resumePosition = null, onEditSources, onPageChange, ...readerProps }) {
   const [resume] = useState(resumePosition);
   const [pageIndex, setPageIndex] = useState({ documentId:document.id, value:resume?.index ?? null });
   const [response, setResponse] = useState(null);
@@ -46,7 +46,6 @@ export default function PagedReader({ document, active = true, resumePosition = 
   const canHeartbeat = !!snapshot || !!resume;
   const error = failure?.documentId === document.id && failure.index === currentIndex ? failure.message : "";
   const [retry, setRetry] = useState(0);
-  const session = useRef(crypto.randomUUID());
   const retryPending = useRef(false);
   const requestSequence = useRef(0);
   const latestResponse = useRef(0);
@@ -82,24 +81,27 @@ export default function PagedReader({ document, active = true, resumePosition = 
   },[document.id,index,retry,active]);
   useEffect(() => {
     if (!active || !canHeartbeat) return;
-    let stopped = false;
+    let stopped = false, retryInFlight = false;
     const beat = () => {
-      if (stopped || window.document.visibilityState === "hidden") return;
+      if (stopped || retryInFlight || window.document.visibilityState === "hidden") return;
       const shouldRetry = retryPending.current;retryPending.current = false;
+      // An ordinary heartbeat would supersede a delayed explicit retry.
+      retryInFlight = shouldRetry;
       const request = ++requestSequence.current;
       const requestedIndex = current.current.index;
-      void api(`/documents/${encodeURIComponent(document.id)}/reading-session`,{method:"POST",body:JSON.stringify({sessionId:session.current,index:current.current.heartbeatIndex,active:true,mode:"reading",...(shouldRetry ? {retry:true} : {})})})
+      void api(`/documents/${encodeURIComponent(document.id)}/reading-session`,{method:"POST",body:JSON.stringify({sessionId:session.id,sequence:++session.sequence,index:current.current.heartbeatIndex,active:true,mode:"reading",...(shouldRetry ? {retry:true} : {})})})
         .then((next) => {if (!stopped && request >= latestResponse.current) {latestResponse.current = request;setSnapshot(next);setError("");onPageChange?.(next.currentPage,next);}})
-        .catch((cause) => {if (!stopped && request >= latestResponse.current) setError(cause.message,requestedIndex);});
+        .catch((cause) => {if (!stopped && request >= latestResponse.current) setError(cause.message,requestedIndex);})
+        .finally(() => {if (shouldRetry) retryInFlight = false;});
     };
     const stop = () => {
-      void fetch(`/api/documents/${encodeURIComponent(document.id)}/reading-session`,{method:"POST",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({sessionId:session.current,active:false})}).catch(() => {});
+      void fetch(`/api/documents/${encodeURIComponent(document.id)}/reading-session`,{method:"POST",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({sessionId:session.id,sequence:++session.sequence,active:false})}).catch(() => {});
     };
     const visibility = () => window.document.visibilityState === "hidden" ? stop() : beat();
     beat(); const timer = setInterval(beat,8000);
     window.document.addEventListener("visibilitychange",visibility);window.addEventListener("pagehide",stop);window.addEventListener("online",beat);
     return () => {stopped = true;clearInterval(timer);stop();window.document.removeEventListener("visibilitychange",visibility);window.removeEventListener("pagehide",stop);window.removeEventListener("online",beat);};
-  },[document.id,index,active,canHeartbeat,retry]);
+  },[document.id,session,index,active,canHeartbeat,retry]);
   const receivedPage = snapshot?.currentPage;
   const receivedMatches = receivedPage?.index === currentIndex;
   const page = (receivedMatches && receivedPage.ready ? receivedPage : null)

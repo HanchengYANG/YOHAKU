@@ -74,6 +74,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
   if(!database.prepare('PRAGMA table_info(article_sources)').all().some(column=>column.name==='manual_boundaries'))database.exec('ALTER TABLE article_sources ADD COLUMN manual_boundaries INTEGER');
   for(const [column,type] of [['snapshot_json','TEXT'],['finished_at','TEXT'],['target_json','TEXT']])if(!database.prepare('PRAGMA table_info(source_preparation_requests)').all().some(value=>value.name===column))database.exec(`ALTER TABLE source_preparation_requests ADD COLUMN ${column} ${type}`);
   for(const table of ['source_step_attempts','source_preparation_jobs'])if(!database.prepare(`PRAGMA table_info(${table})`).all().some(value=>value.name==='request_id'))database.exec(`ALTER TABLE ${table} ADD COLUMN request_id TEXT`);
+  if(!database.prepare('PRAGMA table_info(reading_sessions)').all().some(column=>column.name==='last_sequence'))database.exec('ALTER TABLE reading_sessions ADD COLUMN last_sequence INTEGER');
   database.exec('CREATE INDEX IF NOT EXISTS source_attempts_request ON source_step_attempts(request_id,scope_id,input_version,step)');
   database.prepare("UPDATE source_steps SET status='pending' WHERE status='running'").run();
   database.prepare("UPDATE source_step_attempts SET state='interrupted',finished_at=?,updated_at=? WHERE state IN ('queued','running','retry_wait')").run(new Date(now()).toISOString(),new Date(now()).toISOString());
@@ -780,23 +781,27 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
   }
   function heartbeat(userId,id,input={}) {
     requireDocument(userId,id);
+    const sessionId=input.sessionId||randomUUID(),existing=database.prepare('SELECT * FROM reading_sessions WHERE id=?').get(sessionId);
+    if(existing&&(existing.user_id!==userId||existing.document_id!==id))throw fail(404,'找不到这个阅读会话。');
+    const {sequence}=input;
+    if(sequence!==undefined&&(!Number.isSafeInteger(sequence)||sequence<1))throw fail(400,'阅读会话序号无效。');
+    // A delayed navigation or keepalive must not change a newer reading intent.
+    if(existing?.last_sequence!=null&&(sequence===undefined||sequence<=existing.last_sequence))return {sessionId,...readingPages(userId,id)};
     if(!hasDocument(userId,id))adoptDocument(userId,id);
     const index=input.index===undefined?database.prepare('SELECT page_index FROM reading_positions WHERE user_id=? AND document_id=?').get(userId,id)?.page_index||0:Number(input.index);
     if(!Number.isSafeInteger(index)||index<0)throw fail(400,'阅读页位置无效。');
-    const sessionId=input.sessionId||randomUUID(),existing=database.prepare('SELECT * FROM reading_sessions WHERE id=?').get(sessionId);
-    if(existing&&(existing.user_id!==userId||existing.document_id!==id))throw fail(404,'找不到这个阅读会话。');
     if(input.sourceId)scope(userId,id,input.sourceId);
     if(input.retry===true)ensureRequest(userId,id,true,input.mode==='correction'?{mode:'correction',sourceId:input.sourceId}:{mode:'reading',index});
     if(input.retry===true)retryFailedSteps(userId,id);
     const mode=input.mode==='correction'?'correction':'reading',active=input.active!==false;
-    database.prepare('INSERT INTO reading_sessions VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET mode=excluded.mode,source_id=excluded.source_id,page_index=excluded.page_index,active=excluded.active,expires_at=excluded.expires_at').run(sessionId,userId,id,mode,input.sourceId||null,index,active?1:0,now()+sessionTtlMs);
+    database.prepare('INSERT INTO reading_sessions(id,user_id,document_id,mode,source_id,page_index,active,expires_at,last_sequence) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET mode=excluded.mode,source_id=excluded.source_id,page_index=excluded.page_index,active=excluded.active,expires_at=excluded.expires_at,last_sequence=excluded.last_sequence').run(sessionId,userId,id,mode,input.sourceId||null,index,active?1:0,now()+sessionTtlMs,sequence??null);
     if(active) {
       requestPreparation(userId,id,mode,index,input.sourceId);
       database.prepare('UPDATE article_sources SET edit_expires=? WHERE edit_session=? AND user_id=? AND document_id=?').run(now()+sessionTtlMs,sessionId,userId,id);
-      const snapshot=readingPages(userId,id,index);
-      database.prepare('INSERT INTO reading_positions VALUES(?,?,?,?) ON CONFLICT(user_id,document_id) DO UPDATE SET page_id=excluded.page_id,page_index=excluded.page_index').run(userId,id,snapshot.currentPage?.id||null,index);
     }
-    schedule();return {sessionId,...readingPages(userId,id,index)};
+    const snapshot=readingPages(userId,id,index);
+    if(active&&mode==='reading')database.prepare('INSERT INTO reading_positions VALUES(?,?,?,?) ON CONFLICT(user_id,document_id) DO UPDATE SET page_id=excluded.page_id,page_index=excluded.page_index').run(userId,id,snapshot.currentPage?.id||null,snapshot.index);
+    schedule();return {sessionId,...snapshot};
   }
   function prepareSource(userId,id,sourceId,input={}) {
     const row=scope(userId,id,sourceId);

@@ -167,6 +167,11 @@ function Workspace({ user, onLoggedOut }) {
     return chatSessions.current.get(id);
   };
   const readerMain = useRef(null);
+  const readingSessions = useRef(new Map());
+  const readingSessionFor = (id) => {
+    if (!readingSessions.current.has(id)) readingSessions.current.set(id, {id:crypto.randomUUID(),sequence:0});
+    return readingSessions.current.get(id);
+  };
   const readingPosition = useRef(null);
   const readingResume = useRef(null);
   const sidebarCollapseButton = useRef(null);
@@ -1008,6 +1013,7 @@ function Workspace({ user, onLoggedOut }) {
               ) : null)}
               {document.sourceWorkflow ? <PagedReader
                 key={document.id} document={document} active={!panel || panel === "chat"}
+                session={readingSessionFor(document.id)}
                 resumePosition={readingResume.current?.documentId === document.id ? readingResume.current : null}
                 onPageChange={readingPageChanged}
                 onEditSources={editSources} onDelete={() => remove(document)}
