@@ -679,7 +679,7 @@ for(const example of [
 async function delayedProposalEditFixture(page) {
   const state={latest:{id:"s2",type:"text",position:1,version:7,checked:false,status:"requires_review",processing:false,
     bodyHtml:html(original),preview:{type:"text",text:"保存された原文。"},firstExtraction:{text:original},changes:[],articleStart:6,
-    proposal:{bodyHtml:html("古いAI提案。")}},calls:[],editStarted:false};
+    proposalToken:"a".repeat(64),proposal:{bodyHtml:html("古いAI提案。")}},calls:[],editStarted:false};
   let release;
   const gate=new Promise(resolve=>release=resolve);state.release=release;
   const base=await fixture(page,{source:state.latest});state.saves=base.saves;
@@ -732,6 +732,39 @@ test("an unchanged proposal still opens for manual review without saving automat
     await page.getByRole("button",{name:"核对并编辑此提议",exact:true}).click();state.release();
     await expect(page.getByLabel("来源正文",{exact:true})).toHaveValue("古いAI提案。");
     await expect(page.getByRole("button",{name:"保存正文",exact:true})).toBeEnabled();
+    expect(state.saves).toEqual([]);
+  }finally{state.release();}
+});
+
+for(const conflict of [false,true])test(`keeping current source text ${conflict ? "refreshes a replacement proposal on conflict" : "resumes preparation without opening the editor"}`,async({page})=>{
+  const state=await delayedProposalEditFixture(page);
+  const current=state.latest,requests=[];
+  const conflictMessage="来源正文或 AI 提议已更新，请重新核对。";
+  await page.route("**/api/documents/doc/sources/s2/keep-current",route=>{
+    const request=route.request();
+    requests.push({method:request.method(),body:request.postDataJSON()});
+    if(conflict){
+      state.latest={...current,proposalToken:"b".repeat(64),proposal:{bodyHtml:html("新しいAI提案。")}};
+      return route.fulfill({status:409,json:{error:conflictMessage}});
+    }
+    state.latest={...current,version:8,status:"pending",proposalToken:null,proposal:null};
+    return route.fulfill({json:state.latest});
+  });
+  try{
+    const keep=page.getByRole("button",{name:"保留当前正文并继续",exact:true});
+    await keep.click();
+    if(conflict){
+      await expect(page.locator(".source-error")).toHaveText(conflictMessage);
+      await expect(page.locator(".source-proposal")).toContainText("新しいAI提案。");
+      await expect(keep).toBeEnabled();
+    }else{
+      await expect(page.getByText("已保留当前正文，后台将继续分句和注音。",{exact:true})).toBeVisible();
+      await expect(page.locator(".source-proposal")).toHaveCount(0);
+    }
+    await expect(page.locator(".source-current-body")).toContainText(original);
+    await expect(page.getByLabel("来源正文",{exact:true})).toHaveCount(0);
+    expect(requests).toEqual([{method:"POST",body:{version:current.version,proposalToken:current.proposalToken,sessionId:expect.any(String)}}]);
+    expect(state.calls.filter(call=>call.method==="POST")).toEqual([]);
     expect(state.saves).toEqual([]);
   }finally{state.release();}
 });

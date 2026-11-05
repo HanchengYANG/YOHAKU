@@ -8,12 +8,12 @@ import { DatabaseSync } from 'node:sqlite';
 import sharp from 'sharp';
 import { createApp } from '../server/app.mjs';
 import { ensureSession,cookieFromResponse } from './helpers/session.mjs';
-import { bodyText,bodyRanges,blocksToHtml,htmlToBlocks,syncBodyReadings } from '../shared/article-html.mjs';
+import { bodyText,bodyRanges,blocksToHtml,htmlToBlocks,syncBodyReadings,markBodyRange } from '../shared/article-html.mjs';
 import { parseText } from '../shared/document.mjs';
 import { SENTENCE_SCHEMA } from '../shared/sentences.mjs';
 import { ANNOTATION_SCHEMA } from '../shared/ocr-correction.mjs';
 
-async function fixture(t,{connected=true,ndlOcr,beforeRun,chapterProposal}={}) {
+async function fixture(t,{connected=true,ndlOcr,beforeRun,chapterProposal,correctedText}={}) {
   const dataDir=await mkdtemp(join(tmpdir(),'yohaku-source-api-')),calls=[];
   const modelIds=['vision','correction-model','sentence-model','ruby-model','chat-model'];
   const checkedAt=new Date().toISOString();
@@ -30,7 +30,7 @@ async function fixture(t,{connected=true,ndlOcr,beforeRun,chapterProposal}={}) {
         else if(input.schema===SENTENCE_SCHEMA){const text=JSON.parse(input.prompt.split('输入正文：\n').at(-1).split('\n')[0]);value={sentences:text.match(/[^。]*。|[^。]+$/gu)||[text]};}
         else if(input.schema?.properties?.changes)value={changes:[],uncertain:[]};
         else if(input.schema===ANNOTATION_SCHEMA){const targets=JSON.parse(input.prompt.split('输入目标：\n').at(-1).split('\n')[0]);value={blocks:targets.map(({text})=>({words:[{t:text,r:'にほんご'}]}))};}
-        else if(input.schema){value={text:JSON.parse(input.prompt.split('目标正文：\n').at(-1))};}
+        else if(input.schema){value={text:input.model==='correction-model'&&correctedText!==undefined?correctedText:JSON.parse(input.prompt.split('目标正文：\n').at(-1))};}
         return {completed:true,text:value?JSON.stringify(value):'語句の説明。',model:input.model,threadId:'source-api-thread'};
       }} };
   }
@@ -285,6 +285,73 @@ test('screenshot local OCR saves real regions before provider authorization and 
   const result=await f.request(`/documents/${id}/sources/${source.id}`);assert.equal(ocrCalls,1);assert.equal(f.calls.length,0);
   assert.equal(result.firstExtraction.text,'本地の原文。');assert.equal(result.status,'failed');assert.match(result.error,/授权|连接|不可用/);
   const saved=await f.request(`/documents/${id}/sources/${source.id}`,'PUT',{version:result.version,text:'人工补回。'});assert.equal(saved.manual,true);assert.equal(saved.firstExtraction.text,'本地の原文。');assert.equal(ocrCalls,1);
+});
+
+test('keeping current source text rejects stale proposals and resumes the existing task without applying AI edits',async t=>{
+  const original='日本語の原文です。\n削除してはいけない本文。',proposed='日本語の原文です。';
+  let extractions=0;
+  const f=await fixture(t,{correctedText:proposed,ndlOcr:{async recognize(){
+    extractions++;
+    return {text:original,blocks:parseText(original.replace('日本語','{日本語|ニホンゴ}'))};
+  },close(){}}});
+  await f.configure();
+  const bytes=await sharp({create:{width:30,height:50,channels:3,background:'white'}}).png().toBuffer(),form=new FormData();
+  form.append('files',new Blob([bytes],{type:'image/png'}),'Screenshot.png');
+  const draft=await f.request('/imports','POST',form,201);
+  const imported=await f.request(`/imports/${draft.id}/confirm`,'POST',{type:'screenshot',title:'核对截图'},201);
+  const id=imported.firstDocumentId,documentPath=`/documents/${id}`;
+  const [{id:sourceId}]=(await f.request(`${documentPath}/sources`)).sources;
+  const path=`${documentPath}/sources/${sourceId}`,keepPath=`${path}/keep-current`;
+  assert.equal((await f.request(path)).proposalToken,null);
+  const session=await f.request(`${documentPath}/reading-session`,'POST',{index:0,active:true});
+  await f.instance.sources.drain();
+  const review=await f.request(path);
+  assert.equal(review.status,'requires_review');assert.equal(bodyText(review.proposal.bodyHtml),proposed);
+  assert.equal(typeof review.proposalToken,'string');assert.ok(review.proposalToken);
+  assert.equal(review.text,original);assert.deepEqual(f.calls.map(call=>call.model),['correction-model']);
+  assert.equal((await f.request(`/tasks/${session.taskId}`)).status,'requires_review');
+  await f.request(keepPath,'POST',{version:review.version-1,proposalToken:review.proposalToken},409);
+  const checked=await f.request(`${path}/checked`,'POST',{version:review.version,checked:true});
+  assert.equal(checked.checked,true);assert.equal(checked.status,'requires_review');
+  const database=new DatabaseSync(join(f.dataDir,'yohaku.sqlite'));
+  try{
+    const correction=()=>database.prepare("SELECT * FROM source_step_attempts WHERE scope_id=? AND step='correct'").all(review.scopeId);
+    const journal=correction();assert.equal(journal.length,1);
+    // Simulate a proposal replaced at the same source version while another tab was reviewing it.
+    const replacement={...review.proposal,bodyHtml:blocksToHtml(parseText('別の提議。'))};
+    database.prepare('UPDATE article_sources SET proposal_json=? WHERE scope_id=?').run(JSON.stringify(replacement),review.scopeId);
+    const refreshed=await f.request(path);
+    assert.equal(refreshed.version,review.version);assert.notEqual(refreshed.proposalToken,review.proposalToken);
+    await f.request(keepPath,'POST',{version:review.version,proposalToken:review.proposalToken},409);
+
+    const edit=await f.request(`${path}/edit`,'POST',{sessionId:'other-edit-session'});
+    const decision={version:refreshed.version,proposalToken:refreshed.proposalToken};
+    await f.request(keepPath,'POST',{...decision,sessionId:'review-session'},409);
+
+    const document=await f.request(documentPath);
+    f.instance.sources.persistDocumentMarks(f.user.id,id,markBodyRange(document.bodyHtml,0,3,'latest-review-qa'));
+    const current=await f.request(path);
+    assert.equal(current.version,decision.version);assert.equal(current.proposalToken,decision.proposalToken);
+    assert.deepEqual(bodyRanges(current.bodyHtml).qa.map(mark=>mark.id),['latest-review-qa']);
+    const kept=await f.request(keepPath,'POST',{...decision,sessionId:edit.sessionId});
+    assert.equal(kept.version,review.version+1);assert.equal(kept.proposal,null);assert.equal(kept.proposalToken,null);
+    assert.equal(kept.editing,false);assert.equal(kept.bodyHtml,current.bodyHtml);
+    assert.equal(kept.checked,true);assert.equal(kept.checkedVersion,kept.version);
+    await f.request(keepPath,'POST',{version:kept.version,proposalToken:decision.proposalToken},409);
+    await f.instance.sources.drain();
+
+    const ready=await f.request(path),reading=await f.request(`${documentPath}/reading-pages`);
+    assert.equal(ready.status,'ready');assert.equal(ready.text,original);assert.equal(ready.checked,true);
+    assert.deepEqual(ready.firstExtraction,review.firstExtraction);assert.deepEqual(ready.preview,review.preview);
+    assert.deepEqual(bodyRanges(ready.bodyHtml).qa.map(mark=>mark.id),['latest-review-qa']);
+    assert.ok(htmlToBlocks(ready.bodyHtml).flatMap(block=>block.segments).some(({text,reading,origin})=>text==='日本語'&&reading==='ニホンゴ'&&origin==='manual'));
+    assert.equal(reading.currentPage.ready,true);assert.equal(bodyText(reading.currentPage.bodyHtml),original);
+    assert.equal((await f.request(`/tasks/${session.taskId}`)).status,'completed');
+    assert.equal(extractions,1);assert.deepEqual(correction(),journal);
+    assert.deepEqual(f.calls.map(call=>call.model).sort(),['correction-model','ruby-model','sentence-model']);
+    const raw=await fetch(f.url+ready.preview.url,{headers:{Cookie:(await ensureSession(f.url)).cookie},signal:AbortSignal.timeout(5000)});
+    assert.equal(raw.status,200);assert.deepEqual(Buffer.from(await raw.arrayBuffer()),bytes);
+  }finally{database.close();}
 });
 
 

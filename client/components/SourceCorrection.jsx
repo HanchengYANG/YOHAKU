@@ -42,6 +42,7 @@ export default function SourceCorrection({ document, sourceIds = [], onClose, on
   const [selection,setSelection] = useState(null), [notice,setNotice] = useState("");
   const [chatOpen,setChatOpen] = useState(false), [chatRequest,setChatRequest] = useState(null), [chatNavigation,setChatNavigation] = useState(null), [answering,setAnswering] = useState(false);
   const session = useRef(crypto.randomUUID()), detailSequence = useRef(0), isEditing = useRef(false);
+  const reviewSequence = useRef(0);
   const route = `/documents/${encodeURIComponent(document.id)}/sources`;
   const loadSources = async () => {const result = await api(route);setSources(result.sources);return result.sources;};
   useEffect(() => {let stopped = false;loadSources().then((list) => {if (!stopped) setActiveId(sourceIds.find((id) => list.some((item) => item.id === id)) || list[0]?.id || null);}).catch((cause) => setError(cause.message));return () => {stopped = true;};},[document.id]);
@@ -50,13 +51,14 @@ export default function SourceCorrection({ document, sourceIds = [], onClose, on
     let stopped = false, timer;
     const sequence = ++detailSequence.current;
     const load = async () => {
+      const review = reviewSequence.current;
       try {
         const result = await api(`${route}/${encodeURIComponent(activeId)}`);
-        if (stopped || sequence !== detailSequence.current) return;
+        if (stopped || sequence !== detailSequence.current || review !== reviewSequence.current) return;
         setSource((current) => isEditing.current ? current : result);
         if (!isEditing.current) setHtml(result.bodyHtml || "");
         setSources((current) => current.map((item) => item.id === result.id ? result : item));
-      } catch (cause) {if (!stopped) setError(cause.message);}
+      } catch (cause) {if (!stopped && review === reviewSequence.current) setError(cause.message);}
       finally {if (!stopped) timer = setTimeout(load,2000);}
     };
     setSource(null);setError("");setEditing(false);isEditing.current = false;setDirty(false);onDirty?.(false);setSelection(null);setNotice("");
@@ -110,6 +112,26 @@ export default function SourceCorrection({ document, sourceIds = [], onClose, on
     } catch (cause) {setError(cause.message);}
     finally {setBusy(false);}
   };
+  const keepCurrent = async () => {
+    const sourceRoute = `${route}/${encodeURIComponent(activeId)}`;
+    setBusy(true);setError("");setNotice("");
+    let latest;
+    try {
+      latest = await api(`${sourceRoute}/keep-current`,{method:"POST",body:JSON.stringify({version:source.version,proposalToken:source.proposalToken,sessionId:session.current})});
+      setNotice("已保留当前正文，后台将继续分句和注音。");
+      onDocumentChanged?.();
+    } catch (cause) {
+      setError(cause.message);
+      if (cause.status === 409) latest = await api(sourceRoute).catch(() => null);
+    } finally {
+      if (latest) {
+        reviewSequence.current++;
+        setSource(latest);setHtml(latest.bodyHtml || "");setSelection(null);
+        setSources((current) => current.map((item) => item.id === latest.id ? latest : item));
+      }
+      setBusy(false);
+    }
+  };
   const markChecked = async () => {
     setBusy(true);setError("");
     try {const latest = await api(`${route}/${encodeURIComponent(activeId)}/checked`,{method:"POST",body:JSON.stringify({version:source.version,checked:!source.checked})});setSource(latest);setSources((current) => current.map((item) => item.id === latest.id ? latest : item));}
@@ -156,7 +178,7 @@ export default function SourceCorrection({ document, sourceIds = [], onClose, on
         : !source ? <p role="status">正在读取来源…</p> : <>
           <p className="source-scope-note">本次编辑只影响当前文章中的对应正文。原始资料和首次提取结果保留，可同时对照完整来源。</p>
           {source.original?.boundaryNeedsReview && <p className="source-boundary-note">此处章节边界待核对，可对照 PDF 原页确认正文范围。</p>}
-          {source.proposal?.bodyHtml && <section className="source-proposal" role="alert"><h2>AI 修改需要核对</h2><p>校正结果包含整句、整段删除或较大改写，处理已暂停。请对照原始来源和以下差异，选择编辑后保存。</p><div className="source-diff"><div><h3>当前正文</h3><pre>{bodyText(html)}</pre></div><div><h3>AI 提议</h3><pre>{bodyText(source.proposal.bodyHtml)}</pre></div></div><button className="button secondary" disabled={busy || editing} onClick={() => beginEdit(source.proposal.bodyHtml)}>核对并编辑此提议</button></section>}
+          {source.proposal?.bodyHtml && <section className="source-proposal" role="alert"><h2>AI 修改需要核对</h2><p>校正结果包含整句、整段删除或较大改写，处理已暂停。请对照原始来源和以下差异。可保留当前正文，或编辑 AI 提议后保存。</p><div className="source-diff"><div><h3>当前正文</h3><pre>{bodyText(html)}</pre></div><div><h3>AI 提议</h3><pre>{bodyText(source.proposal.bodyHtml)}</pre></div></div><div className="source-actions">{source.proposalToken && <button className="button primary" disabled={busy || editing} onClick={keepCurrent}>保留当前正文并继续</button>}<button className="button secondary" disabled={busy || editing} onClick={() => beginEdit(source.proposal.bodyHtml)}>核对并编辑此提议</button></div></section>}
           <div className="source-correction-grid"><div className="source-edit-pane"><div className="source-status-row"><span className="source-status">{source.checked ? "已核对" : "待核对"}</span><span>{source.processing ? "处理中" : ({ready:"处理完成",pending:"等待准备",failed:"准备失败",requires_review:"AI 修改待核对"})[source.status] || ""}</span></div>
             {!editing ? <><div className="source-current-body">{bodyText(html).trim() ? <ArticleBody html={html} showRuby fontSize={24} onGroup={viewGroups} onSelection={setSelection} /> : <p>{source.error ? "提取失败，可以对照来源人工录入。" : source.manual || source.status === "ready" ? "此来源当前没有正文内容。" : "此来源正文尚未准备，可以等待或人工录入。"}</p>}</div><button className="button primary" disabled={busy} onClick={beginEdit}>编辑正文与注音</button></>
               : <><p className="source-editing-note">正在人工编辑，此来源的自动正文更新已冻结。</p>

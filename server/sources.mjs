@@ -12,6 +12,7 @@ const fail=(status,message)=>Object.assign(new Error(message),{status,expose:tru
 const json=value=>JSON.stringify(value);
 const decode=(value,fallback=null)=>value?JSON.parse(value):fallback;
 const hash=html=>createHash('sha256').update(body.bodyText(html)).digest('hex');
+const reviewToken=row=>row.status==='requires_review'&&row.proposal_json?createHash('sha256').update(row.proposal_json).digest('hex'):null;
 const aliases={pdf_text:'text_pdf',pdf_scan:'scan_pdf'};
 const types=new Set(['photo','screenshot','scan_pdf','text_pdf','epub','text','paste']);
 const stages=['extract','correct','segment','annotate'];
@@ -427,7 +428,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     const steps=database.prepare('SELECT step,input_version AS inputVersion,status,error,updated_at AS updatedAt FROM source_steps WHERE scope_id=? ORDER BY updated_at,step').all(row.scope_id);
     const processing=row.status==='processing'||!internal&&row.status==='pending'&&steps.some(({step,inputVersion,status})=>
       status==='running'&&inputVersion===row.version&&(liveNodes??=liveSourceNodes(row.user_id,row.document_id)).has(json([row.scope_id,inputVersion,step])));
-    return {id:row.source_id,scopeId:row.scope_id,type:row.type,localRange:decode(row.range_json),position:row.position,...(internal?{documentTitle:document.title}:{}),version:row.version,checked:row.checked_version===row.version,checkedVersion:row.checked_version,status:row.status,processing,manual:!!row.manual,editing:!!row.edit_session&&row.edit_expires>now(),preview,original:internal?decode(row.original_json,{}):publicMetadata(decode(row.original_json,{})),firstExtraction:decode(row.first_extraction_json),bodyHtml:html,text:body.bodyText(html),articleStart:before,articleEnd:before+body.bodyText(html).length,articleBodyHash,error:row.error||null,proposal:decode(row.proposal_json),steps,changes:database.prepare("SELECT version,step,body_html AS bodyHtml,execution_json AS executionJson,created_at AS createdAt FROM source_revisions WHERE scope_id=? ORDER BY version,created_at,CASE step WHEN 'extract' THEN 0 WHEN 'chapter_filter' THEN 1 ELSE 2 END").all(row.scope_id).map(({executionJson,...revision})=>({...revision,execution:decode(executionJson)}))};
+    return {id:row.source_id,scopeId:row.scope_id,type:row.type,localRange:decode(row.range_json),position:row.position,...(internal?{documentTitle:document.title}:{}),version:row.version,checked:row.checked_version===row.version,checkedVersion:row.checked_version,status:row.status,processing,manual:!!row.manual,editing:!!row.edit_session&&row.edit_expires>now(),preview,original:internal?decode(row.original_json,{}):publicMetadata(decode(row.original_json,{})),firstExtraction:decode(row.first_extraction_json),bodyHtml:html,text:body.bodyText(html),articleStart:before,articleEnd:before+body.bodyText(html).length,articleBodyHash,error:row.error||null,proposal:decode(row.proposal_json),proposalToken:reviewToken(row),steps,changes:database.prepare("SELECT version,step,body_html AS bodyHtml,execution_json AS executionJson,created_at AS createdAt FROM source_revisions WHERE scope_id=? ORDER BY version,created_at,CASE step WHEN 'extract' THEN 0 WHEN 'chapter_filter' THEN 1 ELSE 2 END").all(row.scope_id).map(({executionJson,...revision})=>({...revision,execution:decode(executionJson)}))};
   }
   function listSources(userId,id) {const document=requireDocument(userId,id),rows=scopes(userId,id),articleOffsets=new Map();let offset=0;for(const row of rows){articleOffsets.set(row.source_id,offset);offset+=body.bodyText(readHtml(row)).length;}const articleBodyHash=document.body_hash||hash(compose(rows)),liveNodes=liveSourceNodes(userId,id);return rows.map(row=>sourceDetail(row,{articleOffsets,articleBodyHash,liveNodes}));}
   const getSource=(userId,id,sourceId)=>sourceDetail(scope(userId,id,sourceId));
@@ -521,6 +522,14 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     abortRetiredWork(retired);
     requestPreparation(userId,id,'correction',0,sourceId);
     schedule();return getSource(userId,id,sourceId);
+  }
+  function keepCurrentSource(userId,id,sourceId,input) {
+    const row=scope(userId,id,sourceId);assertVersion(row,input?.version);
+    const token=reviewToken(row);
+    if(!token||token!==input.proposalToken)throw fail(409,'AI 提议已更新或已处理，请重新核对。');
+    if(row.edit_session&&row.edit_expires>now()&&row.edit_session!==input.sessionId)throw fail(409,'另一个页面正在编辑此来源，请保存或退出编辑后再试。');
+    const saved=saveSource(userId,id,sourceId,{version:row.version,bodyHtml:readHtml(row)});
+    return row.edit_session&&row.edit_session===input.sessionId?endEdit(userId,id,sourceId,input):saved;
   }
   function markChecked(userId,id,sourceId,input) {
     const row=scope(userId,id,sourceId);assertVersion(row,input?.version);
@@ -1221,6 +1230,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     app.post(`${base}/sources/reorder`,(req,res)=>res.json(reorderSources(req.user.id,req.params.id,req.body)));
     app.get(`${base}/sources/:sourceId`,(req,res)=>res.json(getSource(req.user.id,req.params.id,req.params.sourceId)));
     app.put(`${base}/sources/:sourceId`,(req,res)=>res.json(saveSource(req.user.id,req.params.id,req.params.sourceId,req.body)));
+    app.post(`${base}/sources/:sourceId/keep-current`,(req,res)=>res.json(keepCurrentSource(req.user.id,req.params.id,req.params.sourceId,req.body)));
     app.post(`${base}/sources/:sourceId/checked`,(req,res)=>res.json(markChecked(req.user.id,req.params.id,req.params.sourceId,req.body)));
     app.post(`${base}/sources/:sourceId/edit`,(req,res)=>res.json(beginEdit(req.user.id,req.params.id,req.params.sourceId,req.body)));
     app.delete(`${base}/sources/:sourceId/edit`,(req,res)=>res.json(endEdit(req.user.id,req.params.id,req.params.sourceId,req.body)));
