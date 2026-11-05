@@ -324,7 +324,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
           </div>}
           {exclusions.map((item,index) => <div key={item.id || `${item.page}:${item.startLine}:${item.endLine}:${index}`} className="source-chapter">
             <label className="source-checkbox"><input type="checkbox" checked={item.excluded !== false} disabled={structureLocked} onChange={(event) => {setExclusions((current) => current.map((entry,i) => i === index ? {...entry,excluded:event.target.checked} : entry));dirty();}} />排除 PDF 第 {item.page} 页，第 {item.startLine}–{item.endLine} 行</label>
-            <p>{item.reason}</p>{item.text && <pre className="source-original-text">{item.text}</pre>}
+            <p>{item.reason}</p>{item.bodyLike && <p className="source-scope-note">这几行像是正文，默认保留；核对原页确认是非正文后再勾选排除。</p>}{item.text && <pre className="source-original-text">{item.text}</pre>}
           </div>)}
         </section>}
       </div>}

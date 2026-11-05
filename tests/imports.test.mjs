@@ -234,6 +234,16 @@ test('chapter filtering preserves first local OCR and only removes confirmed lin
   assert.equal(saved.status,201);const value=f.attached[0].values[0];assert.equal(value.text,'第1页正文。');assert.equal(value.firstExtraction.text,'第1页正文。\n页脚');assert.equal(value.firstExtraction.label,'本地 OCR 首次提取结果');assert.equal(value.importExclusions[0].reason,'页脚');
 });
 
+test('body-like AI exclusion suggestions start unticked and stay in the confirmed text',async t=>{
+  const f=await fixture(t,{proposal:()=>({chapters:[{title:'正文',startPage:1,endPage:1,needsReview:false}],exclusions:[{page:1,startLine:1,endLine:1,reason:'误判的注释',bodyLike:true},{page:1,startLine:2,endLine:2,reason:'页脚'}]})}),form=new FormData();
+  form.append('files',new Blob([blankPdf()],{type:'application/pdf'}),'book.pdf');
+  const stage=await f.request('/api/imports','POST',form),path=`/api/imports/${stage.data.id}`;
+  await f.request(path+'/chapters','POST',{type:'scan_pdf'});const proposal=await f.waitChapters(path);
+  assert.deepEqual(proposal.data.exclusions.map(({startLine,excluded,bodyLike})=>[startLine,excluded,bodyLike===true]),[[1,false,true],[2,true,false]]);
+  const saved=await f.request(path+'/confirm','POST',{type:'scan_pdf',title:'本',asBook:true,chapters:proposal.data.chapters,exclusions:proposal.data.exclusions});
+  assert.equal(saved.status,201);const value=f.attached[0].values[0];assert.equal(value.text,'第1页正文。');assert.deepEqual(value.importExclusions.map(item=>item.reason),['页脚']);
+});
+
 test('interrupted local extraction retries only missing pages and duplicate requests share one job',async t=>{
   let release,failed=false;const gate=new Promise(resolve=>{release=resolve;});
   const f=await fixture(t,{extractChapterPage:async source=>{const page=source.original.page;if(page===2&&!failed){await gate;failed=true;throw Object.assign(new Error('本地第2页失败'),{expose:true});}return {text:`页${page}。`};}}),form=new FormData();

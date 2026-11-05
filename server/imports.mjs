@@ -181,7 +181,8 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
       const exclusions=(result.exclusions||[]).map(value=>{
         const lines=pages[value.page-1]?.text.split('\n');
         if(!lines||!Number.isSafeInteger(value.startLine)||!Number.isSafeInteger(value.endLine)||value.startLine<1||value.endLine<value.startLine||value.endLine>lines.length)throw fail(502,'AI 排除内容的原文行号无效，请重试分章。');
-        return {page:value.page,startLine:value.startLine,endLine:value.endLine,reason:String(value.reason||'非正文内容').slice(0,500),text:lines.slice(value.startLine-1,value.endLine).join('\n'),excluded:true};
+        // Body-like suggestions start unticked; the reader decides whether to drop them.
+        return {page:value.page,startLine:value.startLine,endLine:value.endLine,reason:String(value.reason||'非正文内容').slice(0,500),text:lines.slice(value.startLine-1,value.endLine).join('\n'),excluded:value.bodyLike!==true,...(value.bodyLike===true?{bodyLike:true}:{})};
       });
       draft.chapters=proposed;draft.exclusions=exclusions;draft.chapterProposalType=type;if(result.execution)draft.execution=result.execution;
       delete draft.chapterError;draft.chapterProcessing={...draft.chapterProcessing,status:'done',type,completedPages:totalPages,totalPages,finishedAt:new Date().toISOString()};persist(draft);

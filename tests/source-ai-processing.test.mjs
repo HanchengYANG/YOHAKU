@@ -358,6 +358,98 @@ test('全书分章返回必须显式覆盖首尾和中间每页，不默默排�
   assert.equal(result.chapters.length,3);assert.equal(result.chapters[0].excluded,true);
 });
 
+test('分章结果未通过校验时带原因自动重试一次，成功后合并两次执行记录',async()=>{
+  const pages=Array.from({length:4},(_,index)=>({page:index+1,text:`第${index+1}页原文。`})),prompts=[];
+  const answers=[
+    {chapters:[{title:'正文',startPage:1,endPage:2,excluded:false,needsReview:false},{title:'后半',startPage:4,endPage:4,excluded:false,needsReview:false}],exclusions:[]},
+    {chapters:[{title:'正文',startPage:1,endPage:2,excluded:false,needsReview:false},{title:'后半',startPage:3,endPage:4,excluded:false,needsReview:false}],exclusions:[]},
+  ];
+  const processor=createSourceProcessor({execute:async(_user,role,input)=>{
+    prompts.push(input.prompt);
+    return {value:answers[prompts.length-1],execution:{role,model:'qwen',elapsedMs:10}};
+  }});
+  const result=await processor.proposeChapters('u',{metadata:{pageCount:4},pages});
+  assert.equal(prompts.length,2);
+  assert.doesNotMatch(prompts[0],/上次分章结果未通过校验/);
+  assert.match(prompts[1],/上次分章结果未通过校验（分章遗漏 PDF 实际第 3 页/);
+  assert.deepEqual(JSON.parse(prompts[1].split('全书逐页原文：\n')[1]),JSON.parse(prompts[0].split('全书逐页原文：\n')[1]));
+  assert.deepEqual(result.chapters.map(chapter=>[chapter.startPage,chapter.endPage]),[[1,2],[3,4]]);
+  assert.equal(result.execution.role,'chaptering');assert.equal(result.execution.elapsedMs,20);
+});
+
+test('分章两次都未通过校验时报告最后的校验错误，模型调用失败不重试',async()=>{
+  const pages=[{page:1,text:'一页。'},{page:2,text:'二页。'}];
+  let calls=0;
+  const invalid=createSourceProcessor({execute:async(_user,role)=>{calls++;return {value:{chapters:[{title:'正文',startPage:1,endPage:1,excluded:false,needsReview:false}],exclusions:[]},execution:{role,elapsedMs:5}};}});
+  await assert.rejects(invalid.proposeChapters('u',{metadata:{pageCount:2},pages}),error=>/遗漏/.test(error.message)&&error.execution?.elapsedMs===10);
+  assert.equal(calls,2);
+  calls=0;
+  const failing=createSourceProcessor({execute:async()=>{calls++;throw Object.assign(new Error('提供方超时'),{status:504});}});
+  await assert.rejects(failing.proposeChapters('u',{metadata:{pageCount:2},pages}),/提供方超时/);
+  assert.equal(calls,1);
+});
+
+test('分章只丢弃无效或重叠的排除建议，保留其余结果且不重试',async()=>{
+  const pages=[{page:1,text:'页眉\n叙事正文。\n页脚'},{page:2,text:'正文继续。'}];
+  let calls=0;
+  const processor=createSourceProcessor({execute:async()=>{calls++;return {value:{chapters:[{title:'正文',startPage:1,endPage:2,excluded:false,needsReview:false}],exclusions:[
+    {page:1,startLine:3,endLine:3,reason:'页脚'},
+    {page:3,startLine:1,endLine:1,reason:'越界页'},
+    {page:1,startLine:1,endLine:9,reason:'越界行'},
+    {page:2,startLine:1,endLine:1,reason:''},
+    {page:1,startLine:1,endLine:1,reason:'页眉'},
+    {page:1,startLine:1,endLine:2,reason:'与页眉重叠'},
+    {page:1,startLine:2,endLine:2,reason:'多余字段',text:'改写'},
+  ]}};}});
+  const result=await processor.proposeChapters('u',{metadata:{pageCount:2},pages});
+  assert.equal(calls,1);
+  assert.deepEqual(result.exclusions,[{page:1,startLine:1,endLine:1,reason:'页眉'},{page:1,startLine:3,endLine:3,reason:'页脚'}]);
+});
+
+test('只含重复章节名的单行页并回所属章节并排除该行，不另成章节',async()=>{
+  const pages=[
+    {page:1,text:'封面'},
+    {page:2,text:'一 マイク・ミラーです\nきょうから一年間、僕は働く。'},
+    {page:3,text:'「はい」'},
+    {page:4,text:'一マイク・ミラーです'},
+    {page:5,text:'二 時間を守る\n朝、駅へ行った。'},
+    {page:6,text:'二時間を守る'},
+    {page:7,text:'駅は込んでいた。\n電車が来た。'},
+  ];
+  for(const junk of [{title:'章題繰り返し',excluded:false,needsReview:true},{title:'一マイク・ミラーです',excluded:true,needsReview:false}]){
+    const processor=createSourceProcessor({execute:async()=>({value:{chapters:[
+      {title:'封面',startPage:1,endPage:1,excluded:true,needsReview:false},
+      {title:'一マイク・ミラーです',startPage:2,endPage:3,excluded:false,needsReview:false},
+      {...junk,startPage:4,endPage:4},
+      {title:'二時間を守る',startPage:5,endPage:7,excluded:false,needsReview:false},
+    ],exclusions:[]}})});
+    const result=await processor.proposeChapters('u',{metadata:{pageCount:7},pages});
+    assert.deepEqual(result.chapters.map(({title,startPage,endPage,excluded,needsReview})=>[title,startPage,endPage,excluded,needsReview]),[
+      ['封面',1,1,true,false],['一マイク・ミラーです',2,4,false,false],['二時間を守る',5,7,false,false],
+    ]);
+    assert.deepEqual(result.exclusions.map(({page,startLine,endLine})=>[page,startLine,endLine]),[[4,1,1],[6,1,1]]);
+    assert.ok(result.exclusions.every(exclusion=>/章节名/.test(exclusion.reason)));
+  }
+});
+
+test('模型建议排除疑似正文的行时标记为默认保留，短注释和重复章节名照常排除',async()=>{
+  const pages=[
+    {page:1,text:'一 はい、そうです\n朝、駅へ行った。\n*手を止める\n天気予報の日本語は、なぜか耳に残るから、自然に覚えてしまった*耳に残る\n「タワポンさん」\n**\nあたまはい\n*頭に入らない'},
+    {page:2,text:'一はい、そうです'},
+  ];
+  const processor=createSourceProcessor({execute:async()=>({value:{chapters:[{title:'一 はい、そうです',startPage:1,endPage:2,excluded:false,needsReview:false}],exclusions:[
+    {page:1,startLine:3,endLine:3,reason:'词语注释'},
+    {page:1,startLine:4,endLine:4,reason:'词语注释'},
+    {page:1,startLine:5,endLine:5,reason:'人名注释'},
+    {page:1,startLine:6,endLine:6,reason:'装饰分隔线'},
+    {page:1,startLine:7,endLine:8,reason:'注释及读音'},
+  ]}})});
+  const result=await processor.proposeChapters('u',{metadata:{pageCount:2},pages});
+  assert.deepEqual(result.exclusions.map(({page,startLine,bodyLike})=>[page,startLine,bodyLike===true]),[
+    [1,3,false],[1,4,true],[1,5,true],[1,6,true],[1,7,false],[2,1,false],
+  ]);
+});
+
 test('invalid segmentation retains only the expected text, model value and execution for diagnosis',async()=>{
   const value={sentences:['原文。','余分。']},execution={role:'segmentation',providerId:'api_base',model:'deepseek'};
   const processor=createSourceProcessor({execute:async()=>({value,execution,requestHeaders:{authorization:'fixture-secret-never-persist'}})});
