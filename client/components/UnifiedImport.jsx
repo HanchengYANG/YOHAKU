@@ -55,6 +55,9 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
   const chapterRunning = ["queued","extracting","proposing"].includes(processing?.status);
   const chapterFailed = ["failed","timeout"].includes(processing?.status) || !!draft?.chapterError;
   const structureLocked = busy || chapterRunning;
+  const inIncludedChapter = ({page}) => chapters.some(({excluded,startPage,endPage}) => !excluded && page >= startPage && page <= endPage);
+  const includedLineSuggestions = exclusions.filter(inIncludedChapter);
+  const selectedLineExclusions = includedLineSuggestions.filter((item) => item.excluded !== false).length;
   const context = {initialBookId:initialBookId || null,initialTargetId:initialTargetId || null};
   const storageKey = `yohaku:import-draft:${JSON.stringify(context)}`;
   const forgetDraft = () => {try {sessionStorage.removeItem(storageKey);} catch {}};
@@ -259,6 +262,12 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
         </div>)}
         <button type="button" className="text-button" disabled={structureLocked} onClick={() => editChapterStructure([...chapters,{id:crypto.randomUUID(),title:`章节 ${chapters.length + 1}`,startPage:1,endPage:1,excluded:false,needsReview:true}])}>添加章节</button>
         {!!exclusions.length && <section aria-label="建议排除的内容"><h3>建议排除的内容</h3><p>以下全部建议均可修改。取消勾选可将对应内容保留在正文中；原始文件和{type === "scan_pdf" ? "原始 OCR 结果" : "原始文字提取结果"}完整保留。</p>
+          {!!includedLineSuggestions.length && <div className="source-status-row">
+            <button type="button" className="button secondary" disabled={structureLocked || !selectedLineExclusions} onClick={() => {
+              setExclusions((current) => current.map((item) => item.excluded !== false && inIncludedChapter(item) ? {...item,excluded:false} : item));dirty();
+            }}>保留正文中的全部建议行</button>
+            <span role="status">正文范围内已选 {selectedLineExclusions} 处行排除</span>
+          </div>}
           {exclusions.map((item,index) => <div key={item.id || `${item.page}:${item.startLine}:${item.endLine}:${index}`} className="source-chapter">
             <label className="source-checkbox"><input type="checkbox" checked={item.excluded !== false} disabled={structureLocked} onChange={(event) => {setExclusions((current) => current.map((entry,i) => i === index ? {...entry,excluded:event.target.checked} : entry));dirty();}} />排除 PDF 第 {item.page} 页，第 {item.startLine}–{item.endLine} 行</label>
             <p>{item.reason}</p>{item.text && <pre className="source-original-text">{item.text}</pre>}

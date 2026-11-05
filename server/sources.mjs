@@ -174,6 +174,12 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     for(const key of ['queuedAt','startedAt','nextRetryAt'])if(typeof value?.[key]==='string'&&Number.isFinite(Date.parse(value[key])))result[key]=new Date(value[key]).toISOString();
     return {...result,...executionUsage(value)};
   }
+  function trackWorkNode(execution,row,step){
+    if(!execution)return null;
+    const key=json([row.scope_id,row.version,step]);
+    if(!execution.nodes.has(key))execution.nodes.set(key,{scopeId:row.scope_id,version:row.version,step,attempts:[]});
+    return execution.nodes.get(key);
+  }
   function startAttempt(row,step,execution) {
     const id=randomUUID(),started=stamp();
     database.prepare("INSERT INTO source_step_attempts(id,scope_id,step,input_version,state,started_at,updated_at,request_id) VALUES(?,?,?,?,'running',?,?,?)").run(id,row.scope_id,step,row.version,started,started,execution?.requestId||null);
@@ -204,7 +210,39 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
       const message=state==='failed'?(value?.expose&&typeof value.message==='string'?value.message.slice(0,500):'来源处理失败，请重试或查看诊断信息。'):state==='requires_review'?'正文出现较大改动，请核对差异。':null;
       database.prepare('UPDATE source_step_attempts SET state=?,queued_at=?,started_at=?,finished_at=?,updated_at=?,execution_json=?,diagnostic_json=?,message=? WHERE id=?').run(state,queuedAt,startedAt,finished,finished,json(execution),diagnostic?json(diagnostic):null,message,id);
     };
+    trackWorkNode(execution,row,step)?.attempts.push(finish);
     return {onStatus,finish};
+  }
+  function reservationsObsolete(work){
+    const current=database.prepare('SELECT 1 FROM article_sources WHERE scope_id=? AND version=?');
+    return work.reservations.length>0&&work.reservations.every(ref=>!current.get(ref.scopeId,ref.version));
+  }
+  function retireEditedWork(userId,documentId,scopeId){
+    const retired=[];
+    for(const work of working.values()){
+      const {execution,reservations}=work;
+      if(execution.userId!==userId||execution.documentId!==documentId||execution.signal.aborted||!reservations.some(ref=>ref.scopeId===scopeId))continue;
+      // A late extraction may still preserve the immutable original preview.
+      // A shared batch keeps its resource while any input is still current.
+      if(reservations.some(ref=>ref.step==='extract')||!reservationsObsolete(work))continue;
+      for(const node of execution.nodes.values()){
+        for(const finish of node.attempts)finish('stale');
+        database.prepare("UPDATE source_steps SET status='stale',updated_at=? WHERE scope_id=? AND step=? AND input_version=? AND status='running'").run(stamp(),node.scopeId,node.step,node.version);
+      }
+      retired.push(work);
+    }
+    return retired;
+  }
+  function abortRetiredWork(retired){
+    if(!retired.length)return;
+    const abort=()=>{
+      if(closed||database.isTransaction)return;
+      for(const work of retired)if(!work.execution.signal.aborted&&reservationsObsolete(work))work.controller.abort(new DOMException('来源正文版本已更新。','AbortError'));
+    };
+    // The normal source PUT commits its outermost savepoint synchronously.
+    // If a caller owns a surrounding transaction, check after that stack
+    // commits or rolls back; never cancel against uncommitted versions.
+    if(database.isTransaction)queueMicrotask(abort);else abort();
   }
   const sourceIdentity=row=>{
     const original=decode(row.original_json,{}),page=Number.isSafeInteger(original.page)&&original.page>0?original.page:null;
@@ -434,14 +472,17 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     const textChanged=text!==body.bodyText(previous),newVersion=row.version+1;
     if(textChanged&&body.invalidateBodySentences){const change=changedTextRange(body.bodyText(previous),text);next=body.invalidateBodySentences(next,change.start,change.newEnd);}
     const nextStep=!text.trim()?4:!textChanged&&body.hasCompleteSentenceBoundaries(next)?3:2;
-    transaction(()=>{
-      database.prepare("UPDATE article_sources SET version=?,checked_version=?,manual=1,status=?,next_step=?,error=NULL,proposal_json=NULL,updated_at=? WHERE scope_id=? AND version=?").run(newVersion,input.checked===true?newVersion:!textChanged&&row.checked_version===row.version?newVersion:null,nextStep>=4?'ready':'pending',nextStep,stamp(),row.scope_id,row.version);
+    const retired=transaction(()=>{
+      const changed=database.prepare("UPDATE article_sources SET version=?,checked_version=?,manual=1,status=?,next_step=?,error=NULL,proposal_json=NULL,updated_at=? WHERE scope_id=? AND version=?").run(newVersion,input.checked===true?newVersion:!textChanged&&row.checked_version===row.version?newVersion:null,nextStep>=4?'ready':'pending',nextStep,stamp(),row.scope_id,row.version);
+      if(changed.changes!==1)throw fail(409,'这个来源已修改，请保留当前文字并重新打开最新版本。');
       const oldRow=row;row={...row,version:newVersion,next_step:nextStep};
       remapPages(row,body.bodyText(previous),text,()=>replaceFragments(row,next));
       preservedAnnotations(oldRow,row,body.bodyText(previous),text,priorAnnotations,previous);
       if(nextStep>=3&&annotationCovered(row,0,text.length))database.prepare("UPDATE article_sources SET status='ready',next_step=4 WHERE scope_id=?").run(row.scope_id);
       record(row,'manual',next);updateDocumentCache(userId,id,{touch:true,touchBook:true});
+      return retireEditedWork(userId,id,row.scope_id);
     });
+    abortRetiredWork(retired);
     requestPreparation(userId,id,'correction',0,sourceId);
     schedule();return getSource(userId,id,sourceId);
   }
@@ -505,11 +546,14 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     const existing=database.prepare('SELECT * FROM reading_pages WHERE document_id=? AND user_id=? ORDER BY position').all(id,userId);
     const covered=existing.reduce((sum,page)=>sum+decode(page.ranges_json,[]).reduce((n,ref)=>n+Math.max(0,ref.end-ref.start),0),0);
     const availableLength=available.reduce((sum,row)=>sum+sourceLength(row),0);
+    const complete=available.length===rows.length,shortFirstPageMin=300;
+    const shortFirstPage=!existing.length&&!complete&&availableLength>=shortFirstPageMin&&
+      rows.every(row=>row.type==='text_pdf'||row.type==='scan_pdf')&&!!requireDocument(userId,id).book_id;
     // A partial tail shorter than the reading-page minimum cannot be published.
     // Check stored text lengths before rebuilding the segmented HTML prefix.
-    if(covered>=availableLength||available.length<rows.length&&availableLength-covered<800)return;
+    if(covered>=availableLength||!complete&&availableLength-covered<(shortFirstPage?shortFirstPageMin:800))return;
     const html=compose(available),text=body.bodyText(html);
-    const carry=available.length<rows.length?sentenceCarry(available,covered):null;
+    const carry=!complete?sentenceCarry(available,covered):null;
     const tail=sliceReadingHtml(html,covered,carry?.start??text.length),tailText=body.bodyText(tail);
     let sentences=body.bodyRanges(tail).sentences;
     // Old material can already have ruby but no sentence IDs. Local punctuation
@@ -522,7 +566,24 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
       if(sentences.length&&sentences.at(-1).end<tailText.length)sentences.at(-1).end=tailText.length;
     }
     if(!tailText.length)return;
-    const pages=paginateReadingText(tailText,sentences,{complete:available.length===rows.length});
+    const pages=paginateReadingText(tailText,sentences,{complete});
+    if(!pages.length&&shortFirstPage&&tailText.length>=shortFirstPageMin){
+      // Open a new PDF chapter early only at a complete, already annotated
+      // sentence. The unsettled cross-page tail has already been removed.
+      let annotatedEnd=0;
+      for(const row of available){
+        const length=sourceLength(row);let end=0;
+        for(const range of annotationRanges(row)){
+          if(range.start>end)break;
+          end=Math.max(end,range.end);
+          if(end>=length)break;
+        }
+        annotatedEnd+=Math.min(end,length);
+        if(end<length||annotatedEnd>=tailText.length)break;
+      }
+      const end=sentences.findLast(sentence=>sentence.end<=annotatedEnd)?.end??0;
+      if(end>=shortFirstPageMin)pages.push({start:0,end});
+    }
     let position=existing.length;
     for(const page of pages)database.prepare('INSERT INTO reading_pages VALUES(?,?,?,?,?,?)').run(randomUUID(),id,userId,position++,json(rangesForInterval(available,covered+page.start,covered+page.end)),stamp());
   }
@@ -897,6 +958,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
       tasks.push({row,text,start,end,step,localStep,chunk,chunkText:body.bodyText(chunk),id,local:decode(cached?.result_json)});
       database.prepare("UPDATE article_sources SET status='processing',error=NULL WHERE scope_id=? AND version=?").run(row.scope_id,row.version);
       database.prepare("INSERT INTO source_steps VALUES(?,?,?,'running',NULL,NULL,?) ON CONFLICT(scope_id,step,input_version) DO UPDATE SET status='running',error=NULL,updated_at=excluded.updated_at").run(row.scope_id,step,row.version,stamp());
+      trackWorkNode(execution,row,step);
     }
     if(!tasks.length)return;
     const last=tasks.at(-1),context={before:adjacentContext(tasks[0].row,tasks[0].text,tasks[0].start,tasks[0].end).before,after:adjacentContext(last.row,last.text,last.start,last.end).after};
@@ -925,7 +987,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
               task.localAttempt.finish('completed',local);
             }
           }catch(error){
-            if(!closed)for(const task of missing){
+            if(!closed&&workValid(execution))for(const task of missing){
               const {row,localStep}=task;
               // A batch validation failure blocks each requested source even
               // when an earlier local result has already been cached.
@@ -1037,7 +1099,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
         if(!request)break;
         const reserved=next.reserved||[row];
         const key=randomUUID(),controller=new AbortController();
-        const execution={userId:row.user_id,documentId:row.document_id,requestId:request.id,signal:controller.signal};
+        const execution={userId:row.user_id,documentId:row.document_id,requestId:request.id,signal:controller.signal,nodes:new Map()};
         const work={controller,execution,reservations:reserved.map(item=>({scopeId:item.scope_id,version:item.version,step,...(step==='annotate'?{range:next.annotationGroup?.find(ref=>ref.row.scope_id===item.scope_id)?.range||next.annotationRange}:{} )}))};
         working.set(key,work);
         work.promise=perform(next,execution).finally(()=>{

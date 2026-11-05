@@ -19,7 +19,7 @@ async function fixture(page, options = {}) {
   let chapterPolls = 0;
   const chapterProposal = [{id:"ch1",title:"第一章",startPage:2,endPage:8,needsReview:true,excluded:false},{id:"ch2",title:"付録",startPage:9,endPage:10,needsReview:true,excluded:false}];
   const importDraft = {id:"imp",title:"导入文字",detectedType:options.importType || "text",allowedTypes:options.importType === "screenshot" ? ["photo","screenshot"] : [options.importType || "text"],files:[{id:"file",name:"original.pdf"}],chapters:[],status:"staged",...options.draft};
-  const proposedExclusions = [{page:1,startLine:1,endLine:2,reason:"重复页眉",text:"版権所有・学習資料",excluded:true},{page:3,startLine:8,endLine:10,reason:"与正文无关的广告",text:"関連図書のお知らせ",excluded:true}];
+  const proposedExclusions = [{page:1,startLine:1,endLine:2,reason:"重复页眉",text:"版権所有・学習資料",excluded:true},{page:3,startLine:8,endLine:10,reason:"与正文无关的广告",text:"関連図書のお知らせ",excluded:true},...(options.extraExclusions || [])];
   const pageAt = (index) => ({id:`p${index}`,index,ready:true,bodyHtml:options.emptyPublished && !index ? "<p></p>" : index ? html("次の読書ページ。") : source2.bodyHtml,sourceIds:index ? ["s1"] : ["s2"],start:index ? 20 : 6,end:index ? 30 : 6 + bodyText(source2.bodyHtml).length});
   let currentIndex = 0;
   await page.route("**/pixel.svg", (route) => route.fulfill({contentType:"image/svg+xml",body:'<svg xmlns="http://www.w3.org/2000/svg" width="500" height="700"><rect width="500" height="700" fill="white"/><text x="50" y="50">original</text></svg>'}));
@@ -812,6 +812,30 @@ test("scanned books show whole-book OCR then AI chapter progress and review ever
     {page:1,startLine:1,endLine:2,reason:"重复页眉",text:"版権所有・学習資料",excluded:true},
     {page:3,startLine:8,endLine:10,reason:"与正文无关的广告",text:"関連図書のお知らせ",excluded:false},
   ]);
+});
+
+test("PDF review can keep all suggested lines in included chapters and still exclude individual lines",async({page})=>{
+  const state=await startScannedBook(page,{extraExclusions:[
+    {page:7,startLine:1,endLine:1,reason:"疑似页眉",text:"本文の続き",excluded:true},
+    {page:9,startLine:3,endLine:3,reason:"附录标记",text:"付録の見出し",excluded:true},
+  ]});
+  const appendix=page.locator(".source-chapter").filter({has:page.getByLabel("章节 2 标题",{exact:true})});
+  await appendix.getByLabel("纳入正文").uncheck();
+  const exclusions=page.getByLabel("建议排除的内容");
+  const keep=exclusions.getByRole("button",{name:"保留正文中的全部建议行",exact:true});
+  const line=(n)=>exclusions.getByRole("checkbox",{name:new RegExp(`^排除 PDF 第 ${n} 页`)});
+  await expect(exclusions.getByRole("status")).toHaveText("正文范围内已选 2 处行排除");
+  await keep.click();
+  await expect(line(3)).not.toBeChecked();await expect(line(7)).not.toBeChecked();
+  await expect(line(1)).toBeChecked();await expect(line(9)).toBeChecked();
+  await expect(appendix.getByLabel("纳入正文")).not.toBeChecked();
+  await expect(keep).toBeDisabled();
+  await line(7).check();
+  await expect(exclusions.getByRole("status")).toHaveText("正文范围内已选 1 处行排除");
+  await page.getByRole("button",{name:"确认导入",exact:true}).click();
+  const submitted=state.calls.find((call)=>call.path==="/imports/imp/confirm").input;
+  expect(submitted.exclusions.map(({page,excluded})=>[page,excluded])).toEqual([[1,true],[3,false],[7,true],[9,true]]);
+  expect(submitted.chapters.map(({excluded})=>excluded)).toEqual([false,true]);
 });
 
 test("queued PDF chapter tasks keep polling and stay locked until ready",async({page})=>{

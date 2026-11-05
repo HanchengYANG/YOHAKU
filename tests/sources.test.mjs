@@ -868,6 +868,91 @@ test('retrying cached local annotation cannot restore deleted QA marks and retai
   }finally{f.close();}
 });
 
+function markPdfBookChapter(f) {
+  f.database.exec("ALTER TABLE documents ADD COLUMN book_id TEXT; UPDATE documents SET book_id='book' WHERE id='a'");
+}
+
+test('a PDF chapter opens with a ready short first page while the next original page is still correcting',async()=>{
+  const first='あ'.repeat(169)+'。',second='い'.repeat(189)+'。',tail='続'.repeat(30),later='きます。'+('う'.repeat(119)+'。').repeat(8);
+  let release;
+  const f=fixture({processSource:async(_u,request)=>{
+    if(request.step==='correct'&&request.source.id==='pdf-115')await new Promise(resolve=>release=resolve);
+    const text=bodyText(request.bodyHtml);
+    return {bodyHtml:request.step==='segment'?applySentenceBoundaries(request.bodyHtml,text.match(/[^。]*。|[^。]+$/gu)):request.bodyHtml};
+  }});
+  try{
+    markPdfBookChapter(f);
+    f.service.createArticleSources('u','a',[
+      {...ready(first),id:'pdf-113',type:'scan_pdf',original:{page:113}},
+      {...ready(second+tail),id:'pdf-114',type:'scan_pdf',original:{page:114}},
+      {id:'pdf-115',type:'scan_pdf',text:later,original:{page:115}},
+    ]);
+    f.service.heartbeat('u','a',{index:0});
+    for(let i=0;i<10&&!release;i++)await new Promise(resolve=>setImmediate(resolve));
+    assert.ok(release,'the next PDF source is held in correction');
+    const pending=f.service.readingPages('u','a',0),published=pending.currentPage;
+    assert.equal(published?.ready,true,'the 360-character stable prefix is already readable');
+    assert.equal(bodyText(published.bodyHtml),first+second);
+    assert.equal(pending.pages.length,1);
+    assert.equal(pending.complete,false);
+    release();
+    await f.service.drain();
+    const finished=f.service.readingPages('u','a',1);
+    assert.equal(finished.complete,true);
+    assert.equal(finished.currentPage.ready,true);
+    assert.equal(finished.pages[0].id,published.id);
+    assert.deepEqual(finished.pages[0].ranges,published.ranges);
+    assert.equal(bodyText(finished.pages[0].bodyHtml),first+second);
+    assert.ok(bodyText(finished.currentPage.bodyHtml).startsWith(tail+'きます。'));
+    assert.equal(finished.pages.map(page=>bodyText(page.bodyHtml)).join(''),first+second+tail+later);
+  }finally{
+    release?.();
+    await f.service.drain();
+    f.close();
+  }
+});
+
+test('a short PDF first page ends at a fully annotated sentence of the current text version',()=>{
+  const first='あ'.repeat(149)+'。',second='い'.repeat(159)+'。',third='う'.repeat(49)+'。',tail='次のページに続く';
+  const f=fixture();
+  try{
+    markPdfBookChapter(f);
+    f.service.createArticleSources('u','a',[
+      {...ready(first),id:'first',type:'scan_pdf'},
+      {...ready(second+third+tail),id:'partial',type:'scan_pdf',status:'pending'},
+      {id:'following',type:'scan_pdf',text:'前の文の続き。'},
+    ]);
+    const row=f.database.prepare("SELECT scope_id,version FROM article_sources WHERE source_id='partial'").get();
+    f.database.prepare("UPDATE article_sources SET next_step=3 WHERE scope_id=?").run(row.scope_id);
+    const cover=f.database.prepare('INSERT INTO source_annotations VALUES(?,?,?,?,NULL,?)');
+    cover.run(row.scope_id,row.version-1,0,second.length+third.length+tail.length,new Date(1000).toISOString());
+    cover.run(row.scope_id,row.version,0,second.length-1,new Date(1000).toISOString());
+    assert.equal(f.service.readingPages('u','a',0).currentPage,null,'309 annotated characters end inside a sentence');
+    cover.run(row.scope_id,row.version,second.length-1,second.length,new Date(1000).toISOString());
+    const {currentPage}=f.service.readingPages('u','a',0);
+    assert.equal(currentPage?.ready,true);
+    assert.equal(bodyText(currentPage.bodyHtml),first+second);
+  }finally{f.close();}
+});
+
+test('short first pages require at least 300 stable characters and a PDF book chapter',()=>{
+  for(const {length,type,inBook} of [
+    {length:299,type:'scan_pdf',inBook:true},
+    {length:360,type:'scan_pdf',inBook:false},
+    {length:360,type:'text',inBook:true},
+  ]){
+    const f=fixture();
+    try{
+      if(inBook)markPdfBookChapter(f);
+      f.service.createArticleSources('u','a',[
+        {...ready('あ'.repeat(length-1)+'。'+'い'.repeat(60)),id:'first',type},
+        {id:'following',type,text:'続きます。'},
+      ]);
+      assert.equal(f.service.readingPages('u','a',0).currentPage,null);
+    }finally{f.close();}
+  }
+});
+
 test('new PDF pages carry the last AI sentence across extraction batches before publishing it',async()=>{
   const groups=[],batches=[],tail='みんなそうしているん',head='です。';
   const sized=(length,ending)=>'あ'.repeat(length-ending.length-1)+'。'+ending;

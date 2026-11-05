@@ -304,8 +304,9 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
       return Array.from({length:end-start+1},(_,index)=>{
         const page=start+index,extraction=cachedPage(draft,file,page,type),excluded=(draft.confirmedExclusions||[]).filter(value=>value.page===page),label=type==='scan_pdf'?'本地 OCR 首次提取结果':'PDF 首次提取结果';
         const text=extraction?.text.split('\n').filter((_line,i)=>!excluded.some(value=>value.startLine<=i+1&&value.endLine>=i+1)).join('\n');
+        const emptyAfterExclusion=!!extraction&&excluded.length>0&&!text.trim();
         return {id:`${file.id}:page:${page}`,type,...(range&&(range.startOffset!==undefined||range.endOffset!==undefined)?{localRange:{start:page===start?(range.startOffset||0):0,...(page===end&&range.endOffset!==undefined?{end:range.endOffset}:{})}}:{}),original:{...base,page,...(range?.needsReview?{boundaryNeedsReview:true}:{}),...(excluded.length?{importExclusions:excluded}:{})},preview:{kind:'pdf',url:raw,page,pageCount:file.info.pageCount,...(range?.needsReview?{boundaryNeedsReview:true}:{})},firstExtractionLabel:label,
-          ...(extraction?{text,firstExtraction:{...extraction,bodyHtml:blocksToHtml(parseText(extraction.text)),label},...(excluded.length?{importExclusions:excluded,execution:draft.execution,...(!text.trim()?{status:'ready',needsCorrection:false}:{})}:{})}:{})};
+          ...(extraction?{text:emptyAfterExclusion?'':text,firstExtraction:{...extraction,bodyHtml:blocksToHtml(parseText(extraction.text)),label},...(excluded.length?{importExclusions:excluded,execution:draft.execution,...(emptyAfterExclusion?{status:'ready',needsCorrection:false}:{})}:{})}:{})};
       });
     }
     if(type==='epub') {

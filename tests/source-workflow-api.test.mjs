@@ -12,7 +12,7 @@ import { parseText } from '../shared/document.mjs';
 import { SENTENCE_SCHEMA } from '../shared/sentences.mjs';
 import { ANNOTATION_SCHEMA } from '../shared/ocr-correction.mjs';
 
-async function fixture(t,{connected=true,ndlOcr,beforeRun}={}) {
+async function fixture(t,{connected=true,ndlOcr,beforeRun,chapterProposal}={}) {
   const dataDir=await mkdtemp(join(tmpdir(),'yohaku-source-api-')),calls=[];
   const modelIds=['vision','correction-model','sentence-model','ruby-model','chat-model'];
   const checkedAt=new Date().toISOString();
@@ -25,7 +25,8 @@ async function fixture(t,{connected=true,ndlOcr,beforeRun}={}) {
         await beforeRun?.(input);
         calls.push({providerId,model:input.model,prompt:input.prompt,schema:input.schema});
         let value;
-        if(input.schema===SENTENCE_SCHEMA){const text=JSON.parse(input.prompt.split('输入正文：\n').at(-1).split('\n')[0]);value={sentences:text.match(/[^。]*。|[^。]+$/gu)||[text]};}
+        if(input.schema?.properties?.chapters&&chapterProposal)value=chapterProposal;
+        else if(input.schema===SENTENCE_SCHEMA){const text=JSON.parse(input.prompt.split('输入正文：\n').at(-1).split('\n')[0]);value={sentences:text.match(/[^。]*。|[^。]+$/gu)||[text]};}
         else if(input.schema?.properties?.changes)value={changes:[],uncertain:[]};
         else if(input.schema===ANNOTATION_SCHEMA){const targets=JSON.parse(input.prompt.split('输入目标：\n').at(-1).split('\n')[0]);value={blocks:targets.map(({text})=>({words:[{t:text,r:'にほんご'}]}))};}
         else if(input.schema){value={text:JSON.parse(input.prompt.split('目标正文：\n').at(-1))};}
@@ -100,6 +101,42 @@ test('reading API exposes safe role diagnostics and retains failures after retry
   await f.restart();reading=await f.request(`/documents/${id}/reading-pages`);assert.equal(reading.diagnostics.recentFailures.length,1);
   failOnce=false;await f.request(`/documents/${id}/reading-session`,'POST',{index:0,active:true,retry:true});await f.instance.sources.drain();
   reading=await f.request(`/documents/${id}/reading-pages`);assert.equal(reading.currentPage.ready,true);assert.equal(reading.diagnostics.current,null);assert.equal(reading.diagnostics.recentFailures.length,1);
+});
+
+test('an excluded PDF source keeps its exact OCR and does not block the first reading page',async t=>{
+  const first='日本語'+'あ'.repeat(166)+'。',second='本文'+'い'.repeat(187)+'。',tail='続'.repeat(30);
+  const rawExcluded='章末页眉\n \n ',ocrPages=[first,rawExcluded,second+tail,'きます。後のページ。'];
+  const chapterProposal={chapters:[{title:'本文の章',startPage:1,endPage:4,excluded:false,needsReview:false}],exclusions:[{page:2,startLine:1,endLine:1,reason:'页眉'}]};
+  let extracted=0;
+  const f=await fixture(t,{chapterProposal,ndlOcr:{async recognize(){return {text:ocrPages[extracted++],regions:[]};},close(){}}});
+  await f.configure();
+  const pdf=Buffer.from('%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R] /Count 4 >> endobj\n'+
+    Array.from({length:4},(_,i)=>`${i+3} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] >> endobj\n`).join('')+'trailer << /Root 1 0 R /Size 7 >>\n%%EOF');
+  const form=new FormData();form.append('files',new Blob([pdf],{type:'application/pdf'}),'blank-source.pdf');
+  const draft=await f.request('/imports','POST',form,201),path=`/imports/${draft.id}`;
+  await f.request(path+'/chapters','POST',{type:'scan_pdf'},202);
+  await f.instance.imports.drain();
+  const proposal=await f.request(path);
+  assert.equal(proposal.chapterProcessing.status,'done');
+  assert.equal(extracted,4);
+  const saved=await f.request(path+'/confirm','POST',{type:'scan_pdf',title:'本',asBook:true,chapters:proposal.chapters,exclusions:proposal.exclusions},201);
+  const chapter=`/documents/${saved.firstDocumentId}`,{sources}=await f.request(chapter+'/sources');
+  assert.equal(sources[1].firstExtraction.text,rawExcluded);
+  assert.equal(bodyText(sources[1].firstExtraction.bodyHtml),rawExcluded);
+  assert.equal(sources[1].status,'ready');
+  for(const source of [sources[0],sources[2]]){
+    await f.request(`${chapter}/sources/${source.id}/prepare`,'POST',{});
+    await f.instance.sources.drain();
+  }
+  const {sources:prepared}=await f.request(chapter+'/sources');
+  assert.deepEqual(prepared.map(source=>source.status),['ready','ready','ready','pending']);
+  const reading=await f.request(chapter+'/reading-pages?index=0');
+  assert.equal(reading.currentPage?.ready,true,'excluded whitespace must not block a complete, annotated first page');
+  assert.equal(bodyText(reading.currentPage.bodyHtml),first+second);
+  assert.deepEqual(reading.currentPage.sourceIds,[sources[0].id,sources[2].id]);
+  assert.equal(reading.complete,false);
+  assert.equal(prepared[1].text,'');
+  assert.equal(prepared[1].firstExtraction.text,rawExcluded);
 });
 
 test('a reading page spanning six PDF sources makes one hybrid proofreading request and persists local steps',async(t)=>{
