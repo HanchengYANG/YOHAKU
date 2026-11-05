@@ -821,6 +821,61 @@ test("pasted screenshot keeps a confirmable image type",async({page})=>{
   expect(state.calls.find((call)=>call.path === "/imports/imp/confirm").input).toMatchObject({type:"screenshot",asBook:false});
 });
 
+for(const reopen of [false,true])test(`same-file screenshot suggestion ${reopen ? "defaults when reopening a saved draft" : "defaults on upload and yields to a manual type on restore"}`,async({page})=>{
+  const draft={id:"imp",title:"再次导入的图片",detectedType:"photo",suggestedType:"screenshot",allowedTypes:["photo","screenshot"],
+    files:[{id:"file",name:"113.png"}],context:{bookId:null,targetId:null},status:"staged"};
+  const state=await fixture(page,{draft,serverDrafts:reopen?[draft]:[]});
+  const reads=[];
+  await page.route("**/api/imports/imp",route=>{
+    if(route.request().method()!=="GET")return route.fallback();
+    reads.push(draft.id);
+    return route.fulfill({json:draft});
+  });
+  const openImport=async()=>{
+    await showShelf(page);
+    await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  };
+  await page.goto("/");await openImport();
+  if(reopen){
+    await page.getByRole("button",{name:`继续导入：${draft.title}`,exact:true}).click();
+  }else{
+    const png=await sharp({create:{width:12,height:12,channels:3,background:"white"}}).png().toBuffer();
+    await page.getByLabel("选择来源文件",{exact:true}).setInputFiles({name:"113.png",mimeType:"image/png",buffer:png});
+    await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
+  }
+  const type=page.getByLabel("确认来源类型",{exact:true});
+  await expect(type).toHaveValue("screenshot");
+  await expect(page.getByText("相同图片上次确认为截图，可在此更改。")).toBeVisible();
+  const uploads=()=>state.calls.filter(call=>call.path==="/imports"&&call.method==="POST");
+  const confirms=()=>state.calls.filter(call=>call.path==="/imports/imp/confirm"&&call.method==="POST");
+  expect(confirms()).toEqual([]);
+  if(reopen){
+    expect(reads).toEqual([draft.id]);
+    await page.evaluate(id=>{
+      const context={initialBookId:null,initialTargetId:null};
+      sessionStorage.setItem(`yohaku:import-draft:${JSON.stringify(context)}`,JSON.stringify({id,context}));
+    },draft.id);
+    await page.reload();await openImport();
+    await expect(type).toHaveValue("screenshot");
+    expect(reads).toEqual([draft.id,draft.id]);
+    expect(uploads()).toEqual([]);
+    return;
+  }
+
+  await type.selectOption("photo");
+  await expect.poll(()=>page.evaluate(()=>{
+    const context={initialBookId:null,initialTargetId:null};
+    return JSON.parse(sessionStorage.getItem(`yohaku:import-draft:${JSON.stringify(context)}`)||"null")?.type;
+  })).toBe("photo");
+  await page.reload();await openImport();
+  await expect(type).toHaveValue("photo");
+  await page.getByRole("button",{name:"确认导入",exact:true}).click();
+  await expect(page.getByLabel("日语原文")).toBeVisible();
+  expect(reads).toEqual([draft.id]);
+  expect(uploads()).toHaveLength(1);
+  expect(confirms().map(call=>call.input)).toEqual([{type:"photo",title:draft.title,asBook:false}]);
+});
+
 test("PDF chapter edits use physical ranges and retain uncertain boundaries after confirmation",async({page})=>{
   const state=await fixture(page,{importType:"text_pdf"});await page.goto("/");
   await showShelf(page);

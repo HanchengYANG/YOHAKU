@@ -1,5 +1,6 @@
 import multer from 'multer';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { mkdir, writeFile, rm, stat, copyFile, rename } from 'node:fs/promises';
 import { join, basename } from 'node:path';
 import { IMPORT_TYPES, guessImportType, assertHomogeneousImport, validateConfirmedType, validateChapterRanges, groupParagraphs } from '../shared/import-types.mjs';
@@ -21,10 +22,21 @@ const titleInput=(value,fallback)=>{
   return title.trim();
 };
 const isPdf=type=>type==='text_pdf'||type==='scan_pdf';
+const isImage=type=>type==='photo'||type==='screenshot';
 const publicFile=file=>{
-  const {filePath,text,info,imageId,...value}=file;
+  const {filePath,text,info,imageId,contentHash,...value}=file;
   return {...value,...(info?.pageCount?{pageCount:info.pageCount}:{}),...(info?.toc?{toc:info.toc}:{}),...(info?.chapters?{chapters:info.chapters.map(({id,title})=>({id,title}))}:{}),...(info?.error?{extractionError:info.error}:{})};
 };
+async function matchesOriginal(path,bytes) {
+  let offset=0;
+  try {
+    for await(const chunk of createReadStream(path)){
+      if(!chunk.equals(bytes.subarray(offset,offset+chunk.length)))return false;
+      offset+=chunk.length;
+    }
+    return offset===bytes.length;
+  }catch{return false;}
+}
 
 export function attachImportRoutes({app,database,storageDir,ai,sources,books,createImportedArticle,requireDocument,extractChapterPage,renderSourcePreview=renderImportedSource,localOcr:providedOcr,inspectFile=inspectImportFile}) {
   database.exec(`CREATE TABLE IF NOT EXISTS import_drafts (
@@ -34,6 +46,34 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
   CREATE TABLE IF NOT EXISTS import_page_extractions(import_id TEXT NOT NULL,file_id TEXT NOT NULL,page INTEGER NOT NULL,result_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(import_id,file_id,page));`);
   const columns=database.prepare('PRAGMA table_info(import_drafts)').all().map(column=>column.name);
   for(const [name,definition] of [['version','INTEGER NOT NULL DEFAULT 1'],['task_generation','INTEGER NOT NULL DEFAULT 1'],['task_deleted_at','TEXT']])if(!columns.includes(name))database.exec(`ALTER TABLE import_drafts ADD COLUMN ${name} ${definition}`);
+  const priorImages=database.prepare(`SELECT d.id AS importId, json_extract(f.value,'$.id') AS fileId,
+    json_extract(f.value,'$.contentHash') AS contentHash, json_extract(d.draft_json,'$.confirmedType') AS confirmedType
+    FROM import_drafts d, json_each(d.draft_json,'$.files') f
+    WHERE d.user_id=? AND d.status='confirmed' AND d.type IN ('photo','screenshot') AND json_extract(f.value,'$.bytes')=?
+    AND (json_extract(f.value,'$.contentHash')=? OR json_extract(f.value,'$.contentHash') IS NULL)
+    ORDER BY d.updated_at DESC,d.rowid DESC`);
+  const legacyImageType=database.prepare(`SELECT json_extract(s.value,'$.type') AS type
+    FROM import_drafts d, json_each(d.result_json,'$.documents') doc, json_each(doc.value,'$.sources') s
+    WHERE d.user_id=? AND d.id=? AND json_extract(s.value,'$.id')=? AND json_extract(s.value,'$.original.importId')=d.id LIMIT 1`);
+  async function priorImageType(userId,file,bytes){
+    for(const prior of priorImages.all(userId,file.bytes,file.contentHash)){
+      if(!prior.contentHash&&(!prior.fileId||!await matchesOriginal(join(storageDir,'imports',prior.importId,prior.fileId),bytes)))continue;
+      const type=prior.confirmedType||legacyImageType.get(userId,prior.importId,prior.fileId)?.type;
+      if(isImage(type))return type;
+    }
+    return null;
+  }
+  async function suggestImageType(userId,files,uploads){
+    let suggested=null;
+    const choices=new Map();
+    for(const [index,file] of files.entries()){
+      if(!choices.has(file.contentHash))choices.set(file.contentHash,await priorImageType(userId,file,uploads[index].buffer));
+      const type=choices.get(file.contentHash);
+      if(!type||(suggested&&suggested!==type))return null;
+      suggested=type;
+    }
+    return suggested;
+  }
   const localOcr=providedOcr||createNdlOcr(),jobs=new Map(),previewJobs=new Map();let closed=false;
   const parserPool=createLocalWorkerPool({method:'inspect',workers:process.env.LOCAL_PARSE_WORKERS||1,label:'本地文件解析',create(){
     const controller=new AbortController();return{inspect:input=>inspectFile({...input,signal:controller.signal}),close:()=>controller.abort()};
@@ -78,8 +118,9 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
     draft.title=utf8Name(draft.title);draft.files=draft.files.map(file=>({...file,name:cleanName(file.name)}));
     return {...draft,createdAt:row.created_at,status:row.status,version:row.version,generation:row.task_generation,taskDeletedAt:row.task_deleted_at,result:row.result_json?JSON.parse(row.result_json):null};
   }
-  const present=draft=>({id:draft.id,taskId:taskId(draft),version:draft.version,title:draft.title,createdAt:draft.createdAt,detectedType:draft.detectedType,allowedTypes:IMPORT_TYPES.filter(type=>
-    isPdf(draft.detectedType)?isPdf(type):['photo','screenshot'].includes(draft.detectedType)?['photo','screenshot'].includes(type):type===draft.detectedType),
+  const present=draft=>({id:draft.id,taskId:taskId(draft),version:draft.version,title:draft.title,createdAt:draft.createdAt,detectedType:draft.detectedType,
+    ...(draft.suggestedType?{suggestedType:draft.suggestedType}:{}),allowedTypes:IMPORT_TYPES.filter(type=>
+    isPdf(draft.detectedType)?isPdf(type):isImage(draft.detectedType)?isImage(type):type===draft.detectedType),
     files:draft.files.map(publicFile),context:draft.context||{bookId:null,targetId:null},chapters:draft.chapters||[],exclusions:draft.exclusions||[],chapterAttempted:draft.chapterAttempted===true,...(draft.chapterProcessing?{chapterProcessing:draft.chapterProcessing}:{}),...(draft.chapterError?{chapterError:draft.chapterError}:{}),status:draft.status,...(draft.execution?{execution:draft.execution}:{}),...(draft.result?{result:draft.result}:{}),
     ...(draft.files.some(file=>file.info?.error)?{extractionWarning:'部分来源提取失败。可以继续导入，并在校对正文中对照原文人工录入。'}:{})});
   function persist(draft) {
@@ -175,11 +216,14 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
         const file={id:fileId,name:cleanName(uploaded.originalname),mimeType:uploaded.mimetype||'application/octet-stream',bytes:uploaded.buffer.length,filePath,type,previewUrl:`/api/imports/${id}/files/${fileId}/raw`};
         const parsed=await inspectFileEntry(file);
         if(!parsed&&!isPdf(type)&&type!=='epub')throw fail(file.inspection.httpStatus,file.info.error);
-        let imageId;
-        if(type==='photo'||type==='screenshot') imageId=(await ai.saveImage(req.user.id,uploaded.buffer,{mimeType:uploaded.mimetype,originalName:cleanName(uploaded.originalname)})).id;
-        draft.files.push({...file,...(imageId?{imageId}:{})});
+        if(isImage(type)){
+          file.imageId=(await ai.saveImage(req.user.id,uploaded.buffer,{mimeType:uploaded.mimetype,originalName:file.name})).id;
+          file.contentHash=createHash('sha256').update(uploaded.buffer).digest('hex');
+        }
+        draft.files.push(file);
       }
       draft.detectedType=assertHomogeneousImport(draft.files.map(file=>file.type));
+      if(isImage(draft.detectedType))draft.suggestedType=await suggestImageType(req.user.id,draft.files,incoming);
       database.prepare('INSERT INTO import_drafts(id,user_id,title,type,status,draft_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
         .run(id,req.user.id,draft.title,draft.detectedType,'staged',JSON.stringify(draft),now,now);
     }catch(error){await rm(directory,{recursive:true,force:true});throw error;}
@@ -375,6 +419,7 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
       if(!result.firstDocumentId)throw fail(422,'文件未包含可创建的正文。');
       if(bookId&&!asBook)books.touch(req.user.id,bookId);
       draft.status='confirmed';draft.title=title;
+      if(isImage(type))draft.confirmedType=type;
       database.prepare('UPDATE import_drafts SET title=?,status=?,draft_json=?,result_json=?,updated_at=?,version=version+1 WHERE id=? AND user_id=?')
         .run(title,'confirmed',JSON.stringify({...draft,result:undefined}),JSON.stringify(result),new Date().toISOString(),draft.id,req.user.id);
       return result;

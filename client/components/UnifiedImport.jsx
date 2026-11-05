@@ -7,6 +7,8 @@ import "../sources.css";
 const typeNames = { photo:"照片", screenshot:"截图", scan_pdf:"扫描 PDF", text_pdf:"文字 PDF", epub:"EPUB", text:"纯文本／粘贴文字" };
 const draftReference = ({createdAt,taskId}) => taskDisplayName({createdAt,id:taskId});
 const isImageFile = (file) => /^image\/(?:png|jpeg|webp)$/i.test(file.type) || /\.(?:png|jpe?g|webp)$/i.test(file.name);
+const defaultDraftType = (draft) => draft.chapterProcessing?.type ||
+  (draft.allowedTypes?.includes(draft.suggestedType) ? draft.suggestedType : draft.detectedType);
 function ChapterPagePreview({ importId, file, chapter, nextChapter, index, totalPages }) {
   const [expanded, setExpanded] = useState(false), [page, setPage] = useState(chapter.startPage);
   const [imageState, setImageState] = useState("loading"), [attempt, setAttempt] = useState(0);
@@ -87,7 +89,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
         const result = await api(`/imports/${encodeURIComponent(saved.id)}`,{signal:controller.signal});
         if (stopped) return;
         if (result.status !== "staged") {forgetDraft();await listDrafts();return;}
-        const restoredType = saved.type || result.chapterProcessing?.type || result.detectedType;
+        const restoredType = saved.type || defaultDraftType(result);
         const status = result.chapterProcessing?.status || null;
         const reuseEdits = !["queued","extracting","proposing"].includes(status) && status === saved.chapterProcessingStatus;
         setDraft(result);setType(restoredType);setTitle(saved.title || result.title || "");
@@ -111,7 +113,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
     try {sessionStorage.setItem(storageKey,JSON.stringify({id:draft.id,context,asBook,type,title,chapters,exclusions,chapterProcessingStatus:processing?.status || null}));}
     catch {
       // A saved server draft is recoverable even when browser storage is unavailable.
-      const savedType = processing?.type || draft.detectedType;
+      const savedType = defaultDraftType(draft);
       const savedAsBook = !!(draft.chapterAttempted && savedType?.includes("pdf"));
       if (title !== (draft.title || "") || type !== savedType || asBook !== savedAsBook ||
         JSON.stringify(chapters) !== JSON.stringify(draft.chapters || []) || JSON.stringify(exclusions) !== JSON.stringify(draft.exclusions || [])) return;
@@ -146,7 +148,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
     try {
       const result = await api(`/imports/${encodeURIComponent(id)}`);
       if (result.status !== "staged" || !matchesContext(result)) throw new Error("此导入已完成或不属于当前导入位置，请重新选择。");
-      const restoredType = result.chapterProcessing?.type || result.detectedType;
+      const restoredType = defaultDraftType(result);
       setDraft(result);setType(restoredType);setTitle(result.title || "");
       setAsBook(!!result.chapterAttempted && restoredType?.includes("pdf"));
       setChapters(result.chapters || []);setExclusions(result.exclusions || []);
@@ -192,7 +194,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
         result = await readApiResult(await fetch("/api/imports", {method:"POST",body}));
         setFiles([]);
       }
-      setDraft(result); setType(result.detectedType); setTitle(result.title || title);
+      setDraft(result); setType(defaultDraftType(result)); setTitle(result.title || title);
       setChapters(result.chapters || []);setExclusions(result.exclusions || []);
     } catch (cause) { setError(cause.message); }
     finally { setBusy(false); }
@@ -279,7 +281,8 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
           {(draft.allowedTypes || Object.keys(typeNames)).map((value) => <option key={value} value={value}>{typeNames[value] || value}</option>)}</select></label>
         {!initialBookId && !initialTargetId && !["photo","screenshot"].includes(type) && <label className="source-checkbox"><input type="checkbox" checked={asBook} disabled={structureLocked} onChange={(e) => {setAsBook(e.target.checked);dirty();}} />作为书籍导入</label>}
       </div>
-      <p>本地判断为{typeNames[draft.detectedType] || draft.detectedType}。{asBook && type.includes("pdf") ? "分章阶段提取全书原始文字，确认章节后再准备阅读正文。" : "确认后才开始准备正文。"}{["photo","screenshot"].includes(type) ? "本次图片将按顺序组成一篇文章。" : ""}</p>
+      <p>{draft.suggestedType ? `相同图片上次确认为${typeNames[draft.suggestedType]}，可在此更改。` : `本地判断为${typeNames[draft.detectedType] || draft.detectedType}。`}
+        {asBook && type.includes("pdf") ? "分章阶段提取全书原始文字，确认章节后再准备阅读正文。" : "确认后才开始准备正文。"}{["photo","screenshot"].includes(type) ? "本次图片将按顺序组成一篇文章。" : ""}</p>
       {asBook && type.includes("pdf") && <div className="source-chapters">
         <h2>确认章节与正文范围</h2><p>范围使用 PDF 实际页码。可排除封面、目录等内容；待核对边界请对照原页确认。</p>
         {draft.files?.[0] && <a className="text-button" target="_blank" rel="noreferrer" href={`/api/imports/${draft.id}/files/${draft.files[0].id}/raw`}>查看原 PDF</a>}

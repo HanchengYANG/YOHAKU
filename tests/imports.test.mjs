@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import express from 'express';
 import { DatabaseSync } from 'node:sqlite';
 import { once } from 'node:events';
+import { createHash } from 'node:crypto';
 import { mkdtemp,rm,readFile,stat,utimes } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -245,6 +246,81 @@ test('photo and screenshot batches create one article and cannot import directly
   }
   const saved=await f.request(`/api/imports/${draft.data.id}/confirm`,'POST',{type:'photo',title:'一篇文章'});
   assert.equal(saved.status,201);assert.equal(saved.data.documents.length,1);assert.equal(f.attached[0].values.length,2);assert.equal(f.bookCount,0);
+});
+
+const imageBytes=marker=>Buffer.from([137,80,78,71,13,10,26,10,marker]);
+async function stageImages(f,files,user){
+  const form=new FormData();
+  for(const [name,bytes] of files)form.append('files',new Blob([bytes],{type:'image/png'}),name);
+  const result=await f.request('/api/imports','POST',form,user);
+  assert.equal(result.status,201);
+  return result.data;
+}
+
+test('image import suggests the latest confirmed type for identical bytes only within the account',async t=>{
+  const f=await fixture(t),bytes=imageBytes(1),digest=createHash('sha256').update(bytes).digest('hex');
+  const first=await stageImages(f,[['7.png',bytes]]),firstPath=`/api/imports/${first.id}`;
+  assert.equal(first.detectedType,'photo');assert.equal(first.suggestedType??null,null);
+  assert.equal((await f.request(`${firstPath}/confirm`,'POST',{type:'screenshot'})).status,201);
+  const saved=JSON.parse(f.database.prepare('SELECT draft_json FROM import_drafts WHERE id=?').get(first.id).draft_json);
+  assert.equal(saved.confirmedType,'screenshot');assert.equal(saved.files[0].contentHash,digest);
+  assert.equal(f.attached[0].values[0].type,'screenshot');
+
+  const repeat=await stageImages(f,[['renamed.png',bytes]]),repeatPath=`/api/imports/${repeat.id}`;
+  assert.equal(repeat.detectedType,'photo');assert.equal(repeat.suggestedType,'screenshot');
+  assert.deepEqual(repeat.allowedTypes,['photo','screenshot']);
+  const reopened=await f.request(repeatPath),task=await f.request(`/api/tasks/${repeat.id}`);
+  assert.equal(reopened.data.suggestedType,'screenshot');assert.equal(task.data.draft.suggestedType,'screenshot');
+  for(const draft of [first,repeat,reopened.data,task.data]){
+    assert.equal(JSON.stringify(draft).includes(digest),false);
+    assert.equal(Object.hasOwn(draft.files[0],'contentHash'),false);
+  }
+  const different=await stageImages(f,[['7.png',imageBytes(2)]]);
+  assert.equal(different.files[0].bytes,repeat.files[0].bytes);assert.equal(different.suggestedType??null,null);
+  assert.equal((await stageImages(f,[['7.png',bytes]],'two')).suggestedType??null,null);
+
+  assert.equal((await f.request(`${repeatPath}/confirm`,'POST',{type:'photo',asBook:true})).status,400);
+  assert.equal((await stageImages(f,[['7.png',bytes]])).suggestedType,'screenshot','failed confirmation does not change the preference');
+  assert.equal((await f.request(`${repeatPath}/confirm`,'POST',{type:'photo'})).status,201);
+  assert.equal((await f.request(`${firstPath}/confirm`,'POST',{type:'screenshot'})).status,200);
+  const overridden=await stageImages(f,[['screenshot.png',bytes]]);
+  assert.equal(overridden.detectedType,'screenshot');assert.equal(overridden.suggestedType,'photo');
+});
+
+test('image import only suggests a batch type when every image has the same confirmed choice',async t=>{
+  const f=await fixture(t),first=imageBytes(3),second=imageBytes(4),photo=imageBytes(5),unknown=imageBytes(6);
+  const screenshots=await stageImages(f,[['first.png',first],['second.png',second]]);
+  assert.equal((await f.request(`/api/imports/${screenshots.id}/confirm`,'POST',{type:'screenshot'})).status,201);
+  const photoDraft=await stageImages(f,[['photo.png',photo]]);
+  assert.equal((await f.request(`/api/imports/${photoDraft.id}/confirm`,'POST',{type:'photo'})).status,201);
+
+  const agrees=await stageImages(f,[['second-renamed.png',second],['first-renamed.png',first]]);
+  assert.equal(agrees.detectedType,'photo');assert.equal(agrees.suggestedType,'screenshot');
+  assert.deepEqual(agrees.files.map(file=>file.name),['second-renamed.png','first-renamed.png']);
+  assert.equal((await stageImages(f,[['known.png',first],['unknown.png',unknown]])).suggestedType??null,null);
+  assert.equal((await stageImages(f,[['known.png',first],['different-choice.png',photo]])).suggestedType??null,null);
+});
+
+test('legacy image confirmation falls back to exact original bytes and the matching saved source',async t=>{
+  const f=await fixture(t),bytes=imageBytes(7),first=await stageImages(f,[['7.png',bytes]]);
+  const saved=await f.request(`/api/imports/${first.id}/confirm`,'POST',{type:'screenshot'});
+  assert.equal(saved.status,201);
+  const row=f.database.prepare('SELECT draft_json,result_json FROM import_drafts WHERE id=?').get(first.id);
+  const draft=JSON.parse(row.draft_json),result=JSON.parse(row.result_json),file=draft.files[0];
+  delete draft.confirmedType;delete file.contentHash;
+  const [source]=result.documents[0].sources;
+  assert.equal(source.id,file.id);assert.equal(source.original.importId,first.id);
+  result.documents[0].sources.unshift(
+    {...source,id:'other-source',type:'photo'},
+    {...source,type:'photo',original:{...source.original,importId:'other-import'}},
+  );
+  f.database.prepare('UPDATE import_drafts SET draft_json=?,result_json=? WHERE id=?').run(JSON.stringify(draft),JSON.stringify(result),first.id);
+  assert.deepEqual(await readFile(join(f.storageDir,'imports',first.id,file.id)),bytes);
+
+  const legacy=await stageImages(f,[['legacy-renamed.png',bytes]]);
+  assert.equal(legacy.detectedType,'photo');assert.equal(legacy.suggestedType,'screenshot');
+  assert.equal((await stageImages(f,[['7.png',imageBytes(8)]])).suggestedType??null,null);
+  assert.equal((await stageImages(f,[['legacy-renamed.png',bytes]],'two')).suggestedType??null,null);
 });
 
 
