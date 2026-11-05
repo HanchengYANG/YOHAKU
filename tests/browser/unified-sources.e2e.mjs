@@ -670,6 +670,68 @@ test("unified text import confirms detected type before preparing the current pa
   await expect(page.getByLabel("阅读分页",{exact:true})).toContainText("第 2 页");
 });
 
+for(const save of [false,true])test(`returning from second-page source correction keeps the reading position after ${save ? "saving" : "cancelling"}`,async({page})=>{
+  const firstText="一頁だけの本文。",secondText="二頁だけの本文。",editedText="二頁だけの修正済み本文。";
+  const first={id:"first-page",index:0,ready:true,bodyHtml:html(firstText),sourceIds:["s1"],start:0,end:firstText.length};
+  const staleReading={pages:[first],currentPage:first,index:0,position:0,complete:false,hasNext:true};
+  const state=await fixture(page,{source1:{type:"text",bodyHtml:first.bodyHtml},source:{bodyHtml:html(secondText)}});
+  await page.route("**/api/documents/doc",route=>route.fulfill({json:{id:"doc",title:"分页校对",kind:"article",sourceWorkflow:true,revision:1,
+    bodyHtml:html(firstText+secondText),blocks:parseText(firstText+secondText),reading:staleReading}}));
+
+  let savedIndex=0,returning=false,release;
+  const returnReads=[],returnBeats=[],returnGate=new Promise(resolve=>release=resolve);
+  await page.route("**/api/documents/doc/reading-*",async route=>{
+    const request=route.request(),url=new URL(request.url());
+    let index;
+    if(request.method()==="POST"){
+      const input=request.postDataJSON();
+      if(input.active===false)return route.fulfill({json:{sessionId:"test"}});
+      index=input.index??savedIndex;savedIndex=index;
+      if(returning&&input.mode==="reading")returnBeats.push(input.index);
+    }else{
+      if(returning){returnReads.push(url.searchParams.get("index"));await returnGate;}
+      index=Number(url.searchParams.get("index")??savedIndex);
+    }
+    const text=state.saves.length ? bodyText(state.saves.at(-1).bodyHtml) : secondText;
+    const second={id:"second-page",index:1,ready:true,bodyHtml:html(text),sourceIds:["s2"],start:first.end,end:first.end+text.length};
+    const pages=[first,second];
+    return route.fulfill({json:{pages,currentPage:pages[index],index,position:index,complete:true,totalPages:2,hasNext:index===0}});
+  });
+
+  try{
+    await page.goto("/#doc");
+    const reader=page.getByLabel("日语原文",{exact:true}),navigation=page.getByRole("navigation",{name:"阅读分页",exact:true});
+    await expect(reader).toContainText(firstText);
+    await navigation.getByRole("button",{name:"下一页",exact:true}).click();
+    await expect(reader).toContainText(secondText);
+    await expect.poll(()=>savedIndex).toBe(1);
+    await page.getByRole("button",{name:"校对正文",exact:true}).click();
+    await expect(page.getByLabel("切换校对来源",{exact:true})).toHaveValue("s2");
+    await page.getByRole("button",{name:"编辑正文与注音",exact:true}).click();
+    const editor=page.getByLabel("来源正文",{exact:true});
+    await expect(editor).toHaveValue(secondText);
+    if(save){
+      await editor.fill(editedText);
+      await page.getByRole("button",{name:"保存正文",exact:true}).click();
+      await expect(page.getByRole("status").filter({hasText:"已保存，将仅补齐"})).toBeVisible();
+    }else await page.getByRole("button",{name:"取消",exact:true}).click();
+    await expect(editor).toHaveCount(0);
+    returning=true;
+    await page.getByRole("button",{name:"返回阅读",exact:true}).click();
+    await expect.poll(()=>returnReads.length+returnBeats.length).toBeGreaterThan(0);
+    const showedFirstPage=await reader.filter({hasText:firstText}).count();
+    release();
+    await expect.poll(()=>returnBeats[0]).toBe(1);
+    await expect.poll(()=>returnReads[0]).toBe("1");
+    expect(showedFirstPage).toBe(0);
+    await expect(navigation).toContainText("第 2 / 2 页");
+    await expect(reader).toContainText(save ? editedText : secondText);
+    expect(returnBeats).not.toContain(0);
+    expect(savedIndex).toBe(1);
+    expect(state.saves).toHaveLength(save ? 1 : 0);
+  }finally{release();}
+});
+
 test("source correction opens the mapped source, saves its version and preserves immutable preview",async({page},testInfo)=>{
   const state=await fixture(page);await page.goto("/#doc");
   await page.getByRole("button",{name:"校对正文",exact:true}).click();

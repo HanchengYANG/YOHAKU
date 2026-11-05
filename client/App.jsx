@@ -168,6 +168,7 @@ function Workspace({ user, onLoggedOut }) {
   };
   const readerMain = useRef(null);
   const readingPosition = useRef(null);
+  const readingResume = useRef(null);
   const sidebarCollapseButton = useRef(null);
   const sidebarExpandButton = useRef(null);
   const focusSidebarToggle = useRef(false);
@@ -351,6 +352,7 @@ function Workspace({ user, onLoggedOut }) {
       setPanel(null);
       setDirty(false);
       setError("");
+      readingResume.current = null;
       setActiveId(nextId);
     };
     window.addEventListener("hashchange", changed);
@@ -377,6 +379,7 @@ function Workspace({ user, onLoggedOut }) {
     !saving && !bookBusy && (!dirty || window.confirm("当前修改还没有保存，确定离开吗？"));
   const openDocument = (id, { reviewSourceId } = {}) => {
     if (!mayLeave()) return;
+    readingResume.current = null;
     setDraft(null);
     setCorrectionTarget(reviewSourceId ? { reviewSourceId } : {});
     setPanel(reviewSourceId ? "correction" : null);
@@ -432,15 +435,22 @@ function Workspace({ user, onLoggedOut }) {
     openPanel("import");setImportDraftId(next.id);setImportBookId(next.context?.bookId || null);setAppendTargetId(next.context?.targetId || null);
   };
   const imported = (result) => {
+    readingResume.current = null;
     setDirty(false); setRefresh((current) => current + 1);
     setNotice("已保存原始资料，按阅读进度准备正文");
     const id = result.firstDocumentId || result.documents?.[0]?.id || (result.bookId ? `book/${result.bookId}` : "");
     setPanel(null);setDraft(null);setError("");setSidebarOpen(false);setActiveId(id);
     history.replaceState(null,"",id ? `#${id}` : window.location.pathname);setDetailRefresh((current) => current + 1);
   };
-  const editSources = (ids = []) => {
+  const editSources = (ids = [], pageIndex) => {
     if (!mayLeave()) return;
-    setCorrectionTarget({ sourceIds: ids });setPanel("correction");setDirty(false);
+    setCorrectionTarget({ sourceIds: ids, pageIndex });setPanel("correction");setDirty(false);
+  };
+  const returnFromCorrection = () => {
+    if (!mayLeave()) return;
+    if (currentReadingDocument?.sourceWorkflow)
+      readingResume.current = {documentId:currentReadingDocument.id,index:correctionTarget.pageIndex ?? null};
+    setPanel(null);setDirty(false);void refreshCurrentDocument();
   };
   const closePanel = () => {
     if (!mayLeave()) return;
@@ -529,6 +539,7 @@ function Workspace({ user, onLoggedOut }) {
   };
   const readingPageChanged = (page, snapshot) => {
     if (!mounted.current || !snapshot || currentView.current.activeId !== document?.id) return;
+    if (readingResume.current?.documentId === document.id) readingResume.current = null;
     const pages = snapshot.pages || (page ? [page] : []);
     if (!snapshot.complete && !pages.some((item) => item.ready)) return;
     const signature = JSON.stringify([snapshot.bodyHash, pages.map((item) => [item.id,item.ready,item.bodyHtml])]);
@@ -946,9 +957,9 @@ function Workspace({ user, onLoggedOut }) {
           <UnifiedImport key={importSession} initialText={importText} initialBookId={importBookId} initialTargetId={appendTargetId} initialImportId={importDraftId}
             onCancel={closePanel} onDirty={setDirty} onImported={imported} />
         ) : panel === "correction" && currentReadingDocument ? (
-          <SourceCorrection key={currentReadingDocument.id} document={currentReadingDocument} {...correctionTarget}
+          <SourceCorrection key={currentReadingDocument.id} document={currentReadingDocument} sourceIds={correctionTarget.sourceIds} reviewSourceId={correctionTarget.reviewSourceId}
             chatSession={chatSessionFor(currentReadingDocument.id)} onDirty={setDirty} onDocumentChanged={refreshCurrentDocument}
-            onClose={() => { if (!mayLeave()) return;setPanel(null);setDirty(false);void refreshCurrentDocument(); }} />
+            onClose={returnFromCorrection} />
         ) : panel === "image" ? (
           <ImageImport
             key={importSession}
@@ -997,6 +1008,7 @@ function Workspace({ user, onLoggedOut }) {
               ) : null)}
               {document.sourceWorkflow ? <PagedReader
                 key={document.id} document={document} active={!panel || panel === "chat"}
+                resumePosition={readingResume.current?.documentId === document.id ? readingResume.current : null}
                 onPageChange={readingPageChanged}
                 onEditSources={editSources} onDelete={() => remove(document)}
                 onDiscuss={() => {setChatRequest(null);setPanel(panel === "chat" ? null : "chat");}}

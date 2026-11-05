@@ -33,13 +33,17 @@ function DiagnosticFacts({record}) {
   return <dl className="reading-diagnostic-facts">{rows.map(([label,value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>;
 }
 
-export default function PagedReader({ document, active = true, onEditSources, onPageChange, ...readerProps }) {
-  const [pageIndex, setPageIndex] = useState({ documentId:document.id, value:null });
+export default function PagedReader({ document, active = true, resumePosition = null, onEditSources, onPageChange, ...readerProps }) {
+  const [resume] = useState(resumePosition);
+  const [pageIndex, setPageIndex] = useState({ documentId:document.id, value:resume?.index ?? null });
   const [response, setResponse] = useState(null);
   const [failure, setFailure] = useState(null);
   const index = pageIndex?.documentId === document.id ? pageIndex.value : null;
-  const snapshot = response?.documentId === document.id ? response.snapshot : document.reading || null;
-  const currentIndex = index ?? snapshot?.index ?? snapshot?.position ?? snapshot?.currentPage?.index ?? 0;
+  // The preloaded snapshot can still describe the page or text before correction.
+  const snapshot = response?.documentId === document.id ? response.snapshot : resume ? null : document.reading || null;
+  const requestedIndex = index ?? snapshot?.index ?? snapshot?.position ?? snapshot?.currentPage?.index ?? 0;
+  const currentIndex = snapshot?.complete && snapshot.totalPages > 0 ? Math.min(requestedIndex, snapshot.totalPages - 1) : requestedIndex;
+  const canHeartbeat = !!snapshot || !!resume;
   const error = failure?.documentId === document.id && failure.index === currentIndex ? failure.message : "";
   const [retry, setRetry] = useState(0);
   const session = useRef(crypto.randomUUID());
@@ -47,7 +51,7 @@ export default function PagedReader({ document, active = true, onEditSources, on
   const requestSequence = useRef(0);
   const latestResponse = useRef(0);
   const current = useRef(null);
-  current.current = {index:currentIndex,active};
+  current.current = {index:currentIndex,heartbeatIndex:!snapshot && index === null ? undefined : currentIndex};
   const setSnapshot = (next) => setResponse({documentId:document.id,snapshot:next});
   const setError = (message, requestedIndex = current.current.index) => setFailure(message ? {documentId:document.id,index:requestedIndex,message} : null);
   useEffect(() => {
@@ -77,14 +81,14 @@ export default function PagedReader({ document, active = true, onEditSources, on
     return () => {stopped = true;sequence++;clearTimeout(timer);controller?.abort();window.document.removeEventListener("visibilitychange",visibility);window.removeEventListener("online",load);};
   },[document.id,index,retry,active]);
   useEffect(() => {
-    if (!active || !snapshot) return;
+    if (!active || !canHeartbeat) return;
     let stopped = false;
     const beat = () => {
       if (stopped || window.document.visibilityState === "hidden") return;
       const shouldRetry = retryPending.current;retryPending.current = false;
       const request = ++requestSequence.current;
       const requestedIndex = current.current.index;
-      void api(`/documents/${encodeURIComponent(document.id)}/reading-session`,{method:"POST",body:JSON.stringify({sessionId:session.current,index:requestedIndex,active:true,mode:"reading",...(shouldRetry ? {retry:true} : {})})})
+      void api(`/documents/${encodeURIComponent(document.id)}/reading-session`,{method:"POST",body:JSON.stringify({sessionId:session.current,index:current.current.heartbeatIndex,active:true,mode:"reading",...(shouldRetry ? {retry:true} : {})})})
         .then((next) => {if (!stopped && request >= latestResponse.current) {latestResponse.current = request;setSnapshot(next);setError("");onPageChange?.(next.currentPage,next);}})
         .catch((cause) => {if (!stopped && request >= latestResponse.current) setError(cause.message,requestedIndex);});
     };
@@ -95,7 +99,7 @@ export default function PagedReader({ document, active = true, onEditSources, on
     beat(); const timer = setInterval(beat,8000);
     window.document.addEventListener("visibilitychange",visibility);window.addEventListener("pagehide",stop);window.addEventListener("online",beat);
     return () => {stopped = true;clearInterval(timer);stop();window.document.removeEventListener("visibilitychange",visibility);window.removeEventListener("pagehide",stop);window.removeEventListener("online",beat);};
-  },[document.id,index,active,!!snapshot,retry]);
+  },[document.id,index,active,canHeartbeat,retry]);
   const receivedPage = snapshot?.currentPage;
   const receivedMatches = receivedPage?.index === currentIndex;
   const page = (receivedMatches && receivedPage.ready ? receivedPage : null)
@@ -122,10 +126,10 @@ export default function PagedReader({ document, active = true, onEditSources, on
       <button className="button secondary" disabled={!hasNext || !page} onClick={() => change(currentIndex + 1)}>下一页</button>
       {!!snapshot?.pages?.length && <details className="reading-page-menu"><summary>文章目录</summary><div>{snapshot.pages.map((item) => <button key={item.id} className="text-button" aria-current={item.index === currentIndex ? "page" : undefined} onClick={() => change(item.index)}>第 {item.index + 1} 页{!item.ready ? " · 准备中" : ""}</button>)}{!snapshot.complete && <p>后续阅读页随正文准备后显示</p>}</div></details>}
     </nav>
-    {page?.ready && !bodyText(page.bodyHtml).trim() ? <section className="reading-preparation" aria-label="阅读页正文已清空"><h1>{document.title}</h1><h2>本页正文已清空</h2><p>阅读页位置已保留，可继续翻页，或在校对正文中补充内容。</p><button className="button secondary" onClick={() => onEditSources(page.sourceIds || [])}>校对正文</button></section> : page?.ready ? <Reader {...readerProps}
+    {page?.ready && !bodyText(page.bodyHtml).trim() ? <section className="reading-preparation" aria-label="阅读页正文已清空"><h1>{document.title}</h1><h2>本页正文已清空</h2><p>阅读页位置已保留，可继续翻页，或在校对正文中补充内容。</p><button className="button secondary" onClick={() => onEditSources(page.sourceIds || [],currentIndex)}>校对正文</button></section> : page?.ready ? <Reader {...readerProps}
       document={{...document,bodyHtml:page.bodyHtml,bodyHash:snapshot?.bodyHash || document.bodyHash,blocks:htmlToBlocks(page.bodyHtml)}}
       headingSourceIds={page.headingSourceIds}
-      onEdit={() => onEditSources(page.sourceIds)} onSegment={null}
+      onEdit={() => onEditSources(page.sourceIds,currentIndex)} onSegment={null}
       onAsk={(request) => readerProps.onAsk?.({...request,selection:pageSelection(request.selection,page)})} />
       : <><section className="reading-preparation" aria-label="准备当前阅读页" aria-busy={!emptyComplete && preparation.busy}>
         <span className="eyebrow">准备阅读</span><h1>{document.title}</h1>
@@ -142,7 +146,7 @@ export default function PagedReader({ document, active = true, onEditSources, on
         {diagnostics?.current && <details className="reading-diagnostics"><summary>处理详情</summary><DiagnosticFacts record={diagnostics.current} /></details>}
         <div className="source-actions">{!emptyComplete && !preparation.busy && <button className="button secondary" onClick={() => {retryPending.current = true;setRetry((value) => value + 1);}}>重试准备</button>}
           {taskId && <a className="button subtle" href={`#tasks/${encodeURIComponent(taskId)}`}>查看后台任务</a>}
-          <button className="button subtle" onClick={() => onEditSources(preparationSourceIds)}>校对正文</button></div>
+          <button className="button subtle" onClick={() => onEditSources(preparationSourceIds,currentIndex)}>校对正文</button></div>
       </section>
       {!emptyComplete && preview?.text && <section className="reading-preparation reading-provisional" aria-label="已提取正文预览">
         <h2>已提取正文预览</h2>
