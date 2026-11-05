@@ -63,6 +63,25 @@ bash scripts/pi-install-runtime.sh deploy/instances/production.env
 sudo bash scripts/pi-setup-system.sh deploy/instances/production.env
 ```
 
+新导入还需要本地文档运行环境。首次安装前准备 Python 3.11 及以上版本、venv 和 Git：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3 python3-venv python3-pip git
+```
+
+`pi-install-runtime.sh` 和日常 `pi-deploy.sh` 会运行 `scripts/install-document-runtime.sh`，在项目内分别创建 `.venv-documents` 和 `.venv-ndlocr`，安装固定版本的 PDF 解析、EPUB 标准库解析及 NDLOCR-Lite CPU 推理依赖、配置和 ONNX 模型。NDLOCR-Lite 固定为上游提交 `e57f7c6bd9cfb3de5f12f008e71ad2122bd44bfd`。模型仅在安装期间下载，运行时本地 OCR 不使用 AI 授权或提供方队列。首次安装需要额外磁盘空间；系统 Python 与已有业务数据不受影响。
+
+可以单独安装或修复：
+
+```bash
+bash scripts/install-document-runtime.sh
+```
+
+解析程序默认发现项目内的环境；自定义安装可通过 `DOCUMENT_PYTHON` 指定文档解析 Python，通过 `NDLOCR_PYTHON` 指定 OCR Python，通过 `LOCAL_RUBY_PYTHON` 指定本地注音 Python。`.venv-documents` 同时安装固定版本的 `pyopenjtalk-plus`、Sudachi 词典和 CPU 推理依赖；安装脚本验证词典与 nani 模型可离线注音，若存在 `uv` 则优先使用它安装，否则使用 pip。本地注音与 OCR 均不占用 AI 授权或提供方队列，读音查错使用已配置的注音角色。
+
+PDF 成书先本地 OCR／提取全书文字供 AI 分章，逐页保存首次结果并在正文处理中复用；文章导入的 PDF 按阅读需求提取。正文校正、分句和本地注音加 AI 查错仍按阅读进度执行。校对页按需生成并缓存 PDF 原页 PNG，保留实际页码与完整原件链接，不依赖浏览器 PDF 插件。EPUB 保留 spine 顺序、段落及原有 ruby。解析失败时保留上传原件，允许在来源校对界面人工录入。旧图片任务继续原流程，不因升级重新识别。
+
 运行环境脚本以 `APP_USER` 执行，从 `.nvmrc` 获取 Node 版本，下载对应架构的官方发行包并核对 SHA256，安装项目要求的 Codex CLI，再安装依赖和构建前端。
 Node 和 Codex 安装到应用用户的 `~/.local/share/yohaku/`。
 

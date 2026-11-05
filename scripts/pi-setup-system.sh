@@ -8,9 +8,9 @@ load_deploy_config "${1:-}"
 [[ -f "$APP_DIR/dist/index.html" && -x "$NODE_BIN/node" ]] || {
   echo 'Run scripts/pi-install-runtime.sh as the application user first.' >&2; exit 1;
 }
-if ! command -v nginx >/dev/null || ! command -v openssl >/dev/null; then
+if ! command -v nginx >/dev/null || ! command -v openssl >/dev/null || ! command -v python3 >/dev/null; then
   apt-get update
-  apt-get install -y nginx openssl
+  apt-get install -y nginx openssl python3 python3-venv python3-pip git
 fi
 source "$(dirname "$0")/pi-certificates.sh"
 configure_certificates

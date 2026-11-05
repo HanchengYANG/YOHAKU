@@ -46,6 +46,9 @@ if [[ -d "$DATA_DIR" ]]; then
   echo "Data backup: $backup/data"
 fi
 npm ci
+if [[ -f "$APP_DIR/scripts/document-requirements.txt" ]]; then
+  bash "$APP_DIR/scripts/install-document-runtime.sh"
+fi
 if "$deploy_run_tests"; then
   # Serialize crypto-heavy account fixtures on small servers.
   YOHAKU_TEST_HTTP_TIMEOUT_MS="$DEPLOY_TEST_HTTP_TIMEOUT_MS" node --test --test-concurrency=1 tests/*.test.mjs

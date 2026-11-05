@@ -22,4 +22,5 @@ npm install --global --prefix "$APP_HOME/.local/share/yohaku/codex" @openai/code
 "$APP_HOME/.local/share/yohaku/codex/bin/codex" --version
 cd "$APP_DIR"
 npm ci
+bash "$APP_DIR/scripts/install-document-runtime.sh"
 npm run build

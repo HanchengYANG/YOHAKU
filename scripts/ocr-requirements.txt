@@ -1,13 +1,17 @@
 # CPU-only inference dependencies used by server/ocr/ndl-worker.py.
 # NDLOCR-Lite itself is installed at a fixed upstream commit by the installer.
-numpy==2.2.2
+# Python 3.14 (e.g. Ubuntu 26.04 on the Pi) has no wheels for the original
+# numpy and PyYAML pins; use the oldest releases that ship them.
+numpy==2.2.2; python_version < "3.14"
+numpy==2.3.2; python_version >= "3.14"
 Pillow==13.0.0
 lxml==6.1.3
 networkx==3.3
 ordered-set==4.1.0
 protobuf==6.33.6
 pyparsing==3.1.2
-PyYAML==6.0.1
+PyYAML==6.0.1; python_version < "3.14"
+PyYAML==6.0.3; python_version >= "3.14"
 tqdm==4.66.4
 reportlab==4.2.5
 pypdfium2==4.30.0
