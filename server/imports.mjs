@@ -418,7 +418,7 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
       const result={id:draft.id,bookId,documents:created,firstDocumentId:created[0]?.id};
       if(!result.firstDocumentId)throw fail(422,'文件未包含可创建的正文。');
       if(bookId&&!asBook)books.touch(req.user.id,bookId);
-      draft.status='confirmed';draft.title=title;
+      draft.status='confirmed';draft.title=title;draft.confirmedAsBook=asBook;
       if(isImage(type))draft.confirmedType=type;
       database.prepare('UPDATE import_drafts SET title=?,status=?,draft_json=?,result_json=?,updated_at=?,version=version+1 WHERE id=? AND user_id=?')
         .run(title,'confirmed',JSON.stringify({...draft,result:undefined}),JSON.stringify(result),new Date().toISOString(),draft.id,req.user.id);
@@ -432,30 +432,43 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
     if(draft.taskDeletedAt||taskId(draft)!==id)throw fail(404,'找不到这次导入任务。');
     return draft;
   }
+  function availableResultId(read,userId,id){
+    if(!id)return null;
+    try{return read(userId,id)?id:null;}
+    catch(error){if(error.status===404)return null;throw error;}
+  }
   function taskFor(userId,id){
     const draft=taskDraft(userId,id),processing=draft.chapterProcessing||{},inspection=draft.inspectionProcessing||{},parseErrors=draft.files.filter(file=>file.info?.error);
+    const archived=draft.status==='confirmed',result=draft.result;
+    const documentId=archived?availableResultId(requireDocument,userId,result?.firstDocumentId):null;
+    const bookId=archived?availableResultId(books.requireBook,userId,result?.bookId):draft.context?.bookId||null;
+    const createdBook=draft.confirmedAsBook??((result?.documents?.length||0)>1);
+    const resultKind=archived&&createdBook&&bookId?'book':documentId?'article':null;
     const pageTask=isPdf(draft.detectedType)&&!!(draft.chapterAttempted||draft.chapterProcessing);
-    const status=draft.status==='confirmed'?'completed':['queued','running'].includes(inspection.status)?inspection.status:
+    const manualChapters=archived&&createdBook&&pageTask&&processing.status!=='done';
+    const status=archived?'completed':['queued','running'].includes(inspection.status)?inspection.status:
       parseErrors.length?(parseErrors.some(file=>file.inspection?.status==='timeout')?'timeout':'failed'):
       ['failed','timeout'].includes(inspection.status)?inspection.status:
       ['failed','timeout'].includes(processing.status)?processing.status:['extracting','proposing'].includes(processing.status)?'running':
       processing.status==='queued'?'queued':processing.status==='done'?'requires_review':'draft';
     const total=processing.totalPages||draft.files[0]?.info?.pageCount||draft.files.length,completed=processing.completedPages||0;
     const steps=pageTask?[{id:'extract',step:'extract',title:'本地 PDF 提取',
-      status:parseErrors.length||['queued','running'].includes(inspection.status)?'dependency_wait':completed===total?'completed':processing.status==='extracting'?'running':['failed','timeout'].includes(status)?status:'dependency_wait',
-      progress:{completed,total,unit:'page'},startedAt:processing.startedAt,error:completed<total?draft.chapterError:null,
+      status:manualChapters&&completed<total?'cancelled':parseErrors.length||['queued','running'].includes(inspection.status)?'dependency_wait':completed===total?'completed':processing.status==='extracting'?'running':['failed','timeout'].includes(status)?status:'dependency_wait',
+      progress:{completed,total,unit:'page'},startedAt:processing.startedAt,error:completed<total&&!manualChapters?draft.chapterError:null,
+      ...(manualChapters&&completed<total?{message:'已提取的页面会保留，其余原页将在阅读时处理。'}:{}),
       ...(processing.startedAt&&processing.extractionFinishedAt?{execution:{elapsedMs:Date.parse(processing.extractionFinishedAt)-Date.parse(processing.startedAt)}}:{})}]:[];
     if(pageTask){
       const type=processing.type||draft.detectedType,path=`$.byType.${type}`;
       const cached=new Map(database.prepare('SELECT page,created_at,json_type(result_json,?) AS cached,json_extract(result_json,?) AS elapsed_ms FROM import_page_extractions WHERE import_id=? AND file_id=?')
         .all(path,path+'.execution.elapsedMs',draft.id,draft.files[0].id).filter(row=>row.cached).map(row=>[row.page,row]));
       steps[0].children=Array.from({length:total},(_,index)=>{const page=index+1,row=cached.get(page);return{id:`page:${page}`,step:'extract',title:`PDF 第 ${page} 页`,page,
-        status:row?'completed':processing.status==='extracting'&&page===completed+1?'running':['failed','timeout'].includes(status)&&page===completed+1?status:'dependency_wait',
-        ...(row?{finishedAt:row.created_at,execution:row.elapsed_ms==null?{}:{elapsedMs:row.elapsed_ms}}:{}),...(page===completed+1?{error:draft.chapterError}:{}),};});
+        status:row?'completed':manualChapters?'cancelled':processing.status==='extracting'&&page===completed+1?'running':['failed','timeout'].includes(status)&&page===completed+1?status:'dependency_wait',
+        ...(row?{finishedAt:row.created_at,execution:row.elapsed_ms==null?{}:{elapsedMs:row.elapsed_ms}}:{}),...(page===completed+1&&!manualChapters?{error:draft.chapterError}:{}),};});
     }
-    if(pageTask)steps.push({id:'chapters',step:'chapters',title:'分章核对',status:processing.status==='done'?'completed':
+    if(pageTask)steps.push({id:'chapters',step:'chapters',title:'分章核对',status:processing.status==='done'||manualChapters?'completed':
       processing.status==='proposing'?(processing.providerState==='queued'?'resource_wait':'running'):completed===total&&['failed','timeout'].includes(status)?status:'dependency_wait',
-      execution:draft.execution||processing.execution,error:completed===total?draft.chapterError:null,
+      ...(manualChapters?{message:`AI 分章未完成，章节已手动确认。${draft.chapterError?` 当时的提示是「${draft.chapterError}」。`:''}`} : {}),
+      execution:draft.execution||processing.execution,error:completed===total&&!manualChapters?draft.chapterError:null,
       startedAt:processing.proposalStartedAt,finishedAt:processing.finishedAt});
     const parseSteps=draft.files.map(file=>({id:`parse:${file.id}`,step:'parse',title:file.name,status:file.info?.error?(file.inspection?.status==='timeout'?'timeout':'failed'):file.inspection?.status||'completed',
       execution:file.inspection?.execution,error:file.info?.error||null,finishedAt:file.inspection?.finishedAt}));
@@ -467,10 +480,10 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
     return {id,type:'import',importId:draft.id,generation:draft.generation,version:draft.version,title:draft.title,
       status:processing.status==='proposing'&&processing.providerState==='queued'?'resource_wait':status,state:status,createdAt:draft.createdAt,
       updatedAt:database.prepare('SELECT updated_at FROM import_drafts WHERE id=?').get(draft.id).updated_at,
-      documentId:draft.result?.firstDocumentId||null,bookId:draft.result?.bookId||draft.context?.bookId||null,
-      archived:draft.status==='confirmed',canRetry:['failed','timeout'].includes(status)&&!jobs.has(draft.id),
-      canDelete:['failed','timeout'].includes(status)&&!jobs.has(draft.id),canOpenResult:true,
-      progress,steps,error:parseErrors[0]?.info.error||inspection.error||draft.chapterError||null,execution:draft.execution,
+      documentId,bookId,resultKind,archived,canRetry:['failed','timeout'].includes(status)&&!jobs.has(draft.id),
+      canDelete:['failed','timeout'].includes(status)&&!jobs.has(draft.id),canOpenResult:!archived||!!resultKind,
+      ...(archived&&!resultKind?{message:'导入结果已不在书架，任务记录仍保留。'}:{}),
+      progress,steps,error:parseErrors[0]?.info.error||inspection.error||(!manualChapters&&draft.chapterError)||null,execution:draft.execution,
       files:draft.files.map(publicFile),draft:present(draft)};
   }
   const taskAdapter={type:'import',

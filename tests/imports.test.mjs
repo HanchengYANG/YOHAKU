@@ -151,8 +151,9 @@ test('deleting failed parser tasks preserves originals and explicit inspection s
   const next=(await f.request('/api/tasks')).data.tasks.find(item=>item.importId===draft.id);assert.ok(next);assert.notEqual(next.id,task.id);assert.equal(next.status,'draft');
 });
 
-test('failed AI chapter attempts stay visible and permit valid manual chapter confirmation',async(t)=>{
-  const f=await fixture(t,{proposal:()=>{throw Object.assign(new Error('分章结果格式不完整，请手动调整章节。'),{status:502,expose:true});}}),form=new FormData();
+for(const phase of ['extraction','proposal'])test(`failed chapter ${phase} stays visible and permits manual confirmation`,async(t)=>{
+  const failChapter=()=>{throw Object.assign(new Error('分章结果格式不完整，请手动调整章节。'),{status:502,expose:true});};
+  const f=await fixture(t,phase==='extraction'?{extractChapterPage:failChapter}:{proposal:failChapter}),form=new FormData();
   form.append('files',new Blob([blankPdf()],{type:'application/pdf'}),'blank.pdf');
   const stage=await f.request('/api/imports','POST',form),path=`/api/imports/${stage.data.id}`;
   const confirmation={type:'scan_pdf',title:'人工核对章节',asBook:true,chapters:[{title:'正文',startPage:1,endPage:1,needsReview:true}]};
@@ -160,6 +161,15 @@ test('failed AI chapter attempts stay visible and permit valid manual chapter co
   assert.equal((await f.request(path+'/chapters','POST',{type:'scan_pdf'})).status,202);
   const restored=await f.waitChapters(path);assert.equal(restored.data.chapterProcessing.status,'failed');assert.equal(restored.data.chapterAttempted,true);assert.match(restored.data.chapterError,/手动调整章节/);assert.deepEqual(restored.data.chapters,[]);
   const saved=await f.request(path+'/confirm','POST',confirmation);assert.equal(saved.status,201);assert.equal(saved.data.documents.length,1);
+  const task=(await f.request(`/api/tasks/${stage.data.id}`)).data;
+  assert.equal(task.archived,true);assert.equal(task.status,'completed');assert.equal(task.error,null);
+  const extraction=task.steps.find(step=>step.step==='extract');
+  assert.equal(extraction.status,phase==='extraction'?'cancelled':'completed');
+  assert.equal(extraction.children[0].status,extraction.status);
+  assert.equal(extraction.progress.completed,phase==='extraction'?0:1);
+  const chapters=task.steps.find(step=>step.step==='chapters');
+  assert.equal(chapters.status,'completed');assert.equal(chapters.error,null);
+  assert.match(chapters.message,/章节已手动确认/);assert.match(chapters.message,/手动调整章节/);
 });
 
 test('rejects mixed uploads and type mismatch before creating articles or starting AI',async(t)=>{

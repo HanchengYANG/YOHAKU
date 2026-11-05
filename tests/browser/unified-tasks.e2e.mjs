@@ -315,6 +315,88 @@ test("file task continues the exact persisted PDF draft and chapter review",asyn
   await expect(page.getByRole("button",{name:"确认导入",exact:true})).toBeEnabled();
 });
 
+const removedImportMessage="导入结果已不在书架，任务记录仍保留。";
+async function archivedImportFixture(page,resultKind) {
+  const state=await fixture(page);
+  const chapter=(id,title,text)=>{
+    const blocks=parseText(text);
+    return {id,title,kind:"book",bookId:"book",preview:text,blocks,bodyHtml:applySentenceBoundaries(blocksToHtml(blocks),[text]),
+      charCount:text.length,rubyCount:0,revision:1,updatedAt:createdAt};
+  };
+  const first=chapter("article",resultKind==="article" ? "追加到已有书籍的文章" : "归档书籍第一章","最初の本文です。"),
+    second=chapter("chapter-two","归档书籍第二章","二番目の本文です。");
+  if(resultKind){
+    state.document=first;
+    state.book={id:"book",title:"归档导入的扫描书籍",revision:1,pages:[first,second]};
+    await page.route("**/api/documents/chapter-two",route=>route.fulfill({json:second}));
+    await page.route("**/api/documents/chapter-two/conversations",route=>route.fulfill({json:{conversations:[]}}));
+  }
+  state.task={...state.task,type:"import",title:resultKind==="book" ? state.book.title : resultKind==="article" ? first.title : "已经删除的导入结果",
+    importId:"imp",status:"completed",state:"completed",archived:true,resultKind,canOpenResult:!!resultKind,
+    documentId:state.document?.id || null,bookId:state.book?.id || null,
+    steps:[{id:"confirm",step:"confirm",title:"确认导入",status:"completed"}],progress:{completed:1,total:1},
+    ...(!resultKind ? {message:removedImportMessage} : {})};
+  await page.route(/\/api\/tasks(?:\?.*)?$/,route=>{
+    const params=new URL(route.request().url()).searchParams,type=params.get("type");
+    const tasks=params.get("scope")==="archived"&&(!type||type==="import") ? [state.task] : [];
+    return route.fulfill({json:{tasks,total:tasks.length,counts:{active:0,archived:1}}});
+  });
+  await page.goto("/#tasks");
+  await page.getByRole("tab",{name:"已归档",exact:true}).click();
+  await page.getByLabel("任务类型",{exact:true}).selectOption("import");
+  return {state,first,second,card:page.locator(`[data-task-id="${state.task.id}"]`)};
+}
+
+test("an archived whole-book import opens its directory from the card and task detail",async({page})=>{
+  const {state,second,card}=await archivedImportFixture(page,"book");
+  await card.getByRole("button",{name:"打开书籍",exact:true}).click();
+  await expect(page).toHaveURL(/#book\/book$/);
+  await expect(page.getByRole("heading",{name:state.book.title,exact:true})).toBeVisible();
+  expect(state.calls.some(call=>call.path==="/documents/article")).toBe(false);
+  const chapters=page.getByRole("list",{name:"书籍文章列表",exact:true});
+  await expect(chapters.getByRole("listitem")).toHaveCount(2);
+  await chapters.getByRole("button",{name:`打开第 2 篇：${second.title}`,exact:true}).click();
+  await expect(page).toHaveURL(/#chapter-two$/);
+  await expect(page.getByRole("heading",{name:second.title,exact:true})).toBeVisible();
+  await expect(page.getByLabel("日语原文",{exact:true})).toContainText(second.preview);
+
+  await page.goto("/#tasks/prepare-14");
+  const detail=page.getByRole("region",{name:"任务状态",exact:true});
+  const bookButton=detail.getByRole("button",{name:"打开关联书籍",exact:true});
+  await expect(bookButton).toHaveClass(/\bprimary\b/);
+  await expect(detail.getByRole("button",{name:"打开关联文章",exact:true})).toHaveClass(/\bsecondary\b/);
+  await bookButton.click();
+  await expect(page).toHaveURL(/#book\/book$/);
+  await expect(chapters.getByRole("listitem")).toHaveCount(2);
+});
+
+test("an archived article appended to a book still opens the imported article",async({page})=>{
+  const {first,card}=await archivedImportFixture(page,"article");
+  await card.getByRole("button",{name:"打开文章",exact:true}).click();
+  await expect(page).toHaveURL(/#article$/);
+  await expect(page.getByRole("heading",{name:first.title,exact:true})).toBeVisible();
+  await page.goto("/#tasks/prepare-14");
+  const detail=page.getByRole("region",{name:"任务状态",exact:true});
+  const articleButton=detail.getByRole("button",{name:"打开关联文章",exact:true});
+  await expect(articleButton).toHaveClass(/\bprimary\b/);
+  await expect(detail.getByRole("button",{name:"打开关联书籍",exact:true})).toHaveCount(0);
+  await articleButton.click();
+  await expect(page).toHaveURL(/#article$/);
+});
+
+test("a removed archived import result keeps its task record accessible",async({page})=>{
+  const {state,card}=await archivedImportFixture(page,null);
+  await expect(card).toContainText(removedImportMessage);
+  await expect(card.getByRole("button",{name:/打开书籍|打开文章/})).toHaveCount(0);
+  await card.getByRole("button",{name:"查看任务",exact:true}).click();
+  await expect(page).toHaveURL(/#tasks\/prepare-14$/);
+  const detail=page.getByRole("region",{name:"任务状态",exact:true});
+  await expect(detail.getByText(removedImportMessage,{exact:true})).toBeVisible();
+  await expect(detail.getByRole("list",{name:"后台处理步骤",exact:true})).toContainText("确认导入");
+  await expect(detail.getByRole("button",{name:/打开关联书籍|打开关联文章|继续导入/})).toHaveCount(0);
+  expect(state.calls.filter(call=>call.path==="/books/book"||call.path==="/documents/article")).toEqual([]);
+});
+
 test("PDF task pages stay collapsed until opened and retain individual errors",async({page})=>{
   const state=await fixture(page);state.task.steps[0].children=[{id:"page105",title:"PDF 第105页",page:105,status:"completed"},{id:"page106",title:"PDF 第106页",page:106,status:"failed",error:"此页 OCR 失败，前一页已保留"}];
   await page.goto("/#tasks/prepare-14");

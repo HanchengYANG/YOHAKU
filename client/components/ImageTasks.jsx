@@ -62,8 +62,12 @@ function BackgroundStep({step,index,type}) {
     {!!step.children?.length && <details className="task-step-children"><summary>查看子步骤（{step.children.length}）</summary><ol className="task-item-list task-step-list">{step.children.map((child,childIndex)=><BackgroundStep key={child.id || `${child.step}:${childIndex}`} step={child} index={childIndex} type={type} />)}</ol></details>}
   </div></li>;
 }
+const archivedImportBook = (task) => task.type === "import" && task.archived && task.resultKind === "book" ? task.bookId : null;
+
 function BackgroundTaskDetail({task,busy,error,onBack,onDocumentOpen,onImportOpen,onRetry,onDelete,reload}) {
   const capabilities=taskActions(task),status=taskStatus(task),steps=task.steps || [];
+  const archivedBookId=archivedImportBook(task);
+  const bookId=archivedBookId || (!task.documentId && !(task.type === "import" && task.archived) ? task.bookId : null);
   const attentionSteps = task.type === "preparation" && task.documentId && !task.archived
     ? steps.filter(step => step.step === "correct" && ["requires_review", "timeout", "failed"].includes(step.status) && step.sourceId)
     : [];
@@ -88,8 +92,8 @@ function BackgroundTaskDetail({task,busy,error,onBack,onDocumentOpen,onImportOpe
             {step.status === "requires_review" ? `核对 ${label}` : `查看 ${label} 正文`}<Icon name="arrow" size={16} />
           </button>;
         })}
-        {task.documentId && <button className={`button ${attentionSteps.length ? "secondary" : "primary"}`} type="button" onClick={()=>onDocumentOpen?.(task.documentId)}>打开关联文章<Icon name="arrow" size={16} /></button>}
-        {!task.documentId && task.bookId && <button className="button primary" type="button" onClick={()=>onDocumentOpen?.(`book/${task.bookId}`)}>打开关联书籍<Icon name="arrow" size={16} /></button>}
+        {bookId && <button className="button primary" type="button" onClick={()=>onDocumentOpen?.(`book/${bookId}`)}>打开关联书籍<Icon name="arrow" size={16} /></button>}
+        {task.documentId && <button className={`button ${attentionSteps.length || archivedBookId ? "secondary" : "primary"}`} type="button" onClick={()=>onDocumentOpen?.(task.documentId)}>打开关联文章<Icon name="arrow" size={16} /></button>}
         {task.type === "import" && task.importId && !task.archived && task.canOpenResult && <button className="button primary" type="button" disabled={busy} onClick={onImportOpen}>继续导入<Icon name="arrow" size={16} /></button>}
         {capabilities.retry && <button className="button primary" type="button" disabled={busy} onClick={onRetry}>重试失败步骤</button>}
         {capabilities.delete && <button className="button subtle task-delete" type="button" disabled={busy} onClick={onDelete}>删除任务</button>}
@@ -115,12 +119,13 @@ export function TaskList({ onOpen, onNew, onDocumentOpen }) {
     {loading && !data && <p role="status">正在读取任务…</p>}
     {!loading && !tasks.length && !error && <div className="task-empty"><Icon name="book" size={32} /><h2>{scope === "archived" ? "还没有归档任务" : "没有待处理的任务"}</h2><p>{scope === "archived" ? "完成的任务会自动归档，处理记录会保留。" : "导入资料或打开尚未准备的章节后，可在这里查看进度。"}</p>{scope === "active" && <button className="button primary" onClick={onNew}>导入阅读资料</button>}</div>}
     <div className="task-list">
-      {tasks.map((task) => { const segmentation = isImageTask(task) ? taskSegmentationState(task) : null; const documentId=task.appliedDocumentId || (task.archived && task.canOpenResult ? task.documentId : null);return <article className="task-card" key={task.id} data-task-id={task.id}>
+      {tasks.map((task) => { const segmentation = isImageTask(task) ? taskSegmentationState(task) : null; const bookId=archivedImportBook(task);const documentId=task.appliedDocumentId || (task.archived && task.canOpenResult ? task.documentId : null);return <article className="task-card" key={task.id} data-task-id={task.id}>
         <div className="task-card-main"><span className="task-type">{taskTypeLabel(task)}</span><span className={`task-state is-${task.appliedDocumentId ? "saved" : taskStatus(task)}`}>{taskStateLabel(task)}</span><h2><button className="task-title-button" type="button" onClick={() => onOpen(task.id)}>{taskDisplayName(task)}</button></h2>
           <p>{taskSummary(task)}</p>
+          {task.type === "import" && task.archived && !task.canOpenResult && task.message && <p className="task-note">{task.message}</p>}
           {segmentation && <p data-task-phase="segment" data-status-kind={segmentation.statusKind}>{segmentation.status}</p>}
           <small>{dateLabel(task.submittedAt || task.createdAt)}{task.state !== "draft" && taskDuration(task) ? ` · 历时 ${taskDuration(task)}` : ""}</small></div>
-        <button className="button subtle" type="button" onClick={() => documentId ? onDocumentOpen?.(documentId) : onOpen(task.id)}>{documentId ? "打开文章" : "查看任务"}<Icon name="arrow" size={16} /></button>
+        <button className="button subtle" type="button" onClick={() => bookId ? onDocumentOpen?.(`book/${bookId}`) : documentId ? onDocumentOpen?.(documentId) : onOpen(task.id)}>{bookId ? "打开书籍" : documentId ? "打开文章" : "查看任务"}<Icon name="arrow" size={16} /></button>
       </article>; })}
     </div>
     {(data?.total > 20 || offset > 0) && <nav className="task-pagination" aria-label="任务分页"><button className="button subtle" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}>上一页</button><span>第 {Math.floor(offset / 20) + 1} 页 · 共 {data?.total ?? "…"} 个任务</span><button className="button subtle" disabled={!data || offset + 20 >= data.total} onClick={() => setOffset(offset + 20)}>下一页</button></nav>}

@@ -715,6 +715,74 @@ test('unified imports, source saves and article metadata invalidate the previous
   await f.request(`/books/${book.id}`,'DELETE',{revision:book.revision},409);
 });
 
+test('archived PDF imports resolve the book and preserve the original file after deletion',async t=>{
+  const chapters=[{title:'第一章',startPage:1,endPage:1,excluded:false,needsReview:false},{title:'第二章',startPage:2,endPage:2,excluded:false,needsReview:false}];
+  const f=await fixture(t,{chapterProposal:{chapters,exclusions:[]},ndlOcr:{async recognize(){return {text:'日本語の原文。',regions:[]};},close(){}}});
+  await f.configure();
+  const pdf=Buffer.from('%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] >> endobj\n4 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] >> endobj\ntrailer << /Root 1 0 R /Size 5 >>\n%%EOF');
+  const importBook=async(title,selectedChapters)=>{
+    const form=new FormData();form.append('files',new Blob([pdf],{type:'application/pdf'}),'archived-import.pdf');
+    const draft=await f.request('/imports','POST',form,201),path=`/imports/${draft.id}`;
+    await f.request(`${path}/chapters`,'POST',{type:'scan_pdf'},202);await f.instance.imports.drain();
+    const proposed=await f.request(path);
+    assert.equal(proposed.chapterProcessing.status,'done');
+    const result=await f.request(`${path}/confirm`,'POST',{type:'scan_pdf',title,asBook:true,chapters:selectedChapters},201);
+    return {draft,result};
+  };
+  const assertArchived=async(draft,expected)=>{
+    const detail=await f.request(`/tasks/${draft.taskId}`);
+    const {tasks}=await f.request('/tasks?scope=archived&type=import');
+    const listItem=tasks.find(task=>task.id===draft.taskId);assert.ok(listItem);
+    for(const task of [detail,listItem]){
+      assert.equal(task.status,'completed');assert.equal(task.archived,true);assert.equal(task.canDelete,false);
+      for(const [key,value] of Object.entries(expected))assert.equal(task[key],value,key);
+    }
+  };
+  const legacy=await importBook('旧版双章书',chapters);
+  const single=await importBook('单章也成书',[{...chapters[0],endPage:2}]);
+  assert.equal(legacy.result.documents.length,2);
+  assert.equal(single.result.documents.length,1);
+  const database=new DatabaseSync(join(f.dataDir,'yohaku.sqlite'));
+  try{
+    assert.equal(database.prepare("SELECT json_extract(draft_json,'$.confirmedAsBook') AS asBook FROM import_drafts WHERE id=?").get(single.draft.id).asBook,1);
+    database.prepare("UPDATE import_drafts SET draft_json=json_remove(draft_json,'$.confirmedAsBook') WHERE id=?").run(legacy.draft.id);
+  }finally{database.close();}
+  await f.restart();
+  for(const {draft,result} of [legacy,single])await assertArchived(draft,{resultKind:'book',bookId:result.bookId,documentId:result.firstDocumentId,canOpenResult:true});
+
+  const first=await f.request(`/documents/${legacy.result.firstDocumentId}`);
+  await f.request(`/documents/${first.id}`,'DELETE',{revision:first.revision},204);
+  await f.request(`/documents/${first.id}`,'GET',undefined,404);
+  const book=await f.request(`/books/${legacy.result.bookId}`);
+  assert.deepEqual(book.pages.map(page=>page.id),[legacy.result.documents[1].id]);
+  await assertArchived(legacy.draft,{resultKind:'book',bookId:book.id,documentId:null,canOpenResult:true});
+
+  await f.request(`/books/${book.id}`,'DELETE',{revision:book.revision},204);
+  await f.request(`/books/${book.id}`,'GET',undefined,404);
+  await assertArchived(legacy.draft,{resultKind:null,bookId:null,documentId:null,canOpenResult:false});
+  const {cookie}=await ensureSession(f.url);
+  const raw=await fetch(f.url+legacy.draft.files[0].previewUrl,{headers:{Cookie:cookie},signal:AbortSignal.timeout(5000)});
+  assert.equal(raw.status,200);
+  assert.deepEqual(Buffer.from(await raw.arrayBuffer()),pdf);
+
+  const invitation=await f.request('/invitations','POST',{},201);
+  const registration=await fetch(f.url+'/api/accounts/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:'archive_other_owner',password:'fixture-other-password',inviteToken:invitation.token})});
+  assert.equal(registration.status,201);
+  const otherCookie=cookieFromResponse(registration);
+  const createAsOther=async(path,body)=>{
+    const response=await fetch(f.url+'/api'+path,{method:'POST',headers:{Cookie:otherCookie,'Content-Type':'application/json'},body:JSON.stringify(body)});
+    assert.equal(response.status,201);return response.json();
+  };
+  const otherBook=await createAsOther('/books',{title:'別の本'});
+  const otherArticle=await createAsOther('/documents',{title:'別の本文',kind:'book',orientation:'horizontal',bookId:otherBook.id,content:'別の原文。'});
+  assert.equal((await fetch(`${f.url}/api/tasks/${legacy.draft.taskId}`,{headers:{Cookie:otherCookie}})).status,404);
+  const archives=new DatabaseSync(join(f.dataDir,'yohaku.sqlite'));
+  try{
+    archives.prepare("UPDATE import_drafts SET result_json=json_set(result_json,'$.bookId',?,'$.firstDocumentId',?) WHERE id=?").run(otherBook.id,otherArticle.id,legacy.draft.id);
+  }finally{archives.close();}
+  await assertArchived(legacy.draft,{resultKind:null,bookId:null,documentId:null,canOpenResult:false});
+});
+
 test('photo and screenshot imports remain one article when placed in an existing book',async(t)=>{
   const f=await fixture(t),book=await f.request('/books','POST',{title:'图片文章集'},201);
   const buffer=await sharp({create:{width:20,height:30,channels:3,background:'white'}}).png().toBuffer();
@@ -723,6 +791,7 @@ test('photo and screenshot imports remain one article when placed in an existing
   await f.request(`/imports/${draft.id}/confirm`,'POST',{type:'photo',title:'一篇照片文章',asBook:true},400);
   const imported=await f.request(`/imports/${draft.id}/confirm`,'POST',{type:'photo',title:'一篇照片文章',bookId:book.id},201);
   assert.equal(imported.documents.length,1);assert.equal(imported.bookId,book.id);
+  const firstTaskId=draft.taskId;
   let article=await f.request(`/documents/${imported.firstDocumentId}`);
   assert.equal(article.sources.length,2);assert.equal(article.bookId,book.id);
   draft=await stage(1);
@@ -730,4 +799,15 @@ test('photo and screenshot imports remain one article when placed in an existing
   article=await f.request(`/documents/${article.id}`);assert.equal(article.sources.length,3);
   const updated=await f.request(`/books/${book.id}`);assert.equal(updated.articleCount,1);
   assert.equal((await f.request('/books')).books.length,1);assert.equal(f.calls.length,0);
+  for(const taskId of [firstTaskId,draft.taskId]){
+    const task=await f.request(`/tasks/${taskId}`);
+    assert.equal(task.resultKind,'article');assert.equal(task.documentId,article.id);assert.equal(task.bookId,book.id);assert.equal(task.canOpenResult,true);
+  }
+  await f.request(`/documents/${article.id}`,'DELETE',{revision:article.revision},204);
+  assert.equal((await f.request(`/books/${book.id}`)).articleCount,0);
+  for(const taskId of [firstTaskId,draft.taskId]){
+    const task=await f.request(`/tasks/${taskId}`);
+    assert.equal(task.archived,true);assert.equal(task.status,'completed');assert.equal(task.resultKind,null);
+    assert.equal(task.documentId,null);assert.equal(task.bookId,book.id);assert.equal(task.canOpenResult,false);
+  }
 });
