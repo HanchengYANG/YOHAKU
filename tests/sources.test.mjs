@@ -301,33 +301,42 @@ test('page can reference multiple sources and source previews do not run AI',asy
 });
 
 test('reading pages expose only verified image headings at source transitions without changing text coordinates',async()=>{
-  const title='十五馬を見に行く',calls=[];
+  const title='十五馬を見に行く',spacedTitle='十五 馬を見に行く',calls=[],correctionHeadings=new Map();
   const regions={
     'ocr-heading':[{category:'タイトル本文',text:title},{category:'本文',text:'旅か'}],
     continuation:[{category:'本文',text:'続く。'}],
     'changed-title':[{category:'タイトル本文',text:'旧見出し'},{category:'本文',text:'本文。'}],
+    'pdf-heading':[{category:'タイトル本文',text:'PDFの題'},{category:'本文',text:'本文。'}],
   };
-  const corrected={'ocr-heading':`${title}\n旅が`,'changed-title':'新しい文\n本文。'};
+  const corrected={'ocr-heading':`${spacedTitle}\n旅が`,'changed-title':'新しい文\n本文。'};
+  const headingHtml=text=>{
+    const blocks=parseText(text);blocks[0].type='heading';
+    return blocksToHtml(blocks);
+  };
   const f=fixture({processSource:async(_u,request)=>{
     const {id}=request.source;
     calls.push([id,request.step]);
-    if(request.step==='extract')return {regions:regions[id],bodyHtml:html(regions[id].map(region=>region.text).join('\n'))};
-    if(request.step==='correct'&&corrected[id])return {bodyHtml:html(corrected[id])};
+    if(request.step==='extract'){
+      const text=regions[id].map(region=>region.text).join('\n');
+      return {regions:regions[id],bodyHtml:id==='pdf-heading'?headingHtml(text):html(text)};
+    }
+    if(request.step==='correct'){
+      correctionHeadings.set(id,request.context.firstOcrLineIsHeading===true);
+      if(corrected[id])return {bodyHtml:html(corrected[id])};
+    }
     if(request.step==='segment')return {bodyHtml:applySentenceBoundaries(request.bodyHtml,bodyText(request.bodyHtml).match(/[^\n]+\n?/g))};
     return {bodyHtml:request.bodyHtml};
   }});
-  const explicit=(id,type,text)=>{
-    const blocks=parseText(text);blocks[0].type='heading';
-    return {id,type,status:'ready',bodyHtml:applySentenceBoundaries(blocksToHtml(blocks),[text])};
-  };
+  const explicit=(id,text)=>({id,type:'photo',status:'ready',bodyHtml:applySentenceBoundaries(headingHtml(text),[text])});
   const texts=[['first','先頭の題\n「前の文章」'],['ocr-heading',corrected['ocr-heading']],['continuation','続く。'],
     ['changed-title',corrected['changed-title']],['explicit-heading','写真の題\n本文。'],['pdf-heading','PDFの題\n本文。']];
   try{
     f.service.createArticleSources('u','a',[
-      explicit('first','photo',texts[0][1]),{id:'ocr-heading',type:'screenshot'},{id:'continuation',type:'screenshot'},
-      {id:'changed-title',type:'screenshot'},explicit('explicit-heading','photo',texts[4][1]),explicit('pdf-heading','scan_pdf',texts[5][1]),
+      explicit('first',texts[0][1]),{id:'ocr-heading',type:'screenshot'},{id:'continuation',type:'screenshot'},
+      {id:'changed-title',type:'screenshot'},explicit('explicit-heading',texts[4][1]),{id:'pdf-heading',type:'scan_pdf'},
     ]);
     f.service.heartbeat('u','a',{index:0});await f.service.drain();
+    assert.deepEqual(correctionHeadings,new Map([['ocr-heading',true],['continuation',false],['changed-title',true],['pdf-heading',false]]));
     const source=f.service.getSource('u','a','ocr-heading');
     const checkpoint=f.database.prepare("SELECT input_version,result_json FROM source_steps WHERE scope_id=? AND step='extract' AND status='completed'").get(source.scopeId);
     assert.deepEqual(JSON.parse(checkpoint.result_json).regions,regions['ocr-heading']);
@@ -344,11 +353,11 @@ test('reading pages expose only verified image headings at source transitions wi
     assert.deepEqual([page.start,page.end],[0,text.length]);
     assert.deepEqual(page.ranges.map(({sourceId,start,end})=>[sourceId,start,end]),texts.flatMap(([sourceId,value])=>
       value.split('\n').map((line,index,lines)=>[sourceId,0,line.length+Number(index<lines.length-1)])));
-    const start=texts[0][1].length,end=start+title.length;
+    const start=texts[0][1].length,end=start+spacedTitle.length;
     const selection=f.service.validateSelection('u','a',{readingPageId:page.id,pageLocalStart:start,pageLocalEnd:end,
       sourceIds:['ocr-heading'],sourceVersions:page.sourceVersions});
     assert.deepEqual(selection,{start,end,scopeValidated:true,readingPageId:page.id,sourceIds:['ocr-heading'],
-      sourceRanges:[{sourceId:'ocr-heading',start:0,end:title.length,version:source.version}]});
+      sourceRanges:[{sourceId:'ocr-heading',start:0,end:spacedTitle.length,version:source.version}]});
     await f.service.drain();assert.equal(calls.length,count,'reading a saved heading must not run OCR or AI');
   }finally{f.close();}
 });

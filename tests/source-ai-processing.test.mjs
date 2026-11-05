@@ -94,6 +94,41 @@ test('protecting a confirmed title does not hide dangerous body deletion from re
   assert.equal(bodyText(result.proposalHtml),'五花より……\n今日は晴れです。');
 });
 
+const screenshotHeading='一マイク・ミラーです';
+const screenshotBody=`<p>${screenshotHeading}</p><p>今日は晴れです。</p>`;
+
+for(const [name,modelHeading] of [['exact','マイク・ミラーです'],['trimmed','　マイク・ミラーです ']])test(`screenshot correction restores a dropped OCR heading numeral: ${name}`,async()=>{
+  const processor=createSourceProcessor({execute:async(_user,_role,input)=>{
+    assert.equal(JSON.parse(input.prompt.split('\n目标正文：\n').at(-1)),bodyText(screenshotBody));
+    return {value:{text:`${modelHeading}\n今日は晴です。`}};
+  }});
+  const result=await processor.processSource('u',{step:'correct',source:{type:'screenshot',position:2},context:{firstOcrLineIsHeading:true},bodyHtml:screenshotBody});
+  assert.equal(result.requiresReview,undefined);
+  assert.equal(bodyText(result.bodyHtml),`${screenshotHeading}\n今日は晴です。`);
+});
+
+test('restoring a dropped screenshot heading numeral still sends an omitted paragraph to review',async()=>{
+  const original=screenshotBody+'<p>明日は長い会議に出かける予定です。</p>';
+  const processor=createSourceProcessor({execute:async()=>({value:{text:'マイク・ミラーです\n今日は晴です。'}})});
+  const result=await processor.processSource('u',{step:'correct',source:{type:'screenshot',position:2},context:{firstOcrLineIsHeading:true},bodyHtml:original});
+  assert.equal(result.requiresReview,true);
+  assert.equal(bodyText(result.bodyHtml),bodyText(original));
+  assert.equal(bodyText(result.proposalHtml),`${screenshotHeading}\n今日は晴です。`);
+});
+
+for(const [name,type,firstOcrLineIsHeading,modelHeading] of [
+  ['an ordinary screenshot line','screenshot',undefined,'マイク・ミラーです'],
+  ['a PDF line','scan_pdf',true,'マイク・ミラーです'],
+  ['a changed screenshot heading','screenshot',true,'マイク・ミラーでした'],
+  ['internal whitespace in a screenshot heading','screenshot',true,'マイク・ ミラーです'],
+])test(`screenshot heading correction does not restore a numeral for ${name}`,async()=>{
+  const corrected=`${modelHeading}\n今日は晴です。`;
+  const processor=createSourceProcessor({execute:async()=>({value:{text:corrected}})});
+  const result=await processor.processSource('u',{step:'correct',source:{type,position:2},context:{firstOcrLineIsHeading},bodyHtml:screenshotBody});
+  assert.equal(result.requiresReview,undefined);
+  assert.equal(bodyText(result.bodyHtml),corrected);
+});
+
 const openDialogue='「わたしが十二歳のとき、ダーキーは足にけがをしてしまって、そ';
 const continuation='れからすぐ、死んでしまいました」';
 const pdfSource={type:'scan_pdf',position:2};

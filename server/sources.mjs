@@ -546,16 +546,19 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     }
     return result;
   }
-  function startsWithImageHeading(row,fragment) {
-    if(!['photo','screenshot'].includes(row.type)||!fragment.text.trim())return false;
-    if(/^<p\b[^>]*\bdata-block-type="heading"/.test(fragment.html))return true;
-    if(row.type!=='screenshot')return false;
+  function matchesScreenshotOcrHeading(row,fragment) {
+    if(row.type!=='screenshot'||!fragment?.text.trim())return false;
     const region=readOnce('firstOcrRegion',row.scope_id,()=>decode(database.prepare(`
       SELECT json_extract(result_json,'$.regions[0]') AS region FROM source_steps
       WHERE scope_id=? AND step='extract' AND status IN ('completed','stale')
         AND json_type(result_json,'$.regions[0]')='object'
       ORDER BY input_version LIMIT 1`).get(row.scope_id)?.region));
-    return typeof region?.text==='string'&&ocrRegionBlockType(region)==='heading'&&region.text.trim()===fragment.text.trim();
+    const ignoreSpacing=text=>text.replace(/[^\S\r\n]+/gu,'');
+    return typeof region?.text==='string'&&ocrRegionBlockType(region)==='heading'&&ignoreSpacing(region.text)===ignoreSpacing(fragment.text);
+  }
+  function startsWithImageHeading(row,fragment) {
+    return ['photo','screenshot'].includes(row.type)&&!!fragment.text.trim()&&
+      (/^<p\b[^>]*\bdata-block-type="heading"/.test(fragment.html)||matchesScreenshotOcrHeading(row,fragment));
   }
   function pageHtml(userId,id,refs,{sourceMap,fragmentMap,pageId}={}) {
     const parts=[],headingSourceIds=[];
@@ -880,7 +883,10 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     if(segmentGroup&&(segmentGroup.length>1||carry))return performSegmentBatch(segmentGroup,priority,carry,execution);
     const step=stages[row.next_step],version=row.version,html=readHtml(row),other=scopes(row.user_id,row.document_id),at=other.findIndex(s=>s.scope_id===row.scope_id);
     const context={before:other.slice(Math.max(0,at-1),at).map(readHtml).map(body.bodyText).join('').slice(-600),after:other.slice(at+1,at+2).map(readHtml).map(body.bodyText).join('').slice(0,600)};
-    if(step==='correct'&&consecutivePdfPages(other[at-1],row))context.previousPdfPage=true;
+    if(step==='correct'){
+      if(consecutivePdfPages(other[at-1],row))context.previousPdfPage=true;
+      if(row.type==='screenshot'&&matchesScreenshotOcrHeading(row,fragments(row)[0]))context.firstOcrLineIsHeading=true;
+    }
     database.prepare("UPDATE article_sources SET status='processing',error=NULL WHERE scope_id=? AND version=?").run(row.scope_id,version);
     database.prepare("INSERT INTO source_steps VALUES(?,?,?,'running',NULL,NULL,?) ON CONFLICT(scope_id,step,input_version) DO UPDATE SET status='running',error=NULL,updated_at=excluded.updated_at").run(row.scope_id,step,version,stamp());
     const attempt=startAttempt(row,step,execution);
