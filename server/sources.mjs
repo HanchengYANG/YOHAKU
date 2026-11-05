@@ -140,7 +140,15 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     if(ref.step!==step)return false;
     return step!=='annotate'||!range||!ref.range||range.start<ref.range.end&&range.end>ref.range.start;
   }));
-  const failedNodes=row=>database.prepare("SELECT step,error FROM source_steps WHERE scope_id=? AND input_version=? AND status='failed'").all(row.scope_id,row.version);
+  const nativeFailedNodes=row=>readOnce('failedNodes',json([row.scope_id,row.version]),()=>database.prepare("SELECT step,error FROM source_steps WHERE scope_id=? AND input_version=? AND status='failed'").all(row.scope_id,row.version));
+  const failedNodes=row=>nativeFailedNodes(row).filter(node=>{
+    const range=/^annotate(?:_local)?:(\d+):(\d+)$/.exec(node.step);if(!range)return true;
+    const start=Number(range[1]),end=Number(range[2]);
+    if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||end<=start)return true;
+    // Successful same-version checkpoints supersede this gate, while the
+    // original failed native result and attempt remain an unchanged journal.
+    return !annotationCovered({...row,next_step:3},start,end);
+  });
   const phaseOf=step=>step.startsWith('annotate')?'annotate':step;
   const phaseFailed=(row,phase)=>failedNodes(row).some(node=>phaseOf(node.step)===phase);
   function preserveFailure(row){
@@ -336,10 +344,11 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
   }
   function sourceDetail(row,{internal=false,articleOffsets,articleBodyHash}={}) {
     const html=readHtml(row),before=articleOffsets?.get(row.source_id)??scopes(row.user_id,row.document_id).filter(other=>other.position<row.position).reduce((sum,other)=>sum+body.bodyText(readHtml(other)).length,0);
-    articleBodyHash??=requireDocument(row.user_id,row.document_id).body_hash||hash(compose(scopes(row.user_id,row.document_id)));
+    const document=internal||articleBodyHash==null?requireDocument(row.user_id,row.document_id):null;
+    articleBodyHash??=document.body_hash||hash(compose(scopes(row.user_id,row.document_id)));
     const preview=decode(row.preview_json,{});preview.type??=preview.kind;
     const steps=database.prepare('SELECT step,input_version AS inputVersion,status,error,updated_at AS updatedAt FROM source_steps WHERE scope_id=? ORDER BY updated_at,step').all(row.scope_id);
-    return {id:row.source_id,scopeId:row.scope_id,type:row.type,localRange:decode(row.range_json),position:row.position,version:row.version,checked:row.checked_version===row.version,checkedVersion:row.checked_version,status:row.status,processing:row.status==='processing',manual:!!row.manual,editing:!!row.edit_session&&row.edit_expires>now(),preview,original:internal?decode(row.original_json,{}):publicMetadata(decode(row.original_json,{})),firstExtraction:decode(row.first_extraction_json),bodyHtml:html,text:body.bodyText(html),articleStart:before,articleEnd:before+body.bodyText(html).length,articleBodyHash,error:row.error||null,proposal:decode(row.proposal_json),steps,changes:database.prepare("SELECT version,step,body_html AS bodyHtml,execution_json AS executionJson,created_at AS createdAt FROM source_revisions WHERE scope_id=? ORDER BY version,created_at,CASE step WHEN 'extract' THEN 0 WHEN 'chapter_filter' THEN 1 ELSE 2 END").all(row.scope_id).map(({executionJson,...revision})=>({...revision,execution:decode(executionJson)}))};
+    return {id:row.source_id,scopeId:row.scope_id,type:row.type,localRange:decode(row.range_json),position:row.position,...(internal?{documentTitle:document.title}:{}),version:row.version,checked:row.checked_version===row.version,checkedVersion:row.checked_version,status:row.status,processing:row.status==='processing',manual:!!row.manual,editing:!!row.edit_session&&row.edit_expires>now(),preview,original:internal?decode(row.original_json,{}):publicMetadata(decode(row.original_json,{})),firstExtraction:decode(row.first_extraction_json),bodyHtml:html,text:body.bodyText(html),articleStart:before,articleEnd:before+body.bodyText(html).length,articleBodyHash,error:row.error||null,proposal:decode(row.proposal_json),steps,changes:database.prepare("SELECT version,step,body_html AS bodyHtml,execution_json AS executionJson,created_at AS createdAt FROM source_revisions WHERE scope_id=? ORDER BY version,created_at,CASE step WHEN 'extract' THEN 0 WHEN 'chapter_filter' THEN 1 ELSE 2 END").all(row.scope_id).map(({executionJson,...revision})=>({...revision,execution:decode(executionJson)}))};
   }
   function listSources(userId,id) {const document=requireDocument(userId,id),rows=scopes(userId,id),articleOffsets=new Map();let offset=0;for(const row of rows){articleOffsets.set(row.source_id,offset);offset+=body.bodyText(readHtml(row)).length;}const articleBodyHash=document.body_hash||hash(compose(rows));return rows.map(row=>sourceDetail(row,{articleOffsets,articleBodyHash}));}
   const getSource=(userId,id,sourceId)=>sourceDetail(scope(userId,id,sourceId));
@@ -710,7 +719,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     for(const candidate of sorted){
       const {row,mode}=candidate,step=candidate.step||stages[row.next_step];
       if(overlapsWork(row,step,candidate.annotationRange)||row.next_step>=4||row.status==='requires_review'||phaseFailed(row,step))continue;
-      if(row.status==='failed'&&!failedNodes(row).length)continue;
+      if(row.status==='failed'&&!nativeFailedNodes(row).length)continue;
       if(row.edit_session&&row.edit_expires>now()&&(row.next_step<2||step==='annotate'&&hasAnnotationBatch()))continue;
       const ordered=scopes(row.user_id,row.document_id),index=ordered.findIndex(item=>item.scope_id===row.scope_id);
       let reserved=[row],segmentGroup,carry,annotationGroup=candidate.annotationGroup;

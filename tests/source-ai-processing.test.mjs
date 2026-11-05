@@ -40,6 +40,60 @@ test('整句、整段删除与大幅改写必须暂停，少量纠错可以继�
   assert.equal(correctionRisk('今日は\n晴れです。\n明日は雨です。', '今日は晴れです。明日は雨です。').requiresReview, false);
 });
 
+for(const [name,bodyHtml] of [
+  ['plain line','<p data-paragraph-id="p">五花より……<br>今日は晴れです。</p>'],
+  ['whitespace-equivalent first nonempty line','<p data-paragraph-id="blank"> \t</p><p data-paragraph-id="title">　五 花 より…… </p><p data-paragraph-id="body">今日は晴れです。</p>'],
+])test(`confirmed first-source title is excluded from correction: ${name}`,async()=>{
+  let calls=0;
+  const processor=createSourceProcessor({execute:async(_user,role,input)=>{
+    calls++;assert.equal(role,'correction');
+    assert.equal(JSON.parse(input.prompt.split('\n目标正文：\n').at(-1)),'今日は晴れです。');
+    return {value:{text:'今日は晴です。'}};
+  }});
+  const result=await processor.processSource('u',{step:'correct',source:{position:0,documentTitle:'五花より……'},bodyHtml});
+  assert.equal(calls,1);assert.equal(result.requiresReview,undefined);
+  assert.equal(bodyText(result.bodyHtml),bodyText(bodyHtml).replace('晴れ','晴'));
+});
+
+test('confirmed title protection preserves original marks and keeps context out of corrected body',async()=>{
+  const bodyHtml='<p data-paragraph-id="title"><span data-sentence-id="title-sentence"><mark data-qa-group-ids="question"><ruby data-origin="manual">五花<rt>ごか</rt></ruby>より……</mark></span></p><p data-paragraph-id="body">今日は晴れです。</p>';
+  const processor=createSourceProcessor({execute:async(_user,_role,input)=>{
+    assert.equal(JSON.parse(input.prompt.split('\n目标正文：\n').at(-1)),'今日は晴れです。');
+    assert.match(input.prompt,/前の文|次の文/);assert.doesNotMatch(input.prompt,/title-sentence|question|<ruby|ごか/);
+    return {value:{text:'今日は晴です。'}};
+  }});
+  const result=await processor.processSource('u',{step:'correct',source:{position:0,documentTitle:'五花より……'},bodyHtml,context:{before:'前の文',after:'次の文'}});
+  assert.equal(bodyText(result.bodyHtml),'五花より……\n今日は晴です。');
+  assert.deepEqual(bodyRanges(result.bodyHtml),bodyRanges(bodyHtml));
+  assert.deepEqual(htmlToBlocks(result.bodyHtml)[0].segments.filter(segment=>segment.reading).map(({text,reading,origin})=>({text,reading,origin})),[{text:'五花',reading:'ごか',origin:'manual'}]);
+});
+
+test('a title-only first source preserves all whitespace without a remote correction',async()=>{
+  const processor=createSourceProcessor({execute:async()=>assert.fail('a confirmed title needs no remote correction')});
+  const bodyHtml='<p data-paragraph-id="blank"></p><p data-paragraph-id="title">　五 花より…… </p><p data-paragraph-id="end"> </p>';
+  const result=await processor.processSource('u',{step:'correct',source:{position:0,documentTitle:'五花より……'},bodyHtml});
+  assert.equal(bodyText(result.bodyHtml),bodyText(bodyHtml));assert.equal(result.requiresReview,undefined);
+});
+
+test('later sources and titles without an exact whitespace-normalized match are corrected normally',async()=>{
+  for(const source of [{position:1,documentTitle:'五花より……'},{documentTitle:'五花より……'},{position:0,documentTitle:'五花より・・・'},{position:0,documentTitle:''}]){
+    let calls=0;const processor=createSourceProcessor({execute:async(_user,_role,input)=>{
+      calls++;assert.equal(JSON.parse(input.prompt.split('\n目标正文：\n').at(-1)),'五花より……\n今日は晴れです。');
+      return {value:{text:'五時より……\n今日は晴です。'}};
+    }});
+    const result=await processor.processSource('u',{step:'correct',source,bodyHtml:'<p>五花より……<br>今日は晴れです。</p>'});
+    assert.equal(calls,1);assert.equal(bodyText(result.bodyHtml),'五時より……\n今日は晴です。');
+  }
+});
+
+test('protecting a confirmed title does not hide dangerous body deletion from review',async()=>{
+  const processor=createSourceProcessor({execute:async()=>({value:{text:'今日は晴れです。'}})});
+  const bodyHtml='<p data-paragraph-id="title">五花より……</p><p data-paragraph-id="first">今日は晴れです。</p><p data-paragraph-id="second">明日は雨です。</p>';
+  const result=await processor.processSource('u',{step:'correct',source:{position:0,documentTitle:'五花より……'},bodyHtml});
+  assert.equal(result.requiresReview,true);assert.equal(bodyText(result.bodyHtml),bodyText(bodyHtml));
+  assert.equal(bodyText(result.proposalHtml),'五花より……\n今日は晴れです。');
+});
+
 test('本地提取不进入AI队列；照片首次结果明确为识别与校正', async () => {
   const calls = [];
   const processor = createSourceProcessor({

@@ -2,6 +2,7 @@
 // Faults are scoped by the newly imported PDF id + page + source step, and
 // inserted inside the real provider execution slot. Other work uses real AI.
 import {bodyText} from '../shared/article-html.mjs';
+import {confirmedTitleLength} from '../server/ai/source-processing.mjs';
 import {readFileSync,appendFileSync,mkdirSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
@@ -47,9 +48,10 @@ for(const method of ['processSource']){
   const original=instance.ai[method].bind(instance.ai);
   instance.ai[method]=async(userId,input)=>{
     const text=bodyText(input.bodyHtml||'<p></p>');
-    if(input.step==='correct')pendingSources.set(text,input);
+    const targets=new Set([text,text.slice(confirmedTitleLength(input.source||{},text))].filter(target=>target.trim()));
+    if(input.step==='correct')for(const target of targets)pendingSources.set(target,input);
     try{return await original(userId,input);}
-    finally{if(pendingSources.get(text)===input)pendingSources.delete(text);}
+    finally{for(const target of targets)if(pendingSources.get(target)===input)pendingSources.delete(target);}
   };
 }
 const server=instance.app.listen(Number(process.env.PORT||4317),'127.0.0.1',()=>console.log('GUI isolation acceptance backend listening'));

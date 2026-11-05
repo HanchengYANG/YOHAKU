@@ -168,3 +168,52 @@ test('a failed local annotation retries its dependent parent and then performs r
   fail=false;f.service.taskAdapter.retry('owner',task.id,{version:task.version});await f.service.drain();
   assert.equal(localCalls,2);assert.equal(remoteCalls,1);assert.equal(f.service.taskAdapter.get('owner',task.id).status,'completed');
 });
+
+function supersededRangeFixture(t,{step='annotate:0:1000',coverage=[[0,400],[400,1000]],coverageVersion=1}={}){
+  const f=fixture(t);f.service.stop();
+  const session=f.service.heartbeat('owner','document',{index:0});
+  f.service.heartbeat('owner','document',{sessionId:session.sessionId,index:0,active:false});
+  const request=f.database.prepare('SELECT * FROM source_preparation_requests').get(),row=f.database.prepare('SELECT * FROM article_sources').get();
+  const at='2026-01-01T00:00:01.000Z';
+  const addAttempt=(id,nativeStep,state='failed')=>{
+    f.database.prepare('INSERT INTO source_step_attempts(id,request_id,scope_id,step,input_version,state,finished_at,updated_at,message) VALUES(?,?,?,?,?,?,?,?,?)').run(id,request.id,row.scope_id,nativeStep,row.version,state,state==='running'?null:at,at,state==='failed'?'historical validation failure':null);
+    f.database.prepare('INSERT OR REPLACE INTO source_steps(scope_id,step,input_version,status,error,updated_at) VALUES(?,?,?,?,?,?)').run(row.scope_id,nativeStep,row.version,state,state==='failed'?'historical validation failure':null,at);
+  };
+  const addRetry=nativeStep=>f.database.prepare('INSERT INTO source_preparation_jobs(user_id,document_id,mode,target,source_id,page_index,created_at,request_id) VALUES(?,?,?,?,?,?,?,?)').run('owner','document','retry',JSON.stringify({scopeId:row.scope_id,step:nativeStep,inputVersion:row.version}),row.source_id,0,at,request.id);
+  addAttempt('historical',step);
+  for(const [start,end] of coverage)f.database.prepare('INSERT INTO source_annotations VALUES(?,?,?,?,NULL,?)').run(row.scope_id,coverageVersion,start,end,at);
+  return {...f,request,row,addAttempt,addRetry};
+}
+
+for(const step of ['annotate:0:1000','annotate_local:0:1000'])test(`${step}失败已被同版本分段成功覆盖时派生完成，保留历史且精确清理旧重试`,t=>{
+  const f=supersededRangeFixture(t,{step});f.addRetry(step);
+  const task=f.service.taskAdapter.get('owner',f.request.id);
+  assert.equal(task.status,'completed');assert.equal(task.archived,true);assert.equal(task.error,null);
+  assert.equal(task.steps[0].children[0].superseded,true);assert.equal(task.steps[0].children[0].error,null);
+  assert.equal(f.database.prepare("SELECT state FROM source_step_attempts WHERE id='historical'").get().state,'failed');
+  assert.equal(f.database.prepare('SELECT status FROM source_steps WHERE step=?').get(step).status,'failed','native failure must not become a forged successful response');
+  assert.equal(f.database.prepare("SELECT count(*) AS n FROM source_preparation_jobs WHERE mode='retry'").get().n,0);
+  const snapshot=JSON.parse(JSON.stringify(task));f.addAttempt('late-unrelated','annotate:1000:2000');
+  assert.deepEqual(f.service.taskAdapter.get('owner',f.request.id),snapshot,'a completed snapshot cannot regress');
+});
+
+for(const [label,options] of [
+  ['partial coverage',{coverage:[[0,400],[401,1000]]}],
+  ['older version coverage',{coverageVersion:0}],
+  ['outside range coverage',{coverage:[[1000,2000]]}],
+])test(`${label} does not clear a current failed range or its retry demand`,t=>{
+  const f=supersededRangeFixture(t,options);f.addRetry('annotate:0:1000');
+  const task=f.service.taskAdapter.get('owner',f.request.id);
+  assert.equal(task.status,'failed');assert.equal(task.canDelete,true);assert.equal(task.steps[0].children[0].superseded,undefined);
+  assert.equal(f.database.prepare("SELECT count(*) AS n FROM source_preparation_jobs WHERE mode='retry'").get().n,1);
+});
+
+test('covering an obsolete failure retains another current active retry and prohibits task deletion',t=>{
+  const f=supersededRangeFixture(t);f.addRetry('annotate:0:1000');
+  f.addAttempt('current-running','annotate:1000:2000','running');f.addRetry('annotate:1000:2000');
+  const task=f.service.taskAdapter.get('owner',f.request.id);
+  assert.equal(task.archived,false);assert.equal(task.canDelete,false);assert.equal(task.canRetry,false);
+  assert.throws(()=>f.service.taskAdapter.delete('owner',task.id,{version:task.version}),error=>error.status===409);
+  const jobs=f.database.prepare("SELECT target FROM source_preparation_jobs WHERE mode='retry'").all();assert.equal(jobs.length,1);
+  assert.equal(JSON.parse(jobs[0].target).step,'annotate:1000:2000');
+});

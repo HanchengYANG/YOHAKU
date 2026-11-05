@@ -17,22 +17,34 @@ function stoppedAt(request,steps,rows){
   return new Date(Math.max(...times)).toISOString();
 }
 export function createSourceTaskAdapter({database,scopes,readHtml,body,sourceIdentity,working,latestRequest,ensureRequest,retryFailedSteps,requestTargets,targetsReady,hasRunnableDemand=()=>false,schedule,stamp,withReadScope=work=>work()}){
-  function ownedSteps(request,rows,observedAt){
+  function ownedSteps(request,rows,observedAt,onCovered){
     const steps=[];
     for(const row of rows){
       const history=database.prepare('SELECT * FROM source_step_attempts WHERE request_id=? AND scope_id=? ORDER BY rowid').all(request.id,row.scope_id);
+      let annotations;
+      const covered=node=>{
+        if(node.input_version!==row.version)return false;
+        const range=/^annotate(?:_local)?:(\d+):(\d+)$/.exec(node.step);if(!range)return false;
+        const start=Number(range[1]),end=Number(range[2]);if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||end<=start)return false;
+        annotations??=database.prepare('SELECT start,end FROM source_annotations WHERE scope_id=? AND version=? ORDER BY start,end').all(row.scope_id,row.version);
+        let cursor=start;
+        for(const interval of annotations){if(interval.start>cursor)return false;cursor=Math.max(cursor,interval.end);if(cursor>=end)return true;}
+        return false;
+      };
       for(const phase of ['extract','correct','segment','annotate']){
         const matches=history.filter(attempt=>attempt.step===phase||attempt.step.startsWith(phase+':')||attempt.step.startsWith(phase+'_'));
         if(!matches.length)continue;
         const nodes=[...new Map(matches.map(attempt=>[`${attempt.input_version}:${attempt.step}`,attempt])).values()];
-        const superseded=node=>node.input_version<row.version&&['failed','requires_review'].includes(node.state);
+        const obsolete=new Set(nodes.filter(node=>['failed','requires_review'].includes(node.state)&&covered(node)));
+        for(const node of obsolete)onCovered(node);
+        const superseded=node=>obsolete.has(node)||node.input_version<row.version&&['failed','requires_review'].includes(node.state);
         const active=nodes.filter(node=>['queued','running','retry_wait'].includes(node.state));
         const failed=nodes.filter(node=>node.state==='failed'&&!superseded(node)),review=nodes.filter(node=>node.state==='requires_review'&&!superseded(node));
-        const attempt=active.find(node=>node.state==='running')||active.at(-1)||failed.at(-1)||review.at(-1)||nodes.at(-1);
+        const attempt=active.find(node=>node.state==='running')||active.at(-1)||failed.at(-1)||review.at(-1)||nodes.filter(node=>!superseded(node)).at(-1)||nodes.at(-1);
         const state=node=>superseded(node)||['stale','interrupted'].includes(node.state)?'completed':node.state==='failed'&&parse(node.diagnostic_json)?.category==='timeout'?'timeout':node.state;
         const status=active.length?state(attempt):failed.length?state(failed.at(-1)):review.length?'requires_review':'completed';
         const identity=sourceIdentity(row),title=`${identity.label} · ${{extract:'提取／OCR',correct:'正文校对',segment:'分句',annotate:'注音'}[phase]}`;
-        steps.push({id:`${row.scope_id}:${phase}`,step:phase,type:phase,label:title,title,status,source:identity,sourceId:row.source_id,page:identity.page,version:row.version,inputVersion:attempt.input_version,execution:currentExecution(attempt,observedAt),queuedAt:attempt.queued_at,startedAt:attempt.started_at,finishedAt:active.length?null:nodes.map(node=>node.finished_at).filter(Boolean).sort().at(-1),error:failed.length||review.length?attempt.message||'来源处理失败，请重试或查看诊断信息。':null,diagnostic:parse(attempt.diagnostic_json),children:nodes.map(node=>({id:node.id,step:node.step,inputVersion:node.input_version,status:state(node),...(superseded(node)?{superseded:true}:{}),execution:currentExecution(node,observedAt),queuedAt:node.queued_at,startedAt:node.started_at,finishedAt:node.finished_at,error:!superseded(node)&&['failed','requires_review'].includes(node.state)?node.message||'来源处理未完成，请查看诊断信息。':null}))});
+        steps.push({id:`${row.scope_id}:${phase}`,step:phase,type:phase,label:title,title,status,source:identity,sourceId:row.source_id,page:identity.page,version:row.version,inputVersion:attempt.input_version,execution:currentExecution(attempt,observedAt),queuedAt:attempt.queued_at,startedAt:attempt.started_at,finishedAt:active.length?null:nodes.map(node=>node.finished_at).filter(Boolean).sort().at(-1),error:failed.length||review.length?attempt.message||'来源处理失败，请重试或查看诊断信息。':null,diagnostic:active.length||failed.length||review.length?parse(attempt.diagnostic_json):null,children:nodes.map(node=>({id:node.id,step:node.step,inputVersion:node.input_version,status:state(node),...(superseded(node)?{superseded:true}:{}),execution:currentExecution(node,observedAt),queuedAt:node.queued_at,startedAt:node.started_at,finishedAt:node.finished_at,error:!superseded(node)&&['failed','requires_review'].includes(node.state)?node.message||'来源处理未完成，请查看诊断信息。':null}))});
       }
     }
     return steps;
@@ -45,7 +57,11 @@ export function createSourceTaskAdapter({database,scopes,readHtml,body,sourceIde
     if(!document)throw fail(404,'关联文章已删除。');
     if(request.snapshot_json)return parse(request.snapshot_json);
     const observedAt=Date.parse(stamp());
-    const rows=scopes(userId,document.id),targets=requestTargets?.(request),steps=targets?ownedSteps(request,rows,observedAt):[];
+    const rows=scopes(userId,document.id),targets=requestTargets?.(request),steps=targets?ownedSteps(request,rows,observedAt,node=>{
+      // A successful same-version range is authoritative even if a former,
+      // larger attempt failed. Keep its journal/native response unchanged.
+      database.prepare("DELETE FROM source_preparation_jobs WHERE user_id=? AND document_id=? AND request_id=? AND mode='retry' AND json_extract(target,'$.scopeId')=? AND json_extract(target,'$.step')=? AND json_extract(target,'$.inputVersion')=?").run(userId,document.id,id,node.scope_id,node.step,node.input_version);
+    }):[];
     if(!targets)for(const row of rows){
       const native=database.prepare('SELECT * FROM source_steps WHERE scope_id=? AND input_version=? ORDER BY updated_at,rowid').all(row.scope_id,row.version);
       const history=database.prepare('SELECT * FROM source_step_attempts WHERE scope_id=? AND input_version<=? ORDER BY rowid').all(row.scope_id,row.version);
@@ -63,7 +79,7 @@ export function createSourceTaskAdapter({database,scopes,readHtml,body,sourceIde
       }
     }
     const latest=latestRequest?.(userId,document.id),current=!latest||latest.id===id;
-    const active=[...working.values()].some(work=>work.execution.userId===userId&&work.execution.documentId===document.id&&(!targets||work.execution.requestId===id))||current&&hasRunnableDemand(userId,document.id);
+    const active=steps.some(step=>['queued','running','retry_wait'].includes(step.status))||[...working.values()].some(work=>work.execution.userId===userId&&work.execution.documentId===document.id&&(!targets||work.execution.requestId===id))||current&&hasRunnableDemand(userId,document.id);
     const failed=steps.some(s=>['failed','timeout'].includes(s.status)),review=steps.some(s=>s.status==='requires_review')||!targets&&rows.some(r=>r.status==='requires_review');
     const complete=targets?targetsReady(userId,document.id,targets):rows.length&&rows.every(r=>r.next_step>=4);
     const timedOut=steps.some(s=>s.status==='timeout');

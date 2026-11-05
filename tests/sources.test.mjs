@@ -18,6 +18,60 @@ function fixture(ai={}) {
 }
 const ready=text=>({type:'text',text,needsCorrection:false,status:'ready',bodyHtml:applySentenceBoundaries(html(text),text.match(/[^。]*。|[^。]+$/g)||[text])});
 
+test('source correction receives the confirmed document title internally and protects only its first source',async()=>{
+  const calls=[],metadata=[];
+  const processor=createSourceProcessor({execute:async(_user,_role,input)=>{
+    const text=JSON.parse(input.prompt.split('\n目标正文：\n').at(-1));calls.push(text);
+    return {value:{text:text.replace('五花','五時').replace('晴れ','晴')}};
+  }});
+  const f=fixture({processSource:async(user,input)=>{
+    if(input.step==='correct'){metadata.push(input.source);return processor.processSource(user,input);}
+    return {bodyHtml:input.step==='segment'?applySentenceBoundaries(input.bodyHtml,[bodyText(input.bodyHtml)]):input.bodyHtml};
+  }});
+  try{
+    f.database.prepare('UPDATE documents SET title=? WHERE id=?').run('五花より……','a');
+    f.service.createArticleSources('u','a',[{id:'first',type:'scan_pdf',text:'五花より……\n今日は晴れです。'},{id:'later',type:'scan_pdf',text:'五花より……\n今日は晴れです。'}]);
+    f.service.heartbeat('u','a',{index:0});await f.service.drain();
+    assert.ok(metadata.every(source=>source.documentTitle==='五花より……'));
+    assert.deepEqual(metadata.map(source=>source.position),[0,1]);
+    assert.deepEqual(calls,['今日は晴れです。','五花より……\n今日は晴れです。']);
+    assert.equal(f.service.getSource('u','a','first').text,'五花より……\n今日は晴です。');
+    assert.equal(f.service.getSource('u','a','later').text,'五時より……\n今日は晴です。');
+    assert.equal(f.service.getSource('u','a','first').documentTitle,undefined,'internal title metadata is not added to the public source response');
+  }finally{f.close();}
+});
+
+for(const [phase,coverage] of [['annotate','complete'],['annotate_local','complete'],['annotate','partial'],['annotate','old-version']])test(`${phase} failure covered by ${coverage} results keeps the correct gate for unread source ranges`,async()=>{
+  const starts=[],f=fixture({processSource:async(_user,input)=>{starts.push(bodyText(input.bodyHtml));return {bodyHtml:input.bodyHtml};}});
+  try{
+    const pages=['甲','乙','丙'].map(char=>(char.repeat(99)+'。').repeat(10)),text=pages.join('');
+    f.service.createArticleSources('u','a',[{id:'long',...ready(text),status:'pending'}]);
+    f.database.prepare("UPDATE article_sources SET next_step=3,status='pending' WHERE source_id='long'").run();
+    const session=f.service.heartbeat('u','a',{index:0});
+    f.service.heartbeat('u','a',{sessionId:session.sessionId,index:0,active:false});
+    const row=f.database.prepare("SELECT * FROM article_sources WHERE source_id='long'").get(),request=f.database.prepare("SELECT * FROM source_preparation_requests WHERE document_id='a'").get(),step=`${phase}:0:1000`,stamp=new Date(1000).toISOString();
+    f.database.prepare("INSERT INTO source_steps VALUES(?,?,?,'failed',NULL,'old failed range',?)").run(row.scope_id,step,row.version,stamp);
+    f.database.prepare("UPDATE article_sources SET status='failed',error='old failed range' WHERE scope_id=?").run(row.scope_id);
+    f.database.prepare("INSERT INTO source_step_attempts(id,scope_id,step,input_version,state,started_at,finished_at,updated_at,request_id) VALUES('old-failure',?,?,?,'failed',?,?,?,?)").run(row.scope_id,step,row.version,stamp,stamp,stamp,request.id);
+    for(const [start,end] of coverage==='complete'?[[0,400],[400,1000]]:[[0,coverage==='partial'?999:1000]])f.database.prepare('INSERT INTO source_annotations VALUES(?,?,?,?,NULL,?)').run(row.scope_id,coverage==='old-version'?row.version-1:row.version,start,end,stamp);
+    const nativeBefore=f.database.prepare('SELECT * FROM source_steps WHERE scope_id=? AND step=?').get(row.scope_id,step),attemptBefore=f.database.prepare("SELECT * FROM source_step_attempts WHERE id='old-failure'").get();
+    await f.service.drain();assert.equal(starts.length,0,'already covered current scope must not run again');
+    const first=f.service.taskAdapter.get('u',request.id);assert.equal(first.status,coverage==='complete'?'completed':'failed');
+    f.service.heartbeat('u','a',{sessionId:session.sessionId,index:1});await f.service.drain();
+    if(coverage==='complete'){
+      assert.ok(starts.length>0,'a covered old failure must not block unread annotation ranges');
+      assert.ok(starts.every(value=>!value.startsWith('甲')),'successful ranges must not run again');
+      assert.equal(f.service.readingPages('u','a',1).currentPage.ready,true);
+      assert.equal(f.service.getSource('u','a','long').status,'ready','preserveFailure must not restore a covered old error');
+    }else{
+      assert.equal(starts.length,0,'incomplete or previous-version coverage must keep the failure gate');
+      assert.equal(f.service.readingPages('u','a',1).currentPage.ready,false);
+    }
+    assert.deepEqual(f.database.prepare('SELECT * FROM source_steps WHERE scope_id=? AND step=?').get(row.scope_id,step),nativeBefore);
+    assert.deepEqual(f.database.prepare("SELECT * FROM source_step_attempts WHERE id='old-failure'").get(),attemptBefore,'native attempts remain an unchanged journal');
+  }finally{f.close();}
+});
+
 test('reading diagnostics distinguish queued and running work and retain a safe failure after retry and restart',async()=>{
   let release,update,failOnce=true;
   const execution={operationId:'operation-1',role:'correction',providerId:'api_base',model:'test-model',configurationVersion:3};
