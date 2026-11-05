@@ -41,6 +41,46 @@ test('source correction receives the confirmed document title internally and pro
   }finally{f.close();}
 });
 
+for(const [name,{earlier={},later={},rubyOnly=false,protect=false}] of [
+  ['consecutive physical pages', {protect:true}],
+  ['a ruby-only change on the preceding page', {rubyOnly:true,protect:true}],
+  ['a manually fixed preceding boundary', {earlier:{manual:true}}],
+  ['a skipped physical page', {later:{original:{importId:'import',fileId:'file',page:4}}}],
+  ['a different file', {later:{original:{importId:'import',fileId:'another',page:3}}}],
+  ['a different import', {later:{original:{importId:'another',fileId:'file',page:3}}}],
+  ['missing original provenance', {later:{original:{page:3}}}],
+  ['a different PDF type', {earlier:{type:'text_pdf'}}],
+  ['a clipped preceding end', {earlier:{localRange:{start:0,end:10}}}],
+  ['a clipped target start', {later:{localRange:{start:1}}}],
+])test(`PDF seam protection uses physical source provenance: ${name}`,async()=>{
+  const before='「ダーキーは足にけがをしてしまって、そ',target='れからすぐ、死んでしまいました」',contexts=[];
+  const processor=createSourceProcessor({execute:async(_user,_role,input)=>{
+    const original=JSON.parse(input.prompt.split('\n目标正文：\n').at(-1));
+    return {value:{text:'「そ'+original}};
+  }});
+  const f=fixture({processSource:async(user,input)=>{
+    if(input.step==='correct'){contexts.push(input.context);return processor.processSource(user,input);}
+    return {bodyHtml:input.step==='segment'?applySentenceBoundaries(input.bodyHtml,[bodyText(input.bodyHtml)]):input.bodyHtml};
+  }});
+  try{
+    const left={id:'left',...ready(before),type:'scan_pdf',original:{importId:'import',fileId:'file',page:2},...earlier};
+    const right={id:'right',type:'scan_pdf',text:target,original:{importId:'import',fileId:'file',page:3},...later};
+    // The clipping cases preserve the same scoped text, isolating provenance.
+    if(earlier.localRange) {left.bodyHtml=html(before+'注');left.localRange.end=before.length;}
+    if(later.localRange)right.text='注'+target;
+    f.service.createArticleSources('u','a',[left,right]);
+    if(rubyOnly){
+      const current=f.service.getSource('u','a','left');
+      const saved=f.service.saveSource('u','a','left',{version:current.version,bodyHtml:current.bodyHtml.replace('足','<ruby data-origin="manual">足<rt>あし</rt></ruby>')});
+      assert.equal(saved.manual,true);
+    }
+    f.service.prepareSource('u','a','right');await f.service.drain();
+    assert.equal(contexts.length,1);assert.equal(contexts[0].before,before);
+    assert.equal(contexts[0].previousPdfPage===true,protect);
+    assert.equal(f.service.getSource('u','a','right').text,protect?target:'「そ'+target);
+  }finally{f.close();}
+});
+
 for(const [phase,coverage] of [['annotate','complete'],['annotate_local','complete'],['annotate','partial'],['annotate','old-version']])test(`${phase} failure covered by ${coverage} results keeps the correct gate for unread source ranges`,async()=>{
   const starts=[],f=fixture({processSource:async(_user,input)=>{starts.push(bodyText(input.bodyHtml));return {bodyHtml:input.bodyHtml};}});
   try{

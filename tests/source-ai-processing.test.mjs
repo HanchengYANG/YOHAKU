@@ -94,6 +94,48 @@ test('protecting a confirmed title does not hide dangerous body deletion from re
   assert.equal(bodyText(result.proposalHtml),'五花より……\n今日は晴れです。');
 });
 
+const openDialogue='「わたしが十二歳のとき、ダーキーは足にけがをしてしまって、そ';
+const continuation='れからすぐ、死んでしまいました」';
+const pdfSource={type:'scan_pdf',position:2};
+
+test('PDF correction does not copy the preceding page tail into an unchanged dialogue continuation',async()=>{
+  const raw=continuation+'\n馬は足にけがをしてしまうと、生き続けるのが難しくなる。サン\nトスさんの目が、もう涙でぬれていた。';
+  const corrected=raw.replace('サン\nトス','サントス');
+  let prompt;
+  const processor=createSourceProcessor({execute:async(_user,_role,input)=>{
+    prompt=input.prompt;return {value:{text:'「そ'+corrected}};
+  }});
+  const result=await processor.processSource('u',{step:'correct',source:pdfSource,bodyHtml:`<p>${raw.replaceAll('\n','<br>')}</p>`,context:{before:openDialogue,previousPdfPage:true}});
+  assert.equal(bodyText(result.bodyHtml),corrected);
+  assert.equal(result.requiresReview,undefined);
+  assert.match(prompt,/不得从相邻页补字或补引号/);
+});
+
+for(const [name,source,before,original,corrected,previousPdfPage=true] of [
+  ['a fresh dialogue after a closed quote',pdfSource,'「はい」と言った。その後、そ',continuation,'「そ'+continuation],
+  ['a quote present in the original opening line',pdfSource,openDialogue,'「'+continuation,'「そ'+continuation],
+  ['a correction inside the opening line',pdfSource,openDialogue,continuation,'「それからすぐに、死んでしまいました」'],
+  ['a non-PDF source',{type:'screenshot',position:2},openDialogue,continuation,'「そ'+continuation],
+  ['a previous source without verified page adjacency',pdfSource,openDialogue,continuation,'「そ'+continuation,false],
+  ['an indented dialogue',pdfSource,'「この話はここまでで、こ','　の事は忘れてください」','「この事は忘れてください」'],
+  ['a longer repeated phrase',pdfSource,'「じゃあ、こうしてから',continuation+'\nサントスさんの目が、もう涙でぬれていた。','「こうしてから'+continuation+'\nサントスさんの目が、もう涙でぬれていた。'],
+  ['repeated sentence punctuation',pdfSource,'「彼はそう言いました。',continuation,'「。'+continuation],
+])test(`PDF seam protection does not suppress ${name}`,async()=>{
+  const processor=createSourceProcessor({execute:async()=>({value:{text:corrected}})});
+  const result=await processor.processSource('u',{step:'correct',source,bodyHtml:`<p>${original.replaceAll('\n','<br>')}</p>`,context:{before,...(previousPdfPage?{previousPdfPage}: {})}});
+  assert.equal(bodyText(result.bodyHtml),corrected);
+  assert.equal(result.requiresReview,undefined);
+});
+
+test('protecting the PDF continuation still requires review of a deleted paragraph',async()=>{
+  const original=`<p>${continuation}</p><p>馬は足にけがをしてしまうと、生き続けるのが難しくなる。</p>`;
+  const processor=createSourceProcessor({execute:async()=>({value:{text:'「そ'+continuation}})});
+  const result=await processor.processSource('u',{step:'correct',source:pdfSource,bodyHtml:original,context:{before:openDialogue,previousPdfPage:true}});
+  assert.equal(result.requiresReview,true);
+  assert.equal(bodyText(result.bodyHtml),bodyText(original));
+  assert.equal(bodyText(result.proposalHtml),continuation);
+});
+
 test('本地提取不进入AI队列；照片首次结果明确为识别与校正', async () => {
   const calls = [];
   const processor = createSourceProcessor({

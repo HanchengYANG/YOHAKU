@@ -23,6 +23,13 @@ const sourceHtml=value=>typeof value.bodyHtml==='string'?body.normalizeBodyHtml(
 const paragraphs=html=>(body.normalizeBodyHtml(html).match(/<p\b[^>]*>[\s\S]*?<\/p>/g)||[]).map((html,index)=>({id:/data-paragraph-id="([^"]+)"/.exec(html)[1],position:index,html,text:body.bodyText(html)}));
 const manualBoundaries=row=>!!(row.manual_boundaries??row.manual);
 const sentenceLayout=html=>json(body.bodyRanges(html).sentences.map(({id,start,end})=>[id,start,end]));
+function consecutivePdfPages(previous,current){
+  if(!previous||!['text_pdf','scan_pdf'].includes(current.type)||previous.type!==current.type||manualBoundaries(previous))return false;
+  const from=decode(previous.original_json,{}),to=decode(current.original_json,{});
+  return ['importId','fileId'].every(key=>typeof to[key]==='string'&&to[key].trim()&&to[key]===from[key])&&
+    Number.isSafeInteger(from.page)&&from.page>0&&Number.isSafeInteger(to.page)&&to.page===from.page+1&&
+    decode(previous.range_json)?.end===undefined&&(decode(current.range_json)?.start??0)===0;
+}
 
 export function createSourceService({database,ai={},requireDocument,fromRow,now=()=>Date.now(),sessionTtlMs=45000}={}) {
   // Read operations are synchronous: reuse their immutable database snapshot,
@@ -857,6 +864,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     if(segmentGroup&&(segmentGroup.length>1||carry))return performSegmentBatch(segmentGroup,priority,carry,execution);
     const step=stages[row.next_step],version=row.version,html=readHtml(row),other=scopes(row.user_id,row.document_id),at=other.findIndex(s=>s.scope_id===row.scope_id);
     const context={before:other.slice(Math.max(0,at-1),at).map(readHtml).map(body.bodyText).join('').slice(-600),after:other.slice(at+1,at+2).map(readHtml).map(body.bodyText).join('').slice(0,600)};
+    if(step==='correct'&&consecutivePdfPages(other[at-1],row))context.previousPdfPage=true;
     database.prepare("UPDATE article_sources SET status='processing',error=NULL WHERE scope_id=? AND version=?").run(row.scope_id,version);
     database.prepare("INSERT INTO source_steps VALUES(?,?,?,'running',NULL,NULL,?) ON CONFLICT(scope_id,step,input_version) DO UPDATE SET status='running',error=NULL,updated_at=excluded.updated_at").run(row.scope_id,step,version,stamp());
     const attempt=startAttempt(row,step,execution);
