@@ -989,8 +989,14 @@ test("an image can be removed and selected again from the same native file path"
     await page.route("**/api/imports",route=>route.request().method()==="POST"?route.continue({url:`http://127.0.0.1:${receiver.address().port}/upload`}):route.fallback());
     await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"导入资料",exact:true}).click();
     const chooseButton=page.getByRole("button",{name:"从设备选择文件",exact:true});
+    await expect(chooseButton).toBeVisible();
+    const accessibility=await page.context().newCDPSession(page);
+    const {nodes}=await accessibility.send("Accessibility.getFullAXTree");
+    await accessibility.detach();
+    const pickerNames=nodes.filter(node=>!node.ignored&&node.role?.value==="button").map(node=>node.name?.value)
+      .filter(name=>["从设备选择文件","选择来源文件"].includes(name));
+    expect(pickerNames).toEqual(["从设备选择文件"]);
     const choose=async()=>{
-      await expect(chooseButton).toBeVisible();
       const selected=page.waitForEvent("filechooser");await chooseButton.click();await(await selected).setFiles(path);
     };
     await choose();

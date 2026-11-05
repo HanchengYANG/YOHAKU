@@ -217,7 +217,9 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
           if (images.length) { event.preventDefault(); pasted.current = [...pasted.current,...images];setFiles((current) => [...current,...images]);setError("");dirty(); }
         }}>
           <div className="source-field"><span>选择文件（一次仅支持同一类型）</span><div><button type="button" className="button secondary" disabled={busy} onClick={() => fileInput.current?.click()}>从设备选择文件</button></div></div>
-          <input ref={fileInput} className="sr-only" tabIndex={-1} aria-label="选择来源文件" type="file" disabled={busy} multiple accept="image/png,image/jpeg,image/webp,application/pdf,application/epub+zip,text/plain,.txt,.epub,.pdf" onChange={(e) => {const selected = [...e.currentTarget.files];e.currentTarget.value = "";setFiles(selected);if(selected.length)setError("");dirty();}} />
+          <input ref={fileInput} hidden aria-label="选择来源文件" type="file" disabled={busy} multiple
+            accept="image/png,image/jpeg,image/webp,application/pdf,application/epub+zip,text/plain,.txt,.epub,.pdf"
+            onChange={(e) => {const selected = [...e.currentTarget.files];e.currentTarget.value = "";setFiles(selected);if(selected.length)setError("");dirty();}} />
           <p>也可点击此处后粘贴截图。图片可按顺序一次导入多张。</p>
           {files.length > 0 && <ol className="source-file-list">{files.map((file,index) => <li key={`${index}-${file.name}`}>{file.name}<button type="button" className="text-button" disabled={busy} aria-label={`移除 ${file.name}`} onClick={() => setFiles(files.filter((_,i) => i !== index))}>移除</button></li>)}</ol>}
         </div>}
