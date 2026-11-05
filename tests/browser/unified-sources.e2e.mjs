@@ -1110,6 +1110,52 @@ test("a new tab without session cache resumes a server draft from the matching i
   } finally {await otherTab.close();}
 });
 
+test("reselecting a restored PDF draft distinguishes identical saved drafts by task reference",async({page})=>{
+  const title="同名扫描书籍",context={bookId:null,targetId:null};
+  const makeDraft=(id,createdAt,chapterTitle)=>({
+    id,taskId:`${id}:g2`,createdAt,title,context,status:"staged",detectedType:"scan_pdf",allowedTypes:["scan_pdf","text_pdf"],
+    files:[{id:"file",name:"same.pdf",pageCount:10}],chapterAttempted:true,
+    chapterProcessing:{status:"done",type:"scan_pdf",completedPages:10,totalPages:10},
+    chapters:[{id:"chapter",title:chapterTitle,startPage:1,endPage:10,needsReview:false}],
+  });
+  const first=makeDraft("116ad9af-0000-4000-8000-000000000001","2026-11-04T10:00:00.100Z","已恢复草稿的章节");
+  const second=makeDraft("731bf8ce-0000-4000-8000-000000000002","2026-11-04T10:00:00.900Z","另一份草稿的章节");
+  const drafts=[second,first],reads=[];
+  const state=await fixture(page,{serverDrafts:drafts});
+  await page.route("**/api/imports/*",route=>{
+    const request=route.request();
+    const draft=drafts.find(item=>new URL(request.url()).pathname===`/api/imports/${item.id}`);
+    if(request.method()!=="GET"||!draft)return route.fallback();
+    reads.push(draft.id);
+    return route.fulfill({json:draft});
+  });
+  await page.addInitScript(id=>{
+    const context={initialBookId:null,initialTargetId:null};
+    sessionStorage.setItem(`yohaku:import-draft:${JSON.stringify(context)}`,JSON.stringify({id,context}));
+  },first.id);
+  await page.goto("/");await showShelf(page);
+  await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await expect(page.getByLabel("章节 1 标题",{exact:true})).toHaveValue(first.chapters[0].title);
+  expect(reads).toEqual([first.id]);
+
+  await page.getByRole("button",{name:"重新选择",exact:true}).click();
+  const list=page.getByLabel("继续未完成的导入");
+  await expect(list).toBeVisible();
+  await expect(list.getByText(title,{exact:true})).toHaveCount(2);
+  const firstReference="2026-11-04 11:00:00 · #116ad9af",secondReference="2026-11-04 11:00:00 · #731bf8ce";
+  await expect(list.getByText(firstReference)).toBeVisible();
+  await expect(list.getByText(secondReference)).toBeVisible();
+  const firstButton=list.getByRole("button",{name:`继续导入：${title} · ${firstReference}`,exact:true});
+  const secondButton=list.getByRole("button",{name:`继续导入：${title} · ${secondReference}`,exact:true});
+  await expect(firstButton).toHaveText("继续导入");
+  await expect(secondButton).toHaveText("继续导入");
+  expect(reads).toEqual([first.id]);
+  await secondButton.click();
+  await expect(page.getByLabel("章节 1 标题",{exact:true})).toHaveValue(second.chapters[0].title);
+  expect(reads).toEqual([first.id,second.id]);
+  expect(state.calls.filter(call=>call.path.startsWith("/imports")&&(call.method==="POST"||call.path.endsWith("/chapters")))).toEqual([]);
+});
+
 
 test("source questions carry current sentence and stable source scope",async({page})=>{
   const state=await fixture(page);await page.goto("/#doc");await page.getByRole("button",{name:"校对正文",exact:true}).click();

@@ -37,6 +37,11 @@ test('pasted import confirms locally, snapshots original, and attaches paragraph
   const f=await fixture(t);const text='  空。\n\n海。';
   const staged=await f.request('/api/imports','POST',{text,title:'原文'});
   assert.equal(staged.status,201);assert.equal(staged.data.detectedType,'text');assert.equal(f.createCalls,0);
+  const {id,createdAt}=staged.data;
+  assert.ok(Number.isFinite(Date.parse(createdAt)));
+  assert.equal((await f.request('/api/imports')).data.drafts.find(draft=>draft.id===id).createdAt,createdAt);
+  assert.equal((await f.request(`/api/imports/${id}`)).data.createdAt,createdAt);
+  assert.equal((await f.request(`/api/tasks/${id}`)).data.createdAt,createdAt);
   assert.equal(f.proposals.length,0);
   const saved=await f.request(`/api/imports/${staged.data.id}/confirm`,'POST',{type:'text',title:'文章'});
   assert.equal(saved.status,201);assert.equal(saved.data.firstDocumentId,'article-1');

@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import api, { readApiResult } from "../api.mjs";
+import { taskDisplayName } from "../image-tasks.mjs";
 import { moveChapter, mergeChapter, splitChapter } from "../source-presentation.mjs";
 import "../sources.css";
 
 const typeNames = { photo:"照片", screenshot:"截图", scan_pdf:"扫描 PDF", text_pdf:"文字 PDF", epub:"EPUB", text:"纯文本／粘贴文字" };
+const draftReference = ({createdAt,taskId}) => taskDisplayName({createdAt,id:taskId});
 function ChapterPagePreview({ importId, file, chapter, nextChapter, index, totalPages }) {
   const [expanded, setExpanded] = useState(false), [page, setPage] = useState(chapter.startPage);
   const [imageState, setImageState] = useState("loading"), [attempt, setAttempt] = useState(0);
@@ -62,13 +64,17 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
   const storageKey = `yohaku:import-draft:${JSON.stringify(context)}`;
   const forgetDraft = () => {try {sessionStorage.removeItem(storageKey);} catch {}};
   const matchesContext = (item) => (item.context?.bookId || null) === context.initialBookId && (item.context?.targetId || null) === context.initialTargetId;
+  const readDrafts = async (signal) => {
+    const result = await api("/imports",{signal});
+    return (result.drafts || []).filter((item) => item.status === "staged" && matchesContext(item));
+  };
   useEffect(() => {
     loadedContext.current = null;setRestoring(true);setDraft(null);setAvailableDrafts([]);setChapters([]);setExclusions([]);
     let stopped = false, controller;
     const listDrafts = async () => {
       controller = new AbortController();
-      const result = await api("/imports",{signal:controller.signal});
-      if (!stopped) setAvailableDrafts((result.drafts || []).filter((item) => item.status === "staged" && matchesContext(item)));
+      const items = await readDrafts(controller.signal);
+      if (!stopped) setAvailableDrafts(items);
     };
     const restore = async () => {
       try {
@@ -146,6 +152,12 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
     } catch (cause) {setError(cause.message);}
     finally {setBusy(false);}
   };
+  const chooseAgain = async () => {
+    forgetDraft();setDraft(null);setChapters([]);setExclusions([]);setError("");setRestoring(true);
+    try {setAvailableDrafts(await readDrafts());}
+    catch (cause) {setError(cause.message);}
+    finally {setRestoring(false);}
+  };
   const stage = async () => {
     if (busy) return;
     setBusy(true); setError("");
@@ -191,6 +203,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
   };
   const updateChapter = (index, patch) => { setChapters((current) => current.map((item,i) => i === index ? {...item,...patch} : item)); dirty(); };
   const editChapterStructure = (next) => { if (next !== chapters) {setChapters(next);dirty();} };
+  const currentDraftReference = draft && draftReference(draft);
   return <section className="unified-import editor-page" aria-label="统一导入">
     <div className="source-heading"><div><span className="eyebrow">统一导入</span><h1>添加阅读资料</h1></div>
       <button className="button subtle" disabled={busy} onClick={onCancel}>返回</button></div>
@@ -198,12 +211,16 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
     {(error || processing?.error || draft?.chapterError) && <p className="source-error" role="alert">{error || processing?.error || draft.chapterError}</p>}
     {restoring ? <p role="status">正在恢复导入草稿…</p> : !draft ? <>
       {!!availableDrafts.length && <section aria-label="继续未完成的导入"><h2>继续未完成的导入</h2>
-        {availableDrafts.map((item) => <div key={item.id} className="source-chapter"><div style={{minWidth:0,overflowWrap:"anywhere"}}><strong>{item.title || "未命名资料"}</strong>
-          <p>{item.chapterProcessing?.status === "queued" ? "资源排队中，等待开始提取和分章。" : item.chapterProcessing?.status === "extracting" ? `${(item.chapterProcessing.type || item.detectedType) === "scan_pdf" ? "全书本地 OCR" : "全书文字提取"}：${item.chapterProcessing.completedPages ?? 0} / ${item.chapterProcessing.totalPages || "待确定"} 页`
-            : item.chapterProcessing?.status === "proposing" ? `正在由 AI 分章 · 已提取 ${item.chapterProcessing.completedPages ?? 0} / ${item.chapterProcessing.totalPages || "待确定"} 页`
-              : item.chapterProcessing?.status === "done" ? "分章已完成，等待确认章节与排除内容。" : ["failed","timeout"].includes(item.chapterProcessing?.status) ? "分章未完成，可继续重试或手工编辑。" : "原始资料已保存，等待确认导入。"}</p></div>
-          <button className="button secondary" type="button" disabled={busy} style={{whiteSpace:"normal",overflowWrap:"anywhere",textAlign:"left"}} onClick={() => resumeDraft(item.id)}>继续导入：{item.title || "未命名资料"}</button>
-        </div>)}
+        {availableDrafts.map((item) => {
+          const draftTitle = item.title || "未命名资料", reference = draftReference(item);
+          return <div key={item.id} className="source-chapter"><div style={{minWidth:0,overflowWrap:"anywhere"}}><strong>{draftTitle}</strong>
+            {reference && <div className="source-scope-note">创建于 {reference}</div>}
+            <p>{item.chapterProcessing?.status === "queued" ? "资源排队中，等待开始提取和分章。" : item.chapterProcessing?.status === "extracting" ? `${(item.chapterProcessing.type || item.detectedType) === "scan_pdf" ? "全书本地 OCR" : "全书文字提取"}：${item.chapterProcessing.completedPages ?? 0} / ${item.chapterProcessing.totalPages || "待确定"} 页`
+              : item.chapterProcessing?.status === "proposing" ? `正在由 AI 分章 · 已提取 ${item.chapterProcessing.completedPages ?? 0} / ${item.chapterProcessing.totalPages || "待确定"} 页`
+                : item.chapterProcessing?.status === "done" ? "分章已完成，等待确认章节与排除内容。" : ["failed","timeout"].includes(item.chapterProcessing?.status) ? "分章未完成，可继续重试或手工编辑。" : "原始资料已保存，等待确认导入。"}</p></div>
+            <button className="button secondary" type="button" disabled={busy} aria-label={[`继续导入：${draftTitle}`,reference].filter(Boolean).join(" · ")} onClick={() => resumeDraft(item.id)}>继续导入</button>
+          </div>;
+        })}
       </section>}
       <div className="source-tabs" role="tablist" aria-label="导入方式">
         <button role="tab" aria-selected={mode === "files"} className="button secondary" disabled={busy} onClick={() => setMode("files")}>上传或粘贴文件</button>
@@ -225,6 +242,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
         </div>}
       <button className="button primary" disabled={busy || (mode === "text" ? !text.trim() : !files.length)} onClick={stage}>{busy ? "正在保存原始资料…" : "继续确认类型"}</button>
     </> : <>
+      {currentDraftReference && <div className="source-scope-note">当前草稿 · {currentDraftReference}</div>}
       <div className="source-import-confirm"><label className="source-field">资料标题<input required value={title} disabled={structureLocked} maxLength={160} onChange={(e) => {setTitle(e.target.value);dirty();}} /></label>
         <label className="source-field">确认来源类型<select aria-label="确认来源类型" value={type} disabled={structureLocked} onChange={(e) => {setType(e.target.value);setChapters([]);setExclusions([]);if(["photo","screenshot"].includes(e.target.value))setAsBook(false);dirty();}}>
           {(draft.allowedTypes || Object.keys(typeNames)).map((value) => <option key={value} value={value}>{typeNames[value] || value}</option>)}</select></label>
@@ -276,7 +294,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
           </div>)}
         </section>}
       </div>}
-      <div className="source-actions"><button className="button subtle" disabled={busy} onClick={() => {forgetDraft();setDraft(null);setChapters([]);setExclusions([]);setError("");}}>重新选择</button>
+      <div className="source-actions"><button className="button subtle" disabled={busy} onClick={chooseAgain}>重新选择</button>
         <button className="button primary" disabled={structureLocked || !title.trim() || (asBook && type.includes("pdf") && !chapters.some((chapter) => !chapter.excluded))} onClick={confirm}>{busy ? "正在创建资料…" : "确认导入"}</button></div>
     </>}
   </section>;

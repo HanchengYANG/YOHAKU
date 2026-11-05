@@ -76,9 +76,9 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
     if(!row)throw fail(404,'找不到这次导入。');
     const draft=JSON.parse(row.draft_json);
     draft.title=utf8Name(draft.title);draft.files=draft.files.map(file=>({...file,name:cleanName(file.name)}));
-    return {...draft,status:row.status,version:row.version,generation:row.task_generation,taskDeletedAt:row.task_deleted_at,result:row.result_json?JSON.parse(row.result_json):null};
+    return {...draft,createdAt:row.created_at,status:row.status,version:row.version,generation:row.task_generation,taskDeletedAt:row.task_deleted_at,result:row.result_json?JSON.parse(row.result_json):null};
   }
-  const present=draft=>({id:draft.id,taskId:taskId(draft),version:draft.version,title:draft.title,detectedType:draft.detectedType,allowedTypes:IMPORT_TYPES.filter(type=>
+  const present=draft=>({id:draft.id,taskId:taskId(draft),version:draft.version,title:draft.title,createdAt:draft.createdAt,detectedType:draft.detectedType,allowedTypes:IMPORT_TYPES.filter(type=>
     isPdf(draft.detectedType)?isPdf(type):['photo','screenshot'].includes(draft.detectedType)?['photo','screenshot'].includes(type):type===draft.detectedType),
     files:draft.files.map(publicFile),context:draft.context||{bookId:null,targetId:null},chapters:draft.chapters||[],exclusions:draft.exclusions||[],chapterAttempted:draft.chapterAttempted===true,...(draft.chapterProcessing?{chapterProcessing:draft.chapterProcessing}:{}),...(draft.chapterError?{chapterError:draft.chapterError}:{}),status:draft.status,...(draft.execution?{execution:draft.execution}:{}),...(draft.result?{result:draft.result}:{}),
     ...(draft.files.some(file=>file.info?.error)?{extractionWarning:'部分来源提取失败。可以继续导入，并在校对正文中对照原文人工录入。'}:{})});
@@ -183,7 +183,7 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
       database.prepare('INSERT INTO import_drafts(id,user_id,title,type,status,draft_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
         .run(id,req.user.id,draft.title,draft.detectedType,'staged',JSON.stringify(draft),now,now);
     }catch(error){await rm(directory,{recursive:true,force:true});throw error;}
-    res.status(201).json(present(draft));
+    res.status(201).json(present({...draft,createdAt:now}));
   });
   app.get('/api/imports',(req,res)=>{
     const rows=database.prepare("SELECT id FROM import_drafts WHERE user_id=? AND status='staged' AND task_deleted_at IS NULL ORDER BY updated_at DESC LIMIT 30").all(req.user.id);
@@ -420,7 +420,7 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
     const progress=pageTask&&!parseErrors.length&&!['queued','running'].includes(inspection.status)?{completed,total,unit:'page'}:
       {completed:parseSteps.filter(step=>step.status==='completed').length+(draft.status==='confirmed'?1:0),total:parseSteps.length+1,unit:'step'};
     return {id,type:'import',importId:draft.id,generation:draft.generation,version:draft.version,title:draft.title,
-      status:processing.status==='proposing'&&processing.providerState==='queued'?'resource_wait':status,state:status,createdAt:database.prepare('SELECT created_at FROM import_drafts WHERE id=?').get(draft.id).created_at,
+      status:processing.status==='proposing'&&processing.providerState==='queued'?'resource_wait':status,state:status,createdAt:draft.createdAt,
       updatedAt:database.prepare('SELECT updated_at FROM import_drafts WHERE id=?').get(draft.id).updated_at,
       documentId:draft.result?.firstDocumentId||null,bookId:draft.result?.bookId||draft.context?.bookId||null,
       archived:draft.status==='confirmed',canRetry:['failed','timeout'].includes(status)&&!jobs.has(draft.id),
