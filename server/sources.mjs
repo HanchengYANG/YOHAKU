@@ -556,6 +556,12 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
   }
   function beginEdit(userId,id,sourceId,input={}) {
     const row=scope(userId,id,sourceId),sessionId=input.sessionId||randomUUID();
+    if(input.renew===true){
+      const time=now();
+      const renewed=database.prepare('UPDATE article_sources SET edit_expires=? WHERE scope_id=? AND edit_session=? AND edit_expires>?').run(time+sessionTtlMs,row.scope_id,sessionId,time);
+      if(!renewed.changes)throw fail(409,'这次编辑保护已结束。草稿仍可保存，保存时会检查正文版本。');
+      return {sessionId};
+    }
     database.prepare('UPDATE article_sources SET edit_session=?,edit_expires=? WHERE scope_id=?').run(sessionId,now()+sessionTtlMs,row.scope_id);
     return {...getSource(userId,id,sourceId),sessionId};
   }

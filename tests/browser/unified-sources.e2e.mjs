@@ -878,6 +878,70 @@ async function delayedProposalEditFixture(page) {
   return state;
 }
 
+test("old edit lease renewal and release cannot interfere with a reopened source editor",async({page})=>{
+  const source={id:"s2",type:"text",position:1,version:7,status:"ready",bodyHtml:html(original),preview:{type:"text",text:original}};
+  const state=await fixture(page,{source});
+  let activeLease=null,oldRenewal,oldRelease,releaseRenewal,releaseCancel;
+  const acquisitions=[],releases=[];
+  const renewalGate=new Promise(resolve=>releaseRenewal=resolve),cancelGate=new Promise(resolve=>releaseCancel=resolve);
+  await page.route("**/api/documents/doc/sources/s2/edit",async route=>{
+    const request=route.request(),input=request.postDataJSON();
+    if(request.method()==="DELETE"){
+      releases.push(input.sessionId);
+      if(!oldRelease){oldRelease={request,input};await cancelGate;}
+      if(activeLease===input.sessionId)activeLease=null;
+    }else{
+      if(acquisitions.length===1&&!oldRenewal&&!oldRelease){oldRenewal={request,input};await renewalGate;}
+      else if(!input.renew)acquisitions.push(input.sessionId);
+      if(!input.renew)activeLease=input.sessionId;
+      else if(activeLease!==input.sessionId)return route.fulfill({status:409,json:{error:"旧编辑租约已结束。"}});
+    }
+    return route.fulfill({json:{...source,sessionId:input.sessionId,editing:activeLease!==null}});
+  });
+  try{
+    await page.goto("/#doc");
+    await page.getByRole("button",{name:"校对正文",exact:true}).click();
+    const edit=page.getByRole("button",{name:"编辑正文与注音",exact:true}),editor=page.getByLabel("来源正文",{exact:true});
+    await edit.click();
+    await expect(editor).toHaveValue(original);
+    await page.evaluate(()=>document.dispatchEvent(new Event("visibilitychange")));
+    await expect.poll(()=>!!oldRenewal).toBe(true);
+    await page.getByRole("button",{name:"取消",exact:true}).click();
+    await expect.poll(()=>!!oldRelease).toBe(true);
+    await edit.click();
+    await expect(editor).toHaveValue(original);
+    expect(acquisitions).toHaveLength(2);
+    const [first,second]=acquisitions;
+
+    const cancelled=page.waitForResponse(response=>response.request()===oldRelease.request);
+    releaseCancel();await cancelled;
+    const afterOldRelease=activeLease;
+    const renewed=page.waitForResponse(response=>response.request()===oldRenewal.request);
+    releaseRenewal();
+    const staleRenewal=await renewed;
+    expect(afterOldRelease).toBe(second);
+    expect(activeLease).toBe(second);
+    expect(second).not.toBe(first);
+    expect(oldRelease.input).toMatchObject({sessionId:first});
+    expect(oldRenewal.input).toMatchObject({sessionId:first,renew:true});
+    expect(staleRenewal.status()).toBe(409);
+    await staleRenewal.finished();
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    await expect(editor).toHaveValue(original);
+    await expect(page.getByText("旧编辑租约已结束。",{exact:true})).toHaveCount(0);
+
+    const changed="再開した編集で保存した本文。";
+    await editor.fill(changed);
+    await page.getByRole("button",{name:"保存正文",exact:true}).click();
+    await expect(page.getByRole("status").filter({hasText:"已保存，将仅补齐"})).toBeVisible();
+    expect(state.saves).toHaveLength(1);
+    expect(state.saves[0]).toMatchObject({sessionId:second,version:source.version});
+    expect(bodyText(state.saves[0].bodyHtml)).toBe(changed);
+    await expect.poll(()=>activeLease).toBe(null);
+    expect(releases).toEqual([first,second]);
+  }finally{releaseRenewal();releaseCancel();}
+});
+
 for(const change of ["version","proposal"])test(`a delayed proposal edit rejects a changed ${change} and releases its edit lease`,async({page})=>{
   const state=await delayedProposalEditFixture(page);
   try{

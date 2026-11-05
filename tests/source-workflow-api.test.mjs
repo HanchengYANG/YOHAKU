@@ -367,6 +367,58 @@ test('screenshot local OCR saves real regions before provider authorization and 
   const saved=await f.request(`/documents/${id}/sources/${source.id}`,'PUT',{version:result.version,text:'人工补回。'});assert.equal(saved.manual,true);assert.equal(saved.firstExtraction.text,'本地の原文。');assert.equal(ocrCalls,1);
 });
 
+test('edit renewal never reacquires a released lease or changes a newer opening',async t=>{
+  const f=await fixture(t);await f.configure();
+  const text='日本語の原文。',id=(await f.importText(text)).firstDocumentId,documentPath=`/documents/${id}`;
+  const [source]=(await f.request(`${documentPath}/sources`)).sources;
+  const sourcePath=`${documentPath}/sources/${source.id}`,editPath=`${sourcePath}/edit`;
+  const edit=(input,expected=200)=>f.request(editPath,'POST',input,expected);
+  const release=sessionId=>f.request(editPath,'DELETE',{sessionId});
+  const database=new DatabaseSync(join(f.dataDir,'yohaku.sqlite'));
+  const lease=()=>database.prepare('SELECT edit_session,edit_expires FROM article_sources WHERE scope_id=?').get(source.scopeId);
+  const setExpiry=expiry=>database.prepare('UPDATE article_sources SET edit_expires=? WHERE scope_id=?').run(expiry,source.scopeId);
+  try{
+    const first='first-editor-opening',second='second-editor-opening',third='third-editor-opening';
+    assert.equal((await edit({sessionId:first})).editing,true,'legacy POST acquires the lease');
+    await edit({renew:true},409);
+    const nearExpiry=Date.now()+15_000;setExpiry(nearExpiry);
+    await edit({sessionId:first,renew:true});
+    assert.equal(lease().edit_session,first);
+    assert.ok(lease().edit_expires>nearExpiry,'the live matching lease can renew');
+
+    assert.equal((await release(first)).editing,false);
+    await edit({sessionId:first,renew:true},409);
+    assert.equal((await f.request(sourcePath)).editing,false);
+    assert.equal(lease().edit_session,null);
+
+    assert.equal((await edit({sessionId:second})).editing,true);
+    const reopened=lease();assert.equal(reopened.edit_session,second);
+    await edit({sessionId:first,renew:true},409);
+    assert.equal((await release(first)).editing,true);
+    assert.deepEqual(lease(),reopened,'stale renewal and release leave the new lease untouched');
+
+    setExpiry(Date.now()-1);
+    const expired=lease();
+    await edit({sessionId:second,renew:true},409);
+    assert.deepEqual(lease(),expired);
+    assert.equal((await f.request(sourcePath)).editing,false);
+
+    assert.equal((await edit({sessionId:third})).editing,true);
+    await f.request(`${documentPath}/reading-session`,'POST',{index:0,active:true});
+    await f.instance.sources.drain();
+    const waiting=await f.request(`${documentPath}/reading-pages`);
+    assert.equal(waiting.diagnostics.current.state,'editing');
+    assert.equal(f.calls.length,0,'the edit lease holds pending correction');
+    await release(third);
+    await edit({sessionId:third,renew:true},409);
+    await f.instance.sources.drain();
+    const ready=await f.request(`${documentPath}/reading-pages`);
+    assert.equal(ready.currentPage.ready,true);
+    assert.equal(bodyText(ready.currentPage.bodyHtml),text);
+    assert.equal(f.calls.filter(call=>call.model==='correction-model').length,1);
+  }finally{database.close();}
+});
+
 test('keeping current source text rejects stale proposals and resumes the existing task without applying AI edits',async t=>{
   const original='日本語の原文です。\n削除してはいけない本文。',proposed='日本語の原文です。';
   let extractions=0;

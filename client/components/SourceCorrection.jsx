@@ -7,6 +7,8 @@ import ArticleBody from "./ArticleBody.jsx";
 import DocumentChat from "./DocumentChat.jsx";
 import "../sources.css";
 
+const releaseEdit = (lease) => api(`${lease.path}/edit`, {method:"DELETE",keepalive:true,body:JSON.stringify({sessionId:lease.id})});
+
 function SourcePreview({ source }) {
   const [zoom,setZoom] = useState(100), [rotation,setRotation] = useState(0);
   const [pageLoaded,setPageLoaded] = useState(false), [pageError,setPageError] = useState(false);
@@ -41,9 +43,16 @@ export default function SourceCorrection({ document, sourceIds = [], reviewSourc
   const [error,setError] = useState(""), [busy,setBusy] = useState(false), [overview,setOverview] = useState(false);
   const [selection,setSelection] = useState(null), [notice,setNotice] = useState("");
   const [chatOpen,setChatOpen] = useState(false), [chatRequest,setChatRequest] = useState(null), [chatNavigation,setChatNavigation] = useState(null), [answering,setAnswering] = useState(false);
-  const session = useRef(crypto.randomUUID()), detailSequence = useRef(0), isEditing = useRef(false);
+  const session = useRef(crypto.randomUUID()), detailSequence = useRef(0), isEditing = useRef(false), editLease = useRef(null);
   const reviewSequence = useRef(0);
   const route = `/documents/${encodeURIComponent(document.id)}/sources`;
+  const sourcePath = activeId ? `${route}/${encodeURIComponent(activeId)}` : null;
+  const closeEdit = () => {
+    const lease = editLease.current;
+    if (!lease || lease.path !== sourcePath) return;
+    editLease.current = null;
+    if (lease.held) return releaseEdit(lease);
+  };
   const loadSources = async () => {const result = await api(route);setSources(result.sources);return result.sources;};
   useEffect(() => {
     let stopped = false;
@@ -85,42 +94,66 @@ export default function SourceCorrection({ document, sourceIds = [], reviewSourc
     const beat = () => {
       if (stopped || window.document.visibilityState === "hidden") return;
       if (prepareWhileOpen) void api(`/documents/${encodeURIComponent(document.id)}/reading-session`,{method:"POST",body:JSON.stringify({sessionId:session.current,active:true,mode:"correction",sourceId:activeId})}).catch(() => {});
-      if (isEditing.current) void api(`${route}/${encodeURIComponent(activeId)}/edit`,{method:"POST",body:JSON.stringify({sessionId:session.current})}).catch(() => {});
+      const lease = editLease.current;
+      if (lease?.path === sourcePath && lease.held && !lease.expired) {
+        void api(`${lease.path}/edit`,{method:"POST",body:JSON.stringify({sessionId:lease.id,renew:true})}).catch((cause) => {
+          if (cause.status !== 409 || editLease.current !== lease) return;
+          lease.expired = true;
+          setNotice(cause.message);
+        });
+      }
     };
     const stop = () => {if (prepareWhileOpen) void fetch(`/api/documents/${encodeURIComponent(document.id)}/reading-session`,{method:"POST",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({sessionId:session.current,active:false})}).catch(() => {});};
     const visibility = () => window.document.visibilityState === "hidden" ? stop() : beat();
-    beat();const timer = setInterval(beat,8000);window.document.addEventListener("visibilitychange",visibility);window.addEventListener("pagehide",stop);
-    return () => {stopped = true;clearInterval(timer);stop();window.document.removeEventListener("visibilitychange",visibility);window.removeEventListener("pagehide",stop);void api(`${route}/${encodeURIComponent(activeId)}/edit`,{method:"DELETE",body:JSON.stringify({sessionId:session.current})}).catch(() => {});};
+    const pageHide = (event) => {stop();if (!event.persisted) void closeEdit()?.catch(() => {});};
+    beat();const timer = setInterval(beat,8000);window.document.addEventListener("visibilitychange",visibility);window.addEventListener("pagehide",pageHide);
+    return () => {stopped = true;clearInterval(timer);stop();window.document.removeEventListener("visibilitychange",visibility);window.removeEventListener("pagehide",pageHide);void closeEdit()?.catch(() => {});};
   },[document.id,activeId,reviewSourceId]);
   const beginEdit = async (overrideHtml) => {
     const proposed = typeof overrideHtml === "string" ? overrideHtml : null;
     const clickedVersion = source?.version, clickedProposal = source?.proposal?.bodyHtml;
+    const lease = {id:crypto.randomUUID(),path:sourcePath,held:false};
+    editLease.current = lease;
     setProposalEditing(proposed !== null);
-    setBusy(true);setError("");
+    setBusy(true);setError("");setNotice("");
+    let latest;
     try {
-      const latest = await api(`${route}/${encodeURIComponent(activeId)}/edit`,{method:"POST",body:JSON.stringify({sessionId:session.current})});
-      if (proposed !== null && (latest.version !== clickedVersion || proposed !== clickedProposal || latest.proposal?.bodyHtml !== proposed)) {
-        await api(`${route}/${encodeURIComponent(activeId)}/edit`,{method:"DELETE",body:JSON.stringify({sessionId:session.current})}).catch(() => {});
-        setSource(latest);setHtml(latest.bodyHtml || "");
-        setSources((current) => current.map((item) => item.id === latest.id ? latest : item));
-        setProposalEditing(false);
-        setError("版本冲突：来源正文或 AI 提议已更新，请重新核对后再编辑。");
-        return;
-      }
-      if (latest.bodyHtml !== undefined) {setSource(latest);setHtml(proposed ?? latest.bodyHtml);}
-      isEditing.current = true;setEditing(true);
-    } catch (cause) {setError(cause.message);}
-    finally {setBusy(false);}
+      latest = await api(`${lease.path}/edit`,{method:"POST",body:JSON.stringify({sessionId:lease.id})});
+    } catch (cause) {
+      void releaseEdit(lease).catch(() => {});
+      if (editLease.current !== lease) return;
+      editLease.current = null;
+      setError(cause.message);setBusy(false);
+      return;
+    }
+    if (editLease.current !== lease) {void releaseEdit(lease).catch(() => {});return;}
+    lease.held = true;
+    setBusy(false);
+    if (proposed !== null && (latest.version !== clickedVersion || proposed !== clickedProposal || latest.proposal?.bodyHtml !== proposed)) {
+      void closeEdit()?.catch(() => {});
+      reviewSequence.current++;
+      setSource(latest);setHtml(latest.bodyHtml || "");
+      setSources((current) => current.map((item) => item.id === latest.id ? latest : item));
+      setProposalEditing(false);
+      setError("版本冲突：来源正文或 AI 提议已更新，请重新核对后再编辑。");
+      return;
+    }
+    if (latest.bodyHtml !== undefined) {setSource(latest);setHtml(proposed ?? latest.bodyHtml);}
+    isEditing.current = true;setEditing(true);
   };
   const save = async (value) => {
     const savedHtml = value?.bodyHtml ?? html;
+    const lease = editLease.current;
+    if (!lease) return;
     setBusy(true);setError("");
     try {
-      const latest = await api(`${route}/${encodeURIComponent(activeId)}`,{method:"PUT",body:JSON.stringify({version:source.version,bodyHtml:savedHtml,sessionId:session.current})});
+      const latest = await api(sourcePath,{method:"PUT",body:JSON.stringify({version:source.version,bodyHtml:savedHtml,sessionId:lease.id})});
+      if (editLease.current !== lease) return;
+      reviewSequence.current++;
       setSource(latest);setHtml(latest.bodyHtml);setDirty(false);onDirty?.(false);setNotice("已保存，将仅补齐受修改影响的分句和注音");
       setSources((current) => current.map((item) => item.id === latest.id ? latest : item));
       isEditing.current = false;setEditing(false);
-      await api(`${route}/${encodeURIComponent(activeId)}/edit`,{method:"DELETE",body:JSON.stringify({sessionId:session.current})});
+      await closeEdit();
       onDocumentChanged?.();
     } catch (cause) {setError(cause.message);}
     finally {setBusy(false);}
@@ -214,11 +247,11 @@ export default function SourceCorrection({ document, sourceIds = [], reviewSourc
           {source.proposal?.bodyHtml && <section className="source-proposal" role="alert"><h2>AI 修改需要核对</h2><p>校正结果包含整句、整段删除或较大改写，处理已暂停。请对照原始来源和以下差异。可保留当前正文，或编辑 AI 提议后保存。</p><div className="source-diff"><div><h3>当前正文</h3><pre>{bodyText(html)}</pre></div><div><h3>AI 提议</h3><pre>{bodyText(source.proposal.bodyHtml)}</pre></div></div><div className="source-actions">{source.proposalToken && <button className="button primary" disabled={busy || editing} onClick={keepCurrent}>保留当前正文并继续</button>}<button className="button secondary" disabled={busy || editing} onClick={() => beginEdit(source.proposal.bodyHtml)}>核对并编辑此提议</button></div></section>}
           <div className="source-correction-grid"><div className="source-edit-pane"><div className="source-status-row"><span className="source-status">{source.checked ? "已核对" : "待核对"}</span><span>{source.processing ? "处理中" : ({ready:"处理完成",pending:"等待准备",failed:"准备失败",requires_review:"AI 修改待核对"})[source.status] || ""}</span></div>
             {!editing ? <><div className="source-current-body">{bodyText(html).trim() ? <ArticleBody html={html} showRuby fontSize={24} onGroup={viewGroups} onSelection={setSelection} /> : <p>{source.error ? "提取失败，可以对照来源人工录入。" : source.manual || source.status === "ready" ? "此来源当前没有正文内容。" : "此来源正文尚未准备，可以等待或人工录入。"}</p>}</div><button className="button primary" disabled={busy} onClick={beginEdit}>编辑正文与注音</button></>
-              : <><p className="source-editing-note">正在人工编辑，此来源的自动正文更新已冻结。</p>
+              : <>{!editLease.current?.expired && <p className="source-editing-note">正在人工编辑，此来源的自动正文更新已冻结。</p>}
                 <Editor key={`${activeId}:${source.version}`} initial={{...document,bodyHtml:html,blocks:htmlToBlocks(html),sourceImages:[],sourceImageId:null,recognition:null,bookId:undefined}}
                   sourceScope={{initialDirty:proposalEditing,onBodyChange:setHtml,onGroup:viewGroups,onAsk:({selection:reference,operation,question}) => ask(operation,reference,question)}}
                   onSave={save} saving={busy} onDirty={(next) => {setDirty(next);onDirty?.(next);}} chatSession={chatSession}
-                  onCancel={() => {if (dirty && !window.confirm("放弃当前来源尚未保存的修改？")) return;setHtml(source.bodyHtml || "");setDirty(false);onDirty?.(false);isEditing.current = false;setEditing(false);void api(`${route}/${encodeURIComponent(activeId)}/edit`,{method:"DELETE",body:JSON.stringify({sessionId:session.current})});}} />
+                  onCancel={() => {if (dirty && !window.confirm("放弃当前来源尚未保存的修改？")) return;setHtml(source.bodyHtml || "");setDirty(false);onDirty?.(false);setNotice("");isEditing.current = false;setEditing(false);void closeEdit()?.catch(() => {});}} />
               </>}
             <div className="source-actions">{!editing && <button className="button subtle" disabled={!selection || answering || dirty} onClick={() => ask()}>翻译选区</button>}<button className="button secondary" disabled={busy || dirty} onClick={markChecked}>{source.checked ? "改为待核对" : "标记已核对"}</button>{!source.failedCorrection && <button className="text-button" disabled={busy || editing} onClick={retrySource}>重试准备此来源</button>}</div>
             <details className="source-history"><summary>首次结果、AI 修改与差异</summary>{first ? <><h3>{source.type === "photo" ? "AI 识别与校正结果" : first.label || "首次提取结果"}</h3><pre>{first.text ?? bodyText(first.bodyHtml || "")}</pre><div className="source-diff"><div><h3>首次结果</h3><pre>{first.text ?? bodyText(first.bodyHtml || "")}</pre></div><div><h3>当前正文</h3><pre>{bodyText(html)}</pre></div></div></> : <p>尚无首次提取结果。</p>}{(source.changes || []).map((change,index) => <details key={change.id || index}><summary>{change.label || change.step || "正文修改"} · {change.createdAt || ""}</summary><pre>{change.beforeText ?? change.before ?? ""}</pre><pre>{change.afterText ?? change.after ?? change.text ?? (change.bodyHtml ? bodyText(change.bodyHtml) : "")}</pre></details>)}</details>
