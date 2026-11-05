@@ -115,7 +115,7 @@ function Workspace({ user, onLoggedOut }) {
   const [importBookId, setImportBookId] = useState(null);
   const [importSession, setImportSession] = useState(0);
   const [importText, setImportText] = useState(false);
-  const [correctionSourceIds, setCorrectionSourceIds] = useState([]);
+  const [correctionTarget, setCorrectionTarget] = useState({});
   const [importTask, setImportTask] = useState(null);
   const [chatRequest, setChatRequest] = useState(null);
   const [chatNavigation, setChatNavigation] = useState(null);
@@ -375,10 +375,11 @@ function Workspace({ user, onLoggedOut }) {
 
   const mayLeave = () =>
     !saving && !bookBusy && (!dirty || window.confirm("当前修改还没有保存，确定离开吗？"));
-  const openDocument = (id) => {
+  const openDocument = (id, { reviewSourceId } = {}) => {
     if (!mayLeave()) return;
     setDraft(null);
-    setPanel(null);
+    setCorrectionTarget(reviewSourceId ? { reviewSourceId } : {});
+    setPanel(reviewSourceId ? "correction" : null);
     setDirty(false);
     setError("");
     setSidebarOpen(false);
@@ -388,7 +389,7 @@ function Workspace({ user, onLoggedOut }) {
   };
   const beginEdit = () => {
     if (!mayLeave() || !document?.id) return;
-    setCorrectionSourceIds([]);
+    setCorrectionTarget({});
     setPanel("correction");
     setDirty(false);
     setError("");
@@ -439,7 +440,7 @@ function Workspace({ user, onLoggedOut }) {
   };
   const editSources = (ids = []) => {
     if (!mayLeave()) return;
-    setCorrectionSourceIds(ids);setPanel("correction");setDirty(false);
+    setCorrectionTarget({ sourceIds: ids });setPanel("correction");setDirty(false);
   };
   const closePanel = () => {
     if (!mayLeave()) return;
@@ -944,9 +945,9 @@ function Workspace({ user, onLoggedOut }) {
         ) : panel === "import" ? (
           <UnifiedImport key={importSession} initialText={importText} initialBookId={importBookId} initialTargetId={appendTargetId} initialImportId={importDraftId}
             onCancel={closePanel} onDirty={setDirty} onImported={imported} />
-        ) : panel === "correction" && document ? (
-          <SourceCorrection key={document.id} document={document} sourceIds={correctionSourceIds}
-            chatSession={chatSessionFor(document.id)} onDirty={setDirty} onDocumentChanged={refreshCurrentDocument}
+        ) : panel === "correction" && currentReadingDocument ? (
+          <SourceCorrection key={currentReadingDocument.id} document={currentReadingDocument} {...correctionTarget}
+            chatSession={chatSessionFor(currentReadingDocument.id)} onDirty={setDirty} onDocumentChanged={refreshCurrentDocument}
             onClose={() => { if (!mayLeave()) return;setPanel(null);setDirty(false);void refreshCurrentDocument(); }} />
         ) : panel === "image" ? (
           <ImageImport

@@ -35,7 +35,7 @@ function SourcePreview({ source }) {
   </div>;
 }
 
-export default function SourceCorrection({ document, sourceIds = [], onClose, onDirty, onDocumentChanged, chatSession }) {
+export default function SourceCorrection({ document, sourceIds = [], reviewSourceId, onClose, onDirty, onDocumentChanged, chatSession }) {
   const [sources,setSources] = useState([]), [activeId,setActiveId] = useState(null), [source,setSource] = useState(null);
   const [html,setHtml] = useState(""), [editing,setEditing] = useState(false), [dirty,setDirty] = useState(false), [proposalEditing,setProposalEditing] = useState(false);
   const [error,setError] = useState(""), [busy,setBusy] = useState(false), [overview,setOverview] = useState(false);
@@ -45,7 +45,19 @@ export default function SourceCorrection({ document, sourceIds = [], onClose, on
   const reviewSequence = useRef(0);
   const route = `/documents/${encodeURIComponent(document.id)}/sources`;
   const loadSources = async () => {const result = await api(route);setSources(result.sources);return result.sources;};
-  useEffect(() => {let stopped = false;loadSources().then((list) => {if (!stopped) setActiveId(sourceIds.find((id) => list.some((item) => item.id === id)) || list[0]?.id || null);}).catch((cause) => setError(cause.message));return () => {stopped = true;};},[document.id]);
+  useEffect(() => {
+    let stopped = false;
+    loadSources().then((list) => {
+      if (stopped) return;
+      if (reviewSourceId && !list.some((item) => item.id === reviewSourceId)) {
+        setError("这条待核对来源已不可用，请返回阅读。");
+        return;
+      }
+      const preferred = reviewSourceId || sourceIds.find((id) => list.some((item) => item.id === id));
+      setActiveId(preferred || list[0]?.id || null);
+    }).catch((cause) => {if (!stopped) setError(cause.message);});
+    return () => {stopped = true;};
+  },[document.id,reviewSourceId]);
   useEffect(() => {
     if (!activeId) return;
     let stopped = false, timer;
@@ -63,22 +75,23 @@ export default function SourceCorrection({ document, sourceIds = [], onClose, on
     };
     setSource(null);setError("");setEditing(false);isEditing.current = false;setDirty(false);onDirty?.(false);setSelection(null);setNotice("");
     void load();
-    void api(`${route}/${encodeURIComponent(activeId)}/prepare`,{method:"POST",body:JSON.stringify({sessionId:session.current})}).catch((cause) => {if (!stopped) setError(cause.message);});
+    if (activeId !== reviewSourceId) void api(`${route}/${encodeURIComponent(activeId)}/prepare`,{method:"POST",body:JSON.stringify({sessionId:session.current})}).catch((cause) => {if (!stopped) setError(cause.message);});
     return () => {stopped = true;clearTimeout(timer);};
-  },[document.id,activeId]);
+  },[document.id,activeId,reviewSourceId]);
   useEffect(() => {
     if (!activeId) return;
     let stopped = false;
+    const prepareWhileOpen = activeId !== reviewSourceId;
     const beat = () => {
       if (stopped || window.document.visibilityState === "hidden") return;
-      void api(`/documents/${encodeURIComponent(document.id)}/reading-session`,{method:"POST",body:JSON.stringify({sessionId:session.current,active:true,mode:"correction",sourceId:activeId})}).catch(() => {});
+      if (prepareWhileOpen) void api(`/documents/${encodeURIComponent(document.id)}/reading-session`,{method:"POST",body:JSON.stringify({sessionId:session.current,active:true,mode:"correction",sourceId:activeId})}).catch(() => {});
       if (isEditing.current) void api(`${route}/${encodeURIComponent(activeId)}/edit`,{method:"POST",body:JSON.stringify({sessionId:session.current})}).catch(() => {});
     };
-    const stop = () => {void fetch(`/api/documents/${encodeURIComponent(document.id)}/reading-session`,{method:"POST",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({sessionId:session.current,active:false})}).catch(() => {});};
+    const stop = () => {if (prepareWhileOpen) void fetch(`/api/documents/${encodeURIComponent(document.id)}/reading-session`,{method:"POST",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({sessionId:session.current,active:false})}).catch(() => {});};
     const visibility = () => window.document.visibilityState === "hidden" ? stop() : beat();
     beat();const timer = setInterval(beat,8000);window.document.addEventListener("visibilitychange",visibility);window.addEventListener("pagehide",stop);
     return () => {stopped = true;clearInterval(timer);stop();window.document.removeEventListener("visibilitychange",visibility);window.removeEventListener("pagehide",stop);void api(`${route}/${encodeURIComponent(activeId)}/edit`,{method:"DELETE",body:JSON.stringify({sessionId:session.current})}).catch(() => {});};
-  },[document.id,activeId]);
+  },[document.id,activeId,reviewSourceId]);
   const beginEdit = async (overrideHtml) => {
     const proposed = typeof overrideHtml === "string" ? overrideHtml : null;
     const clickedVersion = source?.version, clickedProposal = source?.proposal?.bodyHtml;
@@ -170,14 +183,15 @@ export default function SourceCorrection({ document, sourceIds = [], onClose, on
   const first = source?.firstExtraction;
   return <section className={`source-correction ${chatOpen ? "has-chat" : ""}`} aria-label="校对正文">
     <div className="source-correction-main"><div className="source-heading"><div><span className="eyebrow">校对正文</span><h1>{document.title}</h1></div><button className="button subtle" disabled={busy} onClick={onClose}>返回阅读</button></div>
-      <div className="source-toolbar"><label>当前来源 <select aria-label="切换校对来源" value={activeId || ""} disabled={busy} onChange={(e) => switchSource(e.target.value)}>{sources.map((item) => <option key={item.id} value={item.id}>{sourceLabel(item)} · {item.checked ? "已核对" : "待核对"}</option>)}</select></label>
+      <div className="source-toolbar"><label>当前来源 <select aria-label="切换校对来源" value={activeId || ""} disabled={busy} onChange={(e) => switchSource(e.target.value)}>{!activeId && <option value="" disabled>选择来源</option>}{sources.map((item) => <option key={item.id} value={item.id}>{sourceLabel(item)} · {item.checked ? "已核对" : "待核对"}</option>)}</select></label>
         {sources.length > 1 && sources.every((item) => ["photo","screenshot","image"].includes(item.type)) && <><button className="text-button" disabled={busy || dirty || sources[0]?.id === activeId} onClick={() => reorder(-1)}>来源上移</button><button className="text-button" disabled={busy || dirty || sources.at(-1)?.id === activeId} onClick={() => reorder(1)}>来源下移</button></>}
         <button className="button secondary" onClick={() => {setOverview(!overview);void loadSources();}}>全文检查</button><button className="button subtle" onClick={() => setChatOpen(!chatOpen)}>对话记录</button></div>
       {error && <p className="source-error" role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
       {overview ? <div className="source-overview"><h2>已准备正文与待准备位置</h2><p>这里只展示已保存内容。选择来源后才准备该来源。</p>{sources.map((item) => <section key={item.id}><button className="text-button" onClick={() => {switchSource(item.id);setOverview(false);}}>{sourceLabel(item)} · {item.checked ? "已核对" : "待核对"}</button>{item.bodyHtml && bodyText(item.bodyHtml).trim() ? <ArticleBody html={item.bodyHtml} showRuby fontSize={22} /> : item.firstExtraction && item.status === "ready" ? <p>{item.original?.importExclusions?.length ? "非正文内容已排除" : "此来源没有正文"}</p> : <p className="source-unprepared">此处正文尚未准备</p>}</section>)}</div>
-        : !source ? <p role="status">正在读取来源…</p> : <>
+        : !source ? !error && <p role="status">正在读取来源…</p> : <>
           <p className="source-scope-note">本次编辑只影响当前文章中的对应正文。原始资料和首次提取结果保留，可同时对照完整来源。</p>
           {source.original?.boundaryNeedsReview && <p className="source-boundary-note">此处章节边界待核对，可对照 PDF 原页确认正文范围。</p>}
+          {activeId === reviewSourceId && !source.proposal?.bodyHtml && !notice && <p role="status">此来源当前没有待核对的提议。</p>}
           {source.proposal?.bodyHtml && <section className="source-proposal" role="alert"><h2>AI 修改需要核对</h2><p>校正结果包含整句、整段删除或较大改写，处理已暂停。请对照原始来源和以下差异。可保留当前正文，或编辑 AI 提议后保存。</p><div className="source-diff"><div><h3>当前正文</h3><pre>{bodyText(html)}</pre></div><div><h3>AI 提议</h3><pre>{bodyText(source.proposal.bodyHtml)}</pre></div></div><div className="source-actions">{source.proposalToken && <button className="button primary" disabled={busy || editing} onClick={keepCurrent}>保留当前正文并继续</button>}<button className="button secondary" disabled={busy || editing} onClick={() => beginEdit(source.proposal.bodyHtml)}>核对并编辑此提议</button></div></section>}
           <div className="source-correction-grid"><div className="source-edit-pane"><div className="source-status-row"><span className="source-status">{source.checked ? "已核对" : "待核对"}</span><span>{source.processing ? "处理中" : ({ready:"处理完成",pending:"等待准备",failed:"准备失败",requires_review:"AI 修改待核对"})[source.status] || ""}</span></div>
             {!editing ? <><div className="source-current-body">{bodyText(html).trim() ? <ArticleBody html={html} showRuby fontSize={24} onGroup={viewGroups} onSelection={setSelection} /> : <p>{source.error ? "提取失败，可以对照来源人工录入。" : source.manual || source.status === "ready" ? "此来源当前没有正文内容。" : "此来源正文尚未准备，可以等待或人工录入。"}</p>}</div><button className="button primary" disabled={busy} onClick={beginEdit}>编辑正文与注音</button></>
