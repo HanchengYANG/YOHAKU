@@ -99,17 +99,6 @@ summary:focus-visible {
   background: #f8e9ce;
   border-color: #f8e9ce;
 }
-.sidebar .button.secondary {
-  color: #eee9dc;
-  background: #ffffff0a;
-  border-color: #ffffff30;
-}
-.sidebar .button.secondary:hover:not(:disabled),
-.sidebar .button.subtle:hover:not(:disabled) {
-  background: #ffffff12;
-  border-color: #ffffff40;
-}
-.sidebar .button.subtle,
 .sidebar .text-button {
   color: #d3dfd2;
 }
@@ -118,9 +107,6 @@ summary:focus-visible {
 }
 .sidebar .shelf-heading {
   color: #e4e5d8;
-}
-.sidebar .count {
-  color: #f0d2a4;
 }
 .sidebar .search-box {
   color: #bed1c3;

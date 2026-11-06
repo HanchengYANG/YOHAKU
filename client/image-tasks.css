@@ -53,8 +53,6 @@
  .task-pagination { gap:10px; }
  .task-pagination span { font-size:10px; }
 }
-.sidebar-task-link { display:flex; flex-wrap:wrap; align-items:center; gap:6px; width:100%; min-width:0; white-space:normal; font-size:12px; line-height:1.7; }
-.sidebar-task-link .count { flex-shrink:0; font-size:10px; padding:1px 6px; }
 .task-preparation-actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 .task-preparation-actions .text-button { color:var(--muted); font-size:11px; }
 .task-preparation-name { margin:0 0 18px; color:var(--muted); font-size:12px; line-height:1.8; overflow-wrap:anywhere; }

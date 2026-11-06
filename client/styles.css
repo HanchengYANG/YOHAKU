@@ -135,25 +135,9 @@ summary:focus-visible {
   letter-spacing: 1.5px;
   margin-top: 2px;
 }
-.sidebar-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 22px;
-}
 .sidebar-primary-action {
   width: 100%;
   min-height: 40px;
-}
-.sidebar-secondary-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-.sidebar-secondary-actions .button {
-  min-height: 36px;
-  padding: 6px 8px;
-  font-size: 12px;
 }
 .button {
   display: inline-flex;
@@ -240,11 +224,6 @@ summary:focus-visible {
   font-size: 12px;
   color: #626f61;
   margin: 0 4px 15px;
-}
-.shelf-heading > span:first-child {
-  display: flex;
-  gap: 8px;
-  align-items: center;
 }
 .count {
   color: #92998d;

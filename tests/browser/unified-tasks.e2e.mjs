@@ -112,8 +112,8 @@ test("unified task entry stays visible with zero active tasks and filters task t
   const state=await fixture(page);await page.goto("/#tasks");
   await expect(page.getByRole("heading",{name:"任务与导入草稿",exact:true})).toBeVisible();
   await openShelf(page);
-  await expect(page.getByRole("button",{name:"任务与导入草稿",exact:true})).toBeVisible();
-  if(info.project.name==="phone")await page.getByRole("button",{name:"任务与导入草稿",exact:true}).click();
+  await expect(page.getByRole("button",{name:"任务",exact:true})).toBeVisible();
+  if(info.project.name==="phone")await page.getByRole("button",{name:"任务",exact:true}).click();
   await expect(page.getByRole("article").filter({hasText:"十四元気茶"})).toContainText("正文准备");
   await page.getByLabel("任务类型",{exact:true}).selectOption("image");
   await expect(page.getByRole("article").filter({hasText:"十四元気茶"})).toHaveCount(0);

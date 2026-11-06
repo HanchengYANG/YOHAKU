@@ -1,6 +1,6 @@
 /* Sidebar layer for UI step 2. design-theme.css keeps the colors of the dark
-   bookshelf; this file adds the account menu (and, in Task 6, the top of the
-   sidebar). */
+   bookshelf; this file adds the account menu, the add and task buttons at the
+   top, and the shelf heading. */
 
 /* Account row and its menu, which unfolds upward over the shelf. */
 .sidebar .account-user-menu {
@@ -106,4 +106,71 @@
 }
 .account-menu-panel .error-notice {
   margin: 4px;
+}
+
+/* Top of the sidebar: the add button and the task row. */
+.sidebar-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 24px;
+}
+.sidebar-primary-action {
+  gap: 6px;
+}
+.sidebar .sidebar-task-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #e4e5d8;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.sidebar .sidebar-task-link > span:first-of-type {
+  flex: 1;
+}
+.sidebar .sidebar-task-link:hover:not(:disabled),
+.sidebar .sidebar-task-link.active {
+  background: #ffffff12;
+  color: #fbf4e6;
+}
+.sidebar .sidebar-task-link:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.sidebar .sidebar-task-link .count {
+  min-width: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--rust);
+  color: #fff9ef;
+  font-size: 11px;
+  line-height: 20px;
+  text-align: center;
+}
+
+/* Shelf heading with the new-book button. */
+.shelf-heading h2 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 2px;
+}
+.sidebar .shelf-new-book {
+  width: 26px;
+  height: 26px;
+  padding: 4px;
+  color: #d3dfd2;
+}
+.sidebar .shelf-new-book:hover:not(:disabled) {
+  background: #ffffff12;
+  color: #fbf4e6;
 }

@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { ensureOwnerSession } from "./session.mjs";
-import { openAccountMenu } from "./navigation.mjs";
+import { openAccountMenu, openAddText } from "./navigation.mjs";
 
 test.beforeEach(async ({ page }) => {
   await ensureOwnerSession(page.request);
@@ -42,12 +42,7 @@ test("导入、选区注音、校对、保存重开、导出及手机布局", as
     path: `artifacts/stage1-welcome-${info.project.name}.png`,
     fullPage: true,
   });
-  if (await page.getByRole("button", { name: "打开书架", exact: true }).isVisible()) {
-    await page.getByRole("button", { name: "打开书架", exact: true }).click();
-  }
-  await page
-    .getByRole("button", { name: "导入文字", exact: true })
-    .click();
+  await openAddText(page);
   await page
     .getByRole("textbox", { name: "资料标题" })
     .fill(`验收歌词 ${info.project.name}`);
@@ -164,14 +159,12 @@ test("导入、选区注音、校对、保存重开、导出及手机布局", as
 
 test("未保存离开会确认，新建能清空旧草稿，慢速导入期间锁定输入", async ({ page }) => {
   await page.goto("/");
-  if(await page.getByRole("button",{name:"打开书架",exact:true}).isVisible())await page.getByRole("button",{name:"打开书架",exact:true}).click();
-  await page.getByRole("button",{name:"导入文字",exact:true}).click();
+  await openAddText(page);
   await page.getByLabel("导入原文").fill("未保存草稿");
   page.once("dialog",dialog=>dialog.dismiss());await page.getByRole("button",{name:"返回",exact:true}).click();
   await expect(page.getByLabel("导入原文")).toHaveValue("未保存草稿");
   page.once("dialog",dialog=>dialog.accept());
-  if(await page.getByRole("button",{name:"打开书架",exact:true}).isVisible())await page.getByRole("button",{name:"打开书架",exact:true}).click();
-  await page.getByRole("button",{name:"导入文字",exact:true}).click();
+  await openAddText(page);
   await expect(page.getByLabel("资料标题")).toHaveValue("");await expect(page.getByLabel("导入原文")).toHaveValue("");
   await page.getByLabel("资料标题").fill("慢速保存");await page.getByLabel("导入原文").fill("空を見た。");
   await page.getByRole("button",{name:"继续确认类型",exact:true}).click();

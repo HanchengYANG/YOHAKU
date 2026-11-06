@@ -7,7 +7,7 @@ import {createServer} from "node:http";
 const html = (text) => initializeSentenceBoundaries(blocksToHtml(parseText(text)),[text]);
 const original = "今日は空を見た。";
 async function showShelf(page) {
-  await expect(page.getByRole("button",{name:"导入资料",exact:true})).toBeAttached();
+  await expect(page.getByRole("button",{name:"添加",exact:true})).toBeAttached();
   const toggle=page.getByRole("button",{name:"打开书架",exact:true});
   if(await toggle.isVisible())await toggle.click();
 }
@@ -670,7 +670,7 @@ test("a new document without a reading preload never reuses another document's p
 test("unified text import confirms detected type before preparing the current page",async({page})=>{
   const state=await fixture(page);await page.goto("/");
   await showShelf(page);
-  await page.getByRole("button",{name:"导入文字",exact:true}).click();
+  await page.getByRole("button",{name:"添加",exact:true}).click();await page.getByRole("tab",{name:"粘贴文字",exact:true}).click();
   await page.getByLabel("资料标题").fill("新资料");await page.getByLabel("导入原文").fill(original);
   await page.getByRole("button",{name:"继续确认类型"}).click();
   await expect(page.getByLabel("确认来源类型")).toHaveValue("text");
@@ -1118,7 +1118,7 @@ test("imported PDF correction displays a loaded original-page image with zoom an
 test("pasted screenshot keeps a confirmable image type",async({page})=>{
   const state=await fixture(page,{importType:"screenshot"});await page.goto("/");
   await showShelf(page);
-  await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await page.getByRole("button",{name:"添加",exact:true}).click();
   await page.getByLabel("上传或粘贴来源文件").evaluate((element)=>{const transfer=new DataTransfer();transfer.items.add(new File(["test-image"],"pasted.png",{type:"image/png"}));element.dispatchEvent(new ClipboardEvent("paste",{bubbles:true,clipboardData:transfer}));});
   await expect(page.locator(".source-file-list")).toContainText("pasted.png");
   await page.getByRole("button",{name:"继续确认类型"}).click();
@@ -1142,7 +1142,7 @@ for(const reopen of [false,true])test(`same-file screenshot suggestion ${reopen 
   });
   const openImport=async()=>{
     await showShelf(page);
-    await page.getByRole("button",{name:"导入资料",exact:true}).click();
+    await page.getByRole("button",{name:"添加",exact:true}).click();
   };
   await page.goto("/");await openImport();
   if(reopen){
@@ -1188,7 +1188,7 @@ for(const reopen of [false,true])test(`same-file screenshot suggestion ${reopen 
 test("PDF chapter edits use physical ranges and retain uncertain boundaries after confirmation",async({page})=>{
   const state=await fixture(page,{importType:"text_pdf"});await page.goto("/");
   await showShelf(page);
-  await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await page.getByRole("button",{name:"添加",exact:true}).click();
   await page.getByLabel("选择来源文件").setInputFiles({name:"original.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-fixture")});
   await page.getByRole("button",{name:"继续确认类型"}).click();
   await page.getByLabel("资料标题").fill("PDF 书籍");await page.getByLabel("作为书籍导入").check();
@@ -1210,7 +1210,7 @@ test("PDF chapter review lazily previews physical boundary pages without marking
     return route.fulfill({contentType:"image/png",body:png});
   });
   await page.goto("/");await showShelf(page);
-  await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await page.getByRole("button",{name:"添加",exact:true}).click();
   await page.getByLabel("选择来源文件").setInputFiles({name:"original.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-fixture")});
   await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
   await page.getByLabel("作为书籍导入").check();
@@ -1244,7 +1244,7 @@ test("PDF chapter review lazily previews physical boundary pages without marking
 async function startScannedBook(page,options={}) {
   const state=await fixture(page,{importType:"scan_pdf",asyncChapters:true,...options});await page.goto("/");
   await showShelf(page);
-  await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await page.getByRole("button",{name:"添加",exact:true}).click();
   await page.getByLabel("选择来源文件").setInputFiles({name:"scanned.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-scanned-fixture")});
   await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
   await page.getByLabel("资料标题").fill("扫描书籍");await page.getByLabel("作为书籍导入").check();
@@ -1349,7 +1349,7 @@ async function leaveSavedImportWithoutDialog(page){
 test("an uploaded PDF draft can be left when its browser cache cannot be written",async({page})=>{
   await simulateUnavailableImportDraftCache(page);
   const state=await fixture(page,{importType:"scan_pdf"});await page.goto("/");await showShelf(page);
-  await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await page.getByRole("button",{name:"添加",exact:true}).click();
   await page.getByLabel("选择来源文件",{exact:true}).setInputFiles({name:"saved.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-saved-fixture")});
   await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
   await expect(page.getByLabel("确认来源类型",{exact:true})).toHaveValue("scan_pdf");
@@ -1370,7 +1370,7 @@ for(const restore of [true,false])test(`${restore?"restored":"resumed"} server P
   await simulateUnavailableImportDraftCache(page,{restore});
   const pending={id:"imp",title:"可继续的扫描书籍",detectedType:"scan_pdf",status:"staged",chapterAttempted:true,context:{bookId:null,targetId:null},chapterProcessing:{status:"extracting",type:"scan_pdf",completedPages:3,totalPages:10}};
   const state=await fixture(page,{importType:"scan_pdf",keepExtracting:true,draft:pending,serverDrafts:[pending]});await page.goto("/");await showShelf(page);
-  await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await page.getByRole("button",{name:"添加",exact:true}).click();
   if(!restore)await page.getByRole("button",{name:"继续导入：可继续的扫描书籍",exact:true}).click();
   await expect(page.getByLabel("PDF 分章进度")).toContainText("全书本地 OCR：3 / 10 页");
   await leaveSavedImportWithoutDialog(page);
@@ -1397,7 +1397,7 @@ test("reopening an import after refresh restores its draft and resumes existing 
   const reads=state.calls.filter((call)=>call.path === "/imports/imp" && call.method === "GET").length;
   const acceptReload=(dialog)=>dialog.accept();page.on("dialog",acceptReload);await page.reload();page.off("dialog",acceptReload);
   await showShelf(page);
-  await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await page.getByRole("button",{name:"添加",exact:true}).click();
   await expect(page.getByLabel("PDF 分章进度")).toContainText("全书本地 OCR：3 / 10 页");
   await expect(page.getByLabel("资料标题")).toHaveValue("扫描书籍");await expect(page.getByLabel("作为书籍导入")).toBeChecked();
   await expect.poll(()=>state.calls.filter((call)=>call.path === "/imports/imp" && call.method === "GET").length).toBeGreaterThan(reads+1);
@@ -1410,7 +1410,7 @@ test("reopening an import after refresh restores its draft and resumes existing 
   await page.waitForTimeout(2200);
   expect(state.calls.filter(call=>call.path==="/imports/imp"&&call.method==="GET")).toHaveLength(restoredReads);
   expect(state.calls.filter(call=>call.path.includes("/imports/")&&call.method==="DELETE")).toHaveLength(0);
-  await showShelf(page);await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await showShelf(page);await page.getByRole("button",{name:"添加",exact:true}).click();
   await expect(page.getByLabel("PDF 分章进度")).toContainText("全书本地 OCR：3 / 10 页");
   expect(state.calls.filter(call=>call.path==="/imports"&&call.method==="POST")).toHaveLength(1);
   expect(state.calls.filter(call=>call.path==="/imports/imp/chapters")).toHaveLength(1);
@@ -1418,7 +1418,7 @@ test("reopening an import after refresh restores its draft and resumes existing 
 
 test("a selected file that has not been uploaded still warns before leaving",async({page})=>{
   const state=await fixture(page);await page.goto("/");await showShelf(page);
-  await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await page.getByRole("button",{name:"添加",exact:true}).click();
   await page.getByLabel("选择来源文件").setInputFiles({name:"unsaved.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-unsaved-fixture")});
   const dialogs=[];page.on("dialog",async dialog=>{dialogs.push(dialog.message());await dialog.dismiss();});
   await page.getByRole("button",{name:"返回",exact:true}).click();
@@ -1441,7 +1441,7 @@ test("an image can be removed and selected again from the same native file path"
   await new Promise(resolve=>receiver.listen(0,"127.0.0.1",resolve));
   try{
     await page.route("**/api/imports",route=>route.request().method()==="POST"?route.continue({url:`http://127.0.0.1:${receiver.address().port}/upload`}):route.fallback());
-    await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"导入资料",exact:true}).click();
+    await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"添加",exact:true}).click();
     const chooseButton=page.getByRole("button",{name:"从设备选择文件",exact:true});
     await expect(chooseButton).toBeVisible();
     const accessibility=await page.context().newCDPSession(page);
@@ -1482,7 +1482,7 @@ test("repeated image selections upload in the adjusted order and a new selection
   await new Promise(resolve=>receiver.listen(0,"127.0.0.1",resolve));
   try{
     await page.route("**/api/imports",route=>route.request().method()==="POST"?route.continue({url:`http://127.0.0.1:${receiver.address().port}/upload`}):route.fallback());
-    await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"导入资料",exact:true}).click();
+    await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"添加",exact:true}).click();
     const input=page.getByLabel("选择来源文件",{exact:true});
     const chooseButton=page.getByRole("button",{name:"从设备选择文件",exact:true});
     const stageButton=page.getByRole("button",{name:"继续确认类型",exact:true});
@@ -1540,7 +1540,7 @@ test("file upload persists the entered title for a draft reopened without sessio
     savedTitle=uploaded.match(/name="title"\r\n\r\n([^\r]*)/)?.[1] || "";
     return route.fulfill({json:draft()});
   });
-  await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"添加",exact:true}).click();
   await page.getByLabel("资料标题",{exact:true}).fill(title);
   await page.getByLabel("选择来源文件",{exact:true}).setInputFiles({name:"pg31757-images.epub",mimeType:"application/epub+zip",buffer:Buffer.from("epub-fixture")});
   await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
@@ -1548,7 +1548,7 @@ test("file upload persists the entered title for a draft reopened without sessio
   expect(savedTitle).toBe(title);
   await page.evaluate(()=>sessionStorage.clear());
   await page.route("**/api/imports/imp",route=>route.fulfill({json:draft()}));
-  await page.reload();await showShelf(page);await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await page.reload();await showShelf(page);await page.getByRole("button",{name:"添加",exact:true}).click();
   await page.getByRole("button",{name:`继续导入：${title}`,exact:true}).click();
   await expect(page.getByLabel("资料标题",{exact:true})).toHaveValue(title);
 });
@@ -1564,7 +1564,7 @@ test("a pending file upload locks file changes and preserves its server error un
     return route.fulfill({status:503,json:{error:"当前上传未能保存，请重试。"}});
   });
   try{
-    await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"导入资料",exact:true}).click();
+    await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"添加",exact:true}).click();
     const input=page.getByLabel("选择来源文件",{exact:true});
     await input.setInputFiles({name:"first.png",mimeType:"image/png",buffer:png});
     await page.getByRole("button",{name:"继续确认类型",exact:true}).click();await expect.poll(()=>entered).toBe(true);
@@ -1591,7 +1591,7 @@ test("a pending file upload locks file changes and preserves its server error un
 test("choosing files again clears the previous import flow's error",async({page})=>{
   await fixture(page,{importType:"epub"});
   await page.route("**/api/imports/imp/confirm",route=>route.fulfill({status:400,json:{error:"请提供来源列表。"}}));
-  await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"添加",exact:true}).click();
   await page.getByLabel("选择来源文件",{exact:true}).setInputFiles({name:"old.epub",mimeType:"application/epub+zip",buffer:Buffer.from("epub-fixture")});
   await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
   await page.getByRole("button",{name:"确认导入",exact:true}).click();
@@ -1613,7 +1613,7 @@ test("a new tab without session cache resumes a server draft from the matching i
       {...pending,id:"complete",title:"已经确认的导入",status:"confirmed"},
     ]});
     await otherTab.goto("/");expect(await otherTab.evaluate(()=>Object.keys(sessionStorage).filter((key)=>key.startsWith("yohaku:import-draft:")).length)).toBe(0);
-    await showShelf(otherTab);await otherTab.getByRole("button",{name:"导入资料",exact:true}).click();
+    await showShelf(otherTab);await otherTab.getByRole("button",{name:"添加",exact:true}).click();
     const list=otherTab.getByLabel("继续未完成的导入");await expect(list).toContainText("全书本地 OCR：3 / 10 页");
     await expect(list.getByRole("button",{name:"继续导入：旧格式独立草稿",exact:true})).toBeVisible();
     await expect(list.getByRole("button",{name:"继续导入：其他书籍的后台任务",exact:true})).toHaveCount(0);
@@ -1652,7 +1652,7 @@ test("reselecting a restored PDF draft distinguishes identical saved drafts by t
     sessionStorage.setItem(`yohaku:import-draft:${JSON.stringify(context)}`,JSON.stringify({id,context}));
   },first.id);
   await page.goto("/");await showShelf(page);
-  await page.getByRole("button",{name:"导入资料",exact:true}).click();
+  await page.getByRole("button",{name:"添加",exact:true}).click();
   await expect(page.getByLabel("章节 1 标题",{exact:true})).toHaveValue(first.chapters[0].title);
   expect(reads).toEqual([first.id]);
 

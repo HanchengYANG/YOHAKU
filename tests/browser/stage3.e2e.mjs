@@ -6,6 +6,7 @@ import sharp from "sharp";
 import { bodyRanges, bodyText, hasCompleteSentenceBoundaries, sourceBodyHtml } from "../../shared/article-html.mjs";
 import { ensureOwnerSession } from "./session.mjs";
 import { selectArticleText } from "./article-selection.mjs";
+import { openAddText } from "./navigation.mjs";
 
 let cookies = [];
 test.beforeEach(async ({ page }) => {
@@ -24,9 +25,7 @@ async function current(page, id) {
 async function importText(page, suffix) {
   await page.goto("/");
   await expect(page.locator(".main-panel")).toBeVisible();
-  const shelf = page.getByRole("button", { name: "打开书架", exact: true });
-  if (await shelf.isVisible()) await shelf.click();
-  await page.getByRole("button", { name: "导入文字", exact: true }).click();
+  await openAddText(page);
   await page.getByRole("textbox", { name: "材料标题" }).fill(`第三阶段验收 ${suffix}`);
   await page.getByRole("textbox", { name: "日语正文" }).fill("遠い空を見ている。\n\n背中を撫でる風。誰にも送らない秘密の末尾。 ");
   const segmented = page.waitForResponse((response) => /\/sentences$/.test(new URL(response.url()).pathname));
@@ -553,9 +552,7 @@ for (const failure of [false, true]) test(`等待分句时新建草稿不被迟�
     await page.goto(`/#${document.id}`);
     await started;
     await expect(page.getByRole("region", {name:"准备阅读",exact:true})).toBeVisible();
-    const shelf = page.getByRole("button", {name:"打开书架",exact:true});
-    if (await shelf.isVisible()) await shelf.click();
-    await page.getByRole("button", {name:"导入文字",exact:true}).click();
+    await openAddText(page);
     const input = page.getByRole("textbox", {name:"日语正文",exact:true});
     const manual = `新しい草稿は変更しない。${info.project.name}`;
     await input.fill(manual);

@@ -18,3 +18,9 @@ export async function openAccountMenu(page) {
   if ((await trigger.getAttribute("aria-expanded")) !== "true") await trigger.click();
   await expect(page.getByRole("button", { name: "退出", exact: true })).toBeVisible();
 }
+
+export async function openAddText(page) {
+  await openShelf(page);
+  await page.getByRole("button", { name: "添加", exact: true }).click();
+  await page.getByRole("tab", { name: "粘贴文字", exact: true }).click();
+}

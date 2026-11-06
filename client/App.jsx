@@ -2,7 +2,6 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import api from "./api.mjs";
 import { blocksToHtml, hasCompleteSentenceBoundaries, htmlToBlocks, appendImageBodyHtml } from "../shared/article-html.mjs";
 import { parseText, serializeBlocks } from "../shared/document.mjs";
-import { kinds } from "./constants.mjs";
 import Icon from "./components/Icon.jsx";
 import Welcome from "./components/Welcome.jsx";
 import Reader from "./components/Reader.jsx";
@@ -22,7 +21,7 @@ import { imageTasksChangedEvent, notifyImageTasksChanged } from "./image-tasks.m
 import DocumentChat from "./components/DocumentChat.jsx";
 import { createChatSession } from "./chat-history.mjs";
 import AccountGate from "./components/AccountGate.jsx";
-import UserMenu from "./components/UserMenu.jsx";
+import Sidebar from "./components/Sidebar.jsx";
 import BookView from "./components/BookView.jsx";
 import BookNavigation from "./components/BookNavigation.jsx";
 import PWAManager from "./PWAManager.jsx";
@@ -387,6 +386,15 @@ function Workspace({ user, onLoggedOut }) {
 
   const mayLeave = () =>
     !saving && !bookBusy && (!dirty || window.confirm("当前修改还没有保存，确定离开吗？"));
+  const goHome = () => {
+    if (!mayLeave()) return;
+    setActiveId("");
+    setPanel(null);
+    setDraft(null);
+    setDirty(false);
+    history.replaceState(null, "", window.location.pathname);
+    setSidebarOpen(false);
+  };
   const openDocument = (id, { reviewSourceId } = {}) => {
     if (!mayLeave()) return;
     readingResume.current = null;
@@ -767,139 +775,16 @@ function Workspace({ user, onLoggedOut }) {
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
-      {sidebarOpen && (
-        <button
-          className="sidebar-backdrop"
-          onClick={() => setSidebarOpen(false)}
-          aria-label="关闭书架"
-        />
-      )}
-      <aside
-        id="bookshelf"
-        className={`sidebar ${sidebarOpen ? "is-open" : ""}`}
-        aria-label="书架"
-      >
-        <button ref={sidebarCollapseButton} className="icon-button desktop-sidebar-collapse"
-          type="button" aria-label="收起书架" aria-controls="bookshelf" aria-expanded="true"
-          onClick={toggleDesktopSidebar}>
-          <Icon name="panel-close" size={18} />
-        </button>
-        <a
-          className="brand"
-          href="#"
-          onClick={(e) => {
-            e.preventDefault();
-            if (mayLeave()) {
-              setActiveId("");
-              setPanel(null);
-              setDraft(null);
-              setDirty(false);
-              history.replaceState(null, "", window.location.pathname);
-              setSidebarOpen(false);
-            }
-          }}
-        >
-          <span className="brand-mark">余</span>
-          <span className="brand-copy">
-            <span className="brand-title-row">
-              <strong>余白</strong>
-              <span className="brand-en">YOHAKU</span>
-            </span>
-            <small>多语阅读与笔记</small>
-          </span>
-        </a>
-        <div className="sidebar-actions">
-          <button
-            className="button primary sidebar-primary-action"
-            disabled={saving}
-            onClick={() => openUnifiedImport()}
-          >
-            <Icon name="plus" size={16} />
-            导入资料
-          </button>
-          <div className="sidebar-secondary-actions">
-            <button
-              className="button secondary"
-              disabled={saving}
-              onClick={() => openUnifiedImport(true)}
-            >
-              导入文字
-            </button>
-            <button
-              className="button secondary"
-              disabled={saving || bookBusy}
-              onClick={() => openPanel("newBook")}
-            >
-              新建书籍
-            </button>
-          </div>
-          <button className="button secondary sidebar-task-link" disabled={saving || bookBusy}
-            onClick={() => openDocument("tasks")}>
-            <Icon name="menu" size={16} />任务与导入草稿
-            {activeTaskCount > 0 && <span className="count">当前 {activeTaskCount}</span>}
-          </button>
-        </div>
-        <div className="shelf-heading">
-          <span>
-            <Icon name="book" size={15} />
-            我的书架
-          </span>
-          <span className="count">{documents.length + shelfBooks.length}</span>
-        </div>
-        <label className="search-box">
-          <Icon name="search" size={15} />
-          <input
-            aria-label="搜索书架"
-            placeholder="搜索标题或正文"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            maxLength={200}
-          />
-        </label>
-        <nav className="document-list" aria-label="阅读材料">
-          {loading && <p className="shelf-empty">正在打开书架…</p>}
-          {!loading && documents.length === 0 && shelfBooks.length === 0 && (
-            <p className="shelf-empty">
-              {query ? "没有找到匹配的材料。" : "还没有材料。"}
-            </p>
-          )}
-          {shelfBooks.map((item) => (
-            <button
-              className={`document-link ${item.id === book?.id ? "active" : ""}`}
-              key={`book-${item.id}`}
-              disabled={saving || bookBusy}
-              onClick={() => openBook(item.id)}
-            >
-              <span className="document-link-top">
-                <span className="kind-dot book" />书籍
-                <span>{item.pageCount} 篇 · {item.charCount} 字</span>
-              </span>
-              <strong>{item.title}</strong>
-              <small lang="ja">{item.preview?.replace(/\n/g, " ") || "添加文章，开始阅读"}</small>
-            </button>
-          ))}
-          {documents.map((item) => (
-            <button
-              className={`document-link ${item.id === activeId ? "active" : ""}`}
-              key={item.id}
-              disabled={saving}
-              onClick={() => openDocument(item.id)}
-            >
-              <span className="document-link-top">
-                <span className={`kind-dot ${item.kind}`} />
-                {kinds[item.kind]}
-                <span>{item.charCount} 字</span>
-              </span>
-              <strong>{item.title}</strong>
-              <small lang="ja">{item.preview.replace(/\n/g, " ")}</small>
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-footer">
-          <UserMenu user={user} disabled={saving} onOpenPanel={openPanel}
-            onBeforeLogout={mayLeave} onLoggedOut={onLoggedOut} />
-        </div>
-      </aside>
+      <Sidebar
+        user={user} open={sidebarOpen} onClose={() => setSidebarOpen(false)}
+        collapseButtonRef={sidebarCollapseButton} onCollapse={toggleDesktopSidebar}
+        saving={saving} bookBusy={bookBusy} activeId={activeId} activeBookId={book?.id}
+        shelfBooks={shelfBooks} documents={documents} loading={loading}
+        query={query} onQueryChange={setQuery} taskCount={taskCounts.attention ?? 0}
+        onHome={goHome} onAdd={() => openUnifiedImport()} onNewBook={() => openPanel("newBook")}
+        onTasks={() => openDocument("tasks")} onOpenBook={openBook} onOpenDocument={openDocument}
+        onOpenPanel={openPanel} onBeforeLogout={mayLeave} onLoggedOut={onLoggedOut}
+      />
       <main className="main-panel">
         <header className="topbar">
           {sidebarCollapsed && <button ref={sidebarExpandButton} className="icon-button desktop-sidebar-expand"
