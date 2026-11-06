@@ -26,7 +26,7 @@ const COLUMNS = [
 ];
 
 function rewriteJson(database, table, column, mutate) {
-  if (!hasTable(database, table)) return;
+  if (!hasTable(database, table) || !hasColumn(database, table, column)) return;
   const update = database.prepare(`UPDATE ${table} SET ${column}=? WHERE rowid=?`);
   for (const row of database.prepare(`SELECT rowid AS id, ${column} AS value FROM ${table} WHERE ${column} IS NOT NULL`).all()) {
     let value;

@@ -74,3 +74,15 @@ test("缺少的表或状态列直接跳过", () => {
   assert.equal(migrateLegacyFailures(database), true);
   assert.equal(database.prepare("SELECT error FROM article_sources").get().error, "校正可能删除全部正文");
 });
+
+// The migration runs before image-tasks.mjs adds segmentation_json to older databases.
+test("缺少的 JSON 列直接跳过", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec(`
+    CREATE TABLE app_settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE image_tasks(id TEXT PRIMARY KEY, blocked_reason TEXT);
+  `);
+  database.prepare("INSERT INTO image_tasks VALUES('t1','网站 AI 授权需要恢复')").run();
+  assert.equal(migrateLegacyFailures(database), true);
+  assert.notEqual(database.prepare("SELECT blocked_reason FROM image_tasks").get().blocked_reason, "网站 AI 授权需要恢复");
+});

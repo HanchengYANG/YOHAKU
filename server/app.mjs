@@ -323,6 +323,9 @@ export function createApp({
     localRuby,
     errorLog,
   });
+  // attachAIRoutes creates app_settings. Migrate before the services below
+  // write fresh restart-recovery texts, so those are not mistaken for legacy ones.
+  migrateLegacyFailures(database);
   const books = attachBookRoutes({ app, database, summary, requireDocument,
     beforeDeleteDocument: (userId, id) => {imports.invalidateTarget(userId,{documentId:id});sources.deleteDocument(userId,id);},
     beforeDeleteBook:(userId,id)=>imports.invalidateTarget(userId,{bookId:id}) });
@@ -516,8 +519,8 @@ export function createApp({
   }
   const imports = attachImportRoutes({ app, database, storageDir, ai, sources, books, createImportedArticle, requireDocument,errorLog,localOcr:sharedNdlOcr });
   const tasks = attachTaskRoutes({app,database,adapters:[imageTasks.taskAdapter,imports.taskAdapter,sources.taskAdapter]});
-  migrateLegacyFailures(database);
   attachErrorRoutes({ app, errorLog, requireAdmin: accounts.requireAdmin });
+  // Not wrapped on purpose: a broken error log should fail startup loudly.
   errorLog.prune();
   // A throw inside a timer is uncaught and would stop the server.
   const pruneTimer = setInterval(() => {
