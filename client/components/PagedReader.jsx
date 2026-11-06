@@ -1,37 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import api from "../api.mjs";
 import { htmlToBlocks, bodyText } from "../../shared/article-html.mjs";
-import { pageSelection, readingPageLabel, readingPreparation, processingStepLabel, processingDuration, sourceLabel } from "../source-presentation.mjs";
+import { pageSelection, readingPageLabel, readingPreparation } from "../source-presentation.mjs";
 import Reader from "./Reader.jsx";
 import "../sources.css";
-
-const errorCategories = {timeout:"请求超时",cancelled:"请求已取消",auth:"授权失败",configuration:"角色配置不可用",rate_limit:"用量或频率限制",upstream_http:"上游服务异常",network:"网络连接异常",invalid_json:"返回的 JSON 无法解析",invalid_response:"返回结构无效",incomplete_output:"输出未完成",unknown:"原因尚未确定"};
-const providerLabels = {api_base:"iliad codix",openai:"OpenAI"};
-const diagnosticTime = (value) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString("zh-CN") : null;
-
-function DiagnosticFacts({record}) {
-  const execution = record.execution || record;
-  const diagnostic = record.diagnostic || record.error?.diagnostic;
-  const rows = [
-    ["来源",record.source && (record.source.label || sourceLabel(record.source))],
-    ["步骤",processingStepLabel(record.step)],
-    ["提供方",providerLabels[execution.providerId] || execution.providerId],
-    ["模型",execution.model],
-    ["排队耗时",processingDuration(execution.queueMs)],
-    ["执行耗时",processingDuration(execution.elapsedMs)],
-    ["排队时间",diagnosticTime(execution.queuedAt)],
-    ["开始时间",diagnosticTime(execution.startedAt)],
-    ["发生时间",diagnosticTime(record.at || record.updatedAt)],
-    ["错误类别",diagnostic && (errorCategories[diagnostic.category] || "原因尚未确定")],
-    ["错误代码",diagnostic?.code],
-    ["HTTP 状态",Number.isInteger(diagnostic?.httpStatus) ? `HTTP ${diagnostic.httpStatus}` : null],
-    ["网络错误",diagnostic?.networkCode],
-    ["错误类型",diagnostic?.errorType],
-    ["结束原因",diagnostic?.finishReason],
-    ["处理编号",record.operationId || execution.operationId],
-  ].filter(([,value]) => value !== undefined && value !== null && value !== "");
-  return <dl className="reading-diagnostic-facts">{rows.map(([label,value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>;
-}
 
 export default function PagedReader({ document, session, active = true, resumePosition = null, onEditSources, onPageChange, ...readerProps }) {
   const [resume] = useState(resumePosition);
@@ -116,7 +88,6 @@ export default function PagedReader({ document, session, active = true, resumePo
   const diagnostics = matchesIndex ? snapshot?.diagnostics : null;
   const preparation = readingPreparation({progress,current:diagnostics?.current,error:error || (matchesIndex ? snapshot?.error : null)});
   const paused = preparation.paused;
-  const recentFailures = snapshot?.diagnostics?.recentFailures?.slice(0,5) || [];
   const taskId=matchesIndex ? snapshot?.taskId || progress?.taskId : null;
   const diagnosticSourceId = diagnostics?.current?.source?.id;
   const preparationSourceIds = diagnosticSourceId ? [diagnosticSourceId,...(page?.sourceIds || []).filter((id) => id !== diagnosticSourceId)] : page?.sourceIds || [];
@@ -145,7 +116,6 @@ export default function PagedReader({ document, session, active = true, resumePo
           {(preparation.sourceLabel || preparation.elapsedLabel) && <div className="reading-current-step">{preparation.sourceLabel && <span>{preparation.sourceLabel}</span>}{preparation.elapsedLabel && <span>{preparation.elapsedLabel}</span>}</div>}
         </div>}
         <p role={preparation.errorMessage ? "alert" : undefined}>{emptyComplete ? "可在校对正文中补充内容。" : preparation.errorMessage || (preparation.state === "requires_review" ? "请进入校对正文查看差异并确认。" : preparation.state === "editing" ? "当前来源正在人工编辑，保存后继续准备。" : "离开页面也会继续准备，完成后自动显示正文。")}</p>
-        {diagnostics?.current && <details className="reading-diagnostics"><summary>处理详情</summary><DiagnosticFacts record={diagnostics.current} /></details>}
         <div className="source-actions">{!emptyComplete && !preparation.busy && <button className="button secondary" onClick={() => {retryPending.current = true;setRetry((value) => value + 1);}}>重试准备</button>}
           {taskId && <a className="button subtle" href={`#tasks/${encodeURIComponent(taskId)}`}>查看后台任务</a>}
           <button className="button subtle" onClick={() => onEditSources(preparationSourceIds,currentIndex)}>校对正文</button></div>
@@ -155,7 +125,6 @@ export default function PagedReader({ document, session, active = true, resumePo
         <p>{preview.source?.label && `${preview.source.label} · `}文字可能在校对后更新，准备完成后会自动显示正式阅读页。</p>
         <div className="reading-provisional-text" lang="ja">{preview.text}{preview.truncated && "…"}</div>
       </section>}</>}
-    {recentFailures.length > 0 && <details className="reading-diagnostics reading-diagnostics-history"><summary>最近处理异常（{recentFailures.length}）</summary><div aria-label="最近处理异常记录"><p className="source-scope-note">以下是历史记录，不代表当前阅读页仍有错误。</p>{recentFailures.map((failure) => <section key={failure.id}><p>{failure.message}</p><DiagnosticFacts record={failure} /></section>)}</div></details>}
     {page?.ready && <nav className="reading-pagination" aria-label="页末阅读分页"><button className="button secondary" disabled={currentIndex === 0} onClick={() => change(currentIndex - 1)}>上一页</button><span>{readingPageLabel({index:currentIndex,complete:snapshot?.complete,totalPages:snapshot?.totalPages})}</span><button className="button primary" disabled={!hasNext || !page} onClick={() => change(currentIndex + 1)}>下一页</button></nav>}
   </div>;
 }

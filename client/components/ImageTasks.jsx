@@ -3,7 +3,6 @@ import api from "../api.mjs";
 import { imageTasksChangedEvent, notifyImageTasksChanged, newerTask, isImageTask, taskActions, taskCounts, taskDisplayName, taskDuration, taskImageUrl, taskItemState, taskManualAnnotationStep, taskSegmentationState, taskStateLabel, taskStatus, taskStepState, taskSummary, taskTypeLabel } from "../image-tasks.mjs";
 import Icon from "./Icon.jsx";
 import { useConfirmation } from "./ConfirmDialog.jsx";
-import ExecutionDetails from "./ExecutionDetails.mjs";
 import "../image-tasks.css";
 
 function useTaskPolling(path, interval = 2000) {
@@ -58,7 +57,7 @@ function BackgroundStep({step,index,type}) {
     {step.progress?.total > 0 && <p className="task-note">{taskSummary({type,progress:step.progress})}</p>}
     {step.message && <p className="task-note">{step.message}</p>}
     {errorMessage(step.error) && <p className="task-item-error">{errorMessage(step.error)}</p>}
-    <ExecutionTiming execution={step.execution} /><ExecutionDetails execution={step.execution} label={stepNames[step.step] || title} />
+    <ExecutionTiming execution={step.execution} />
     {!!step.children?.length && <details className="task-step-children"><summary>查看子步骤（{step.children.length}）</summary><ol className="task-item-list task-step-list">{step.children.map((child,childIndex)=><BackgroundStep key={child.id || `${child.step}:${childIndex}`} step={child} index={childIndex} type={type} />)}</ol></details>}
   </div></li>;
 }
@@ -83,7 +82,6 @@ function BackgroundTaskDetail({task,busy,error,onBack,onDocumentOpen,onImportOpe
       <div className="task-statistics"><span>{taskSummary(task)}</span>{taskDuration(task) && <span>历时 <strong>{taskDuration(task)}</strong></span>}</div>
       <p className="task-note">历时可能包含排队、依赖等待和人工核对，执行耗时见各步骤。</p>
       <ExecutionTiming execution={task.execution} />
-      <ExecutionDetails execution={task.execution} />
       <div className="task-actions">
         {attentionSteps.map(step => {
           const label = step.source?.label || step.title || "来源";
@@ -232,8 +230,7 @@ export function TaskDetail({ taskId, onOpenDraft, onImportOpen, onReady, onBack,
         {currentItem && <p className="task-current" role="status">当前：{currentItem.name || `照片 ${items.indexOf(currentItem) + 1}`} · {taskItemState(currentItem).status}</p>}
         {segmentation && <p className="task-current" role="status" data-task-phase="segment" data-status-kind={segmentation.statusKind}>{segmentation.status}</p>}
         {isSegmenting && task.segmentation?.error && <p className="task-item-error">{task.segmentation.error}</p>}
-        <ExecutionDetails execution={task.segmentation?.execution} label="分句" />
-        {manualStep && <><ExecutionTiming execution={manualStep.execution} /><ExecutionDetails execution={manualStep.execution} label="手动注音" /></>}
+        {manualStep && <ExecutionTiming execution={manualStep.execution} />}
         <div className="task-actions">
           {task.appliedDocumentId && <button className="button primary" type="button" onClick={() => onDocumentOpen?.(task.appliedDocumentId)}>打开文章<Icon name="arrow" size={16} /></button>}
           {canResume && <button className="button primary" type="button" disabled={busy} onClick={() => action(() => post("retry"))}>继续处理</button>}
@@ -249,8 +246,6 @@ export function TaskDetail({ taskId, onOpenDraft, onImportOpen, onReady, onBack,
       <ol className="task-item-list" aria-label="逐图处理状态">{items.map((item, index) => { const manual=manualStep?.id===`manual:${item.id}`; const status = manual ? {status:taskStateLabel(task),statusKind:"working"} : taskItemState(item); return <li key={item.id} data-task-item-id={item.id} data-status-kind={status.statusKind}>
         {item.imageId && <img src={taskImageUrl(item)} alt={`照片 ${index + 1} 原图`} loading="lazy" />}
         <div><span className="task-item-number">照片 {index + 1}</span><h2>{item.name || `来源图 ${index + 1}`}</h2><p className="task-item-status" role="status">{status.status}</p>{item.error && <p className="task-item-error">{manual ? "上次错误：" : ""}{typeof item.error === "string" ? item.error : item.error.message || "此步骤未完成，可重试或手动处理。"}</p>}
-          <ExecutionDetails execution={item.steps?.recognize?.execution} label="OCR" />
-          <ExecutionDetails execution={item.steps?.annotate?.execution} label="注音" />
         </div>
       </li>; })}</ol>
     </>}
