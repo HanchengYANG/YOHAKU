@@ -9,7 +9,7 @@ const hasColumn = (database, table, name) => Boolean(database.prepare("SELECT 1 
 // other text (article_sources.error also stores review reasons). Without the
 // status column the rows cannot be told apart, so the table is left alone.
 function rewriteColumn(database, table, column, only = null) {
-  if (!hasTable(database, table)) return;
+  if (!hasTable(database, table) || !hasColumn(database, table, column)) return;
   if (only && !hasColumn(database, table, only.column)) return;
   const filter = only ? ` AND ${only.column} IN (${only.values.map(() => "?").join(",")})` : "";
   const update = database.prepare(`UPDATE ${table} SET ${column}=? WHERE rowid=?`);

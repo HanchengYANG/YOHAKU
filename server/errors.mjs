@@ -103,20 +103,25 @@ export function createErrorLog(database, {
   // that is stored in the existing error fields. Same rule as HTTP: errors the
   // user can fix keep their own text and are not recorded. Never throws: callers
   // are already handling a failure, so a broken log falls back to the plain text.
+  // Frozen error objects cannot carry the code, so it is also kept here.
+  const captured = new WeakMap();
   function capture(error, meta) {
     const target = error && typeof error === "object" ? error : new Error(String(error));
-    if (!isErrorCode(target.errorCode)) {
-      try {
-        const { record: shouldRecord, action } = classifyError(target);
-        if (!shouldRecord) return String(target.message || GENERIC_FAILURE).slice(0, 1000);
-        target.errorCode = record(target, meta);
-        target.errorAction = action;
-      } catch (cause) {
-        try { log("错误记录写入失败：", redact(target.message || target), redact(cause?.message)); } catch {}
-        return GENERIC_FAILURE;
-      }
+    if (isErrorCode(target.errorCode)) return failureText(target.errorCode, target.errorAction);
+    if (captured.has(target)) { const { code, action } = captured.get(target); return failureText(code, action); }
+    let code, action;
+    try {
+      const classified = classifyError(target);
+      if (!classified.record) return String(target.message || GENERIC_FAILURE).slice(0, 1000);
+      action = classified.action;
+      code = record(target, meta);
+    } catch (cause) {
+      try { log("错误记录写入失败：", redact(target.message || target), redact(cause?.message)); } catch {}
+      return GENERIC_FAILURE;
     }
-    return failureText(target.errorCode, target.errorAction);
+    captured.set(target, { code, action });
+    try { target.errorCode = code; target.errorAction = action; } catch {}
+    return failureText(code, action);
   }
 
   const present = (row) => row ? {
@@ -162,12 +167,16 @@ export function createErrorLog(database, {
 // Codes the client already relies on (session expiry, task and edit conflicts).
 const PUBLIC_CODES = new Set(["WEBSITE_AUTH_REQUIRED", "TASK_VERSION_CONFLICT", "TASK_RESULT_STALE", "TASK_UNAVAILABLE", "SOURCE_EDIT_REVISION_CONFLICT"]);
 const UNAVAILABLE = "服务暂时遇到问题，请稍后再试。";
+const CANCELLED = "请求已取消。";
 
 export function publicErrorBody(error, { errorLog, userId = null, scope = "http", location = null, log = console.error } = {}) {
   const status = Number.isInteger(error?.status) ? error.status : 500;
   const publicCode = PUBLIC_CODES.has(error?.code) ? { code: error.code } : {};
   const { record, action } = classifyError(error);
   let errorCode = isErrorCode(error?.errorCode) ? error.errorCode : null;
+  // A bare AbortError (the request was cancelled) would otherwise go out as a 500 with the browser text.
+  if (!record && !errorCode && error?.name === "AbortError" && !Number.isInteger(error?.status))
+    return { status: 409, body: { error: CANCELLED } };
   if (!record && !errorCode) return { status, body: { ...publicCode, error: String(error?.message || UNAVAILABLE) } };
   if (!errorCode) {
     try { errorCode = errorLog.record(error, { userId, scope, location }); }

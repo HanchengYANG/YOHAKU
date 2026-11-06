@@ -71,6 +71,14 @@ test("HTTP 先记录的错误对象，后台 capture 沿用同一代码", () => 
   assert.equal(errorLog.list().items.length, 1);
 });
 
+test("用户取消的请求（没有状态的 AbortError）返回 409 与白话，不记录", () => {
+  const errorLog = createErrorLog(new DatabaseSync(":memory:"));
+  const { status, body } = publicErrorBody(new DOMException("This operation was aborted", "AbortError"), { errorLog });
+  assert.equal(status, 409);
+  assert.deepEqual(body, { error: "请求已取消。" });
+  assert.equal(errorLog.list().items.length, 0);
+});
+
 test("上传与请求体错误保持原有白话", async (t) => {
   const { body } = await serve(t, () => Object.assign(new Error("too large"), { type: "entity.too.large", status: 413 }));
   assert.deepEqual(body, { error: "提交内容过大，请减少正文长度。" });

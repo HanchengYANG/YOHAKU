@@ -136,6 +136,18 @@ test("记录写入失败时 capture 不抛错，返回不带代码的文案", ()
   assert.doesNotMatch(calls[0], /abc123/);
 });
 
+test("错误对象被冻结时 capture 仍返回带代码的文案，不误报写入失败，也不重复记录", () => {
+  const calls = [], queue = ["AAAAAA", "BBBBBB"];
+  const log = createErrorLog(new DatabaseSync(":memory:"), {
+    now: at("2026-11-06T10:00:00.000Z"), generateCode: () => queue.shift(), log: (...args) => calls.push(args.join(" ")),
+  });
+  const error = Object.freeze(fail(503, "网站 AI 尚未连接", { code: "AI_AUTH_REQUIRED" }));
+  assert.equal(log.capture(error, { scope: "task" }), failureText("AAAAAA", AI_SETTINGS_ACTION));
+  assert.equal(log.capture(error, { scope: "task" }), failureText("AAAAAA", AI_SETTINGS_ACTION));
+  assert.equal(log.list().items.length, 1);
+  assert.deepEqual(calls, []);
+});
+
 test("清理 90 天前的记录", () => {
   let clock = Date.parse("2026-01-01T00:00:00.000Z");
   const database = new DatabaseSync(":memory:");

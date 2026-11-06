@@ -75,6 +75,16 @@ test("缺少的表或状态列直接跳过", () => {
   assert.equal(database.prepare("SELECT error FROM article_sources").get().error, "校正可能删除全部正文");
 });
 
+test("缺少要改写的列时直接跳过", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec(`
+    CREATE TABLE app_settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE article_sources(scope_id TEXT PRIMARY KEY, status TEXT NOT NULL);
+    CREATE TABLE conversations(id TEXT PRIMARY KEY);
+  `);
+  assert.equal(migrateLegacyFailures(database), true);
+});
+
 // The migration runs before image-tasks.mjs adds segmentation_json to older databases.
 test("缺少的 JSON 列直接跳过", () => {
   const database = new DatabaseSync(":memory:");
