@@ -15,6 +15,7 @@ import { createNdlOcr } from './ocr/ndl.mjs';
 import { createErrorLog, errorResponder } from "./errors.mjs";
 import { migrateLegacyFailures } from "./legacy-failures.mjs";
 import { attachErrorRoutes } from "./error-routes.mjs";
+import { attachReadingPositionRoutes, createReadingPositions } from "./reading-positions.mjs";
 import {
   parseText,
   serializeBlocks,
@@ -238,6 +239,7 @@ export function createApp({
     if (!columns.includes(name)) database.exec(`ALTER TABLE documents ADD COLUMN ${name} ${definition}`);
   }
   const errorLog = createErrorLog(database);
+  const readingPositions = createReadingPositions(database);
   const requireDocument = (userId, id) => {
     const row = database
       .prepare("SELECT * FROM documents WHERE id=? AND owner_id=?")
@@ -326,7 +328,7 @@ export function createApp({
   // attachAIRoutes creates app_settings. Migrate before the services below
   // write fresh restart-recovery texts, so those are not mistaken for legacy ones.
   migrateLegacyFailures(database);
-  const books = attachBookRoutes({ app, database, summary, requireDocument,
+  const books = attachBookRoutes({ app, database, summary, readingSummaries, requireDocument,
     beforeDeleteDocument: (userId, id) => {imports.invalidateTarget(userId,{documentId:id});sources.deleteDocument(userId,id);},
     beforeDeleteBook:(userId,id)=>imports.invalidateTarget(userId,{bookId:id}) });
   // Material IDs and legacy book membership are unchanged. Existing photos are
@@ -501,8 +503,9 @@ export function createApp({
     getAppliedDocument: (userId, id) => fromRow(requireDocument(userId, id)), ...imageTaskOptions });
   ai.setImageMutationGuard(imageTasks.assertImageMutable);
 
-  const sources = createSourceService({ database, ai, requireDocument, fromRow, errorLog });
+  const sources = createSourceService({ database, ai, requireDocument, fromRow, errorLog, readingPositions });
   sources.attachRoutes(app);
+  attachReadingPositionRoutes({ app, readingPositions, requireDocument });
   ai.setSourceScopeValidator?.((userId, documentId, selection) => sources.validateSelection?.(userId, documentId, selection) || {});
   ai.setSourceMarksWriter?.((userId, documentId, html) => sources.persistDocumentMarks(userId, documentId, html));
   ai.setManagedDocument?.((userId, documentId) => sources.hasDocument(userId, documentId));
@@ -549,6 +552,16 @@ export function createApp({
     });
   });
 
+  // Reading progress for summaries: the saved page plus how many reading pages
+  // the article has so far (0 for articles outside the source workflow).
+  function readingSummaries(userId) {
+    const counts = sources.pageCounts(userId);
+    const summaries = new Map();
+    for (const [documentId, position] of readingPositions.forUser(userId))
+      summaries.set(documentId, { ...position, pageCount: counts.get(documentId) || 0 });
+    return summaries;
+  }
+
   app.get("/api/documents", (req, res) => {
     const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
     if (query.length > 200) throw new HttpError(400, "搜索词最多 200 个字符。");
@@ -570,7 +583,8 @@ export function createApp({
         )
         .all(req.user.id, includeBookArticles ? 1 : 0);
     }
-    res.json({ documents: rows.map(summary) });
+    const reading = readingSummaries(req.user.id);
+    res.json({ documents: rows.map((row) => ({ ...summary(row), readingPosition: reading.get(row.id) || null })) });
   });
 
   app.post("/api/documents", async (req, res) => {
@@ -701,6 +715,7 @@ export function createApp({
     imports,
     tasks,
     sources,
+    readingPositions,
     errorLog,
     close,
     shutdown,

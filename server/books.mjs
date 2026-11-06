@@ -14,7 +14,7 @@ function revisionInput(value) {
   return value;
 }
 
-export function attachBookRoutes({ app, database, summary, requireDocument, beforeDeleteDocument = () => {}, beforeDeleteBook = () => {} }) {
+export function attachBookRoutes({ app, database, summary, readingSummaries = () => new Map(), requireDocument, beforeDeleteDocument = () => {}, beforeDeleteBook = () => {} }) {
   database.exec(`
     CREATE TABLE IF NOT EXISTS books (
       id TEXT PRIMARY KEY,
@@ -52,8 +52,13 @@ export function attachBookRoutes({ app, database, summary, requireDocument, befo
     "SELECT * FROM documents WHERE book_id=? AND owner_id=? ORDER BY page_position ASC,id ASC",
   ).all(book.id, book.owner_id);
 
-  function present(book, includePages = false) {
-    const summaries = pages(book).map(summary);
+  function present(book, includePages = false, reading = readingSummaries(book.owner_id)) {
+    const summaries = pages(book).map((row) => ({ ...summary(row), readingPosition: reading.get(row.id) || null }));
+    // A book was last opened when any of its articles was.
+    const lastOpenedAt = summaries.reduce((latest, page) => {
+      const openedAt = page.readingPosition?.updatedAt;
+      return openedAt && (!latest || openedAt > latest) ? openedAt : latest;
+    }, null);
     return {
       id: book.id, title: book.title, revision: book.revision,
       createdAt: book.created_at, updatedAt: book.updated_at,
@@ -62,6 +67,7 @@ export function attachBookRoutes({ app, database, summary, requireDocument, befo
       charCount: summaries.reduce((count, page) => count + page.charCount, 0),
       rubyCount: summaries.reduce((count, page) => count + page.rubyCount, 0),
       preview: summaries.find((page) => page.preview)?.preview || "",
+      lastOpenedAt,
       ...(includePages ? { pages: summaries, articles: summaries } : {}),
     };
   }
@@ -91,7 +97,8 @@ export function attachBookRoutes({ app, database, summary, requireDocument, befo
     `).all(req.user.id, pattern, pattern, pattern) : database.prepare(
       "SELECT * FROM books WHERE owner_id=? ORDER BY updated_at DESC,id ASC",
     ).all(req.user.id);
-    res.json({ books: books.map((book) => present(book)) });
+    const reading = readingSummaries(req.user.id);
+    res.json({ books: books.map((book) => present(book, false, reading)) });
   });
 
   app.get("/api/books/:id", (req, res) => res.json(present(requireBook(req.user.id, req.params.id), true)));

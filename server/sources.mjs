@@ -8,6 +8,7 @@ import { executionUsage } from './ai/execution-usage.mjs';
 import { mergeReadings } from './source-merge.mjs';
 import { createSourceTaskAdapter } from './source-task-adapter.mjs';
 import { createErrorLog } from './errors.mjs';
+import { createReadingPositions } from './reading-positions.mjs';
 
 const fail=(status,message)=>Object.assign(new Error(message),{status,expose:true});
 const json=value=>JSON.stringify(value);
@@ -34,7 +35,7 @@ function consecutivePdfPages(previous,current){
     decode(previous.range_json)?.end===undefined&&(decode(current.range_json)?.start??0)===0;
 }
 
-export function createSourceService({database,ai={},requireDocument,fromRow,now=()=>Date.now(),sessionTtlMs=45000,errorLog=createErrorLog(database)}={}) {
+export function createSourceService({database,ai={},requireDocument,fromRow,now=()=>Date.now(),sessionTtlMs=45000,errorLog=createErrorLog(database),readingPositions=createReadingPositions(database)}={}) {
   const failure=(error,row,step)=>errorLog.capture(error,{userId:row.user_id,scope:'source',location:`source:${step}`,context:{documentId:row.document_id,sourceId:row.source_id}});
   // Read operations are synchronous: reuse their immutable database snapshot,
   // then discard it before any provider callback or later mutation can run.
@@ -62,7 +63,6 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     CREATE INDEX IF NOT EXISTS source_attempts_scope ON source_step_attempts(scope_id,input_version,updated_at);
     CREATE TABLE IF NOT EXISTS source_annotations(scope_id TEXT NOT NULL,version INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,execution_json TEXT,created_at TEXT NOT NULL,PRIMARY KEY(scope_id,version,start,end));
     CREATE TABLE IF NOT EXISTS reading_pages(id TEXT PRIMARY KEY,document_id TEXT NOT NULL,user_id TEXT NOT NULL,position INTEGER NOT NULL,ranges_json TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(document_id,position));
-    CREATE TABLE IF NOT EXISTS reading_positions(user_id TEXT NOT NULL,document_id TEXT NOT NULL,page_id TEXT,page_index INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,document_id));
     CREATE TABLE IF NOT EXISTS reading_sessions(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,document_id TEXT NOT NULL,mode TEXT NOT NULL,source_id TEXT,page_index INTEGER NOT NULL,active INTEGER NOT NULL,expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS source_preparation_requests(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,document_id TEXT NOT NULL,generation INTEGER NOT NULL,version INTEGER NOT NULL DEFAULT 1,signature TEXT,deleted_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS source_request_document ON source_preparation_requests(user_id,document_id,generation);
@@ -819,7 +819,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
       database.prepare('UPDATE article_sources SET edit_expires=? WHERE edit_session=? AND user_id=? AND document_id=?').run(now()+sessionTtlMs,sessionId,userId,id);
     }
     const snapshot=readingPages(userId,id,index);
-    if(active&&mode==='reading')database.prepare('INSERT INTO reading_positions VALUES(?,?,?,?) ON CONFLICT(user_id,document_id) DO UPDATE SET page_id=excluded.page_id,page_index=excluded.page_index').run(userId,id,snapshot.currentPage?.id||null,snapshot.index);
+    if(active&&mode==='reading')readingPositions.save(userId,id,{pageIndex:snapshot.index,pageId:snapshot.currentPage?.id||null});
     schedule();return {sessionId,...snapshot};
   }
   function prepareSource(userId,id,sourceId,input={}) {
@@ -1284,9 +1284,12 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     const rows=scopes(userId,id);
     for(const row of rows)for(const table of ['source_fragments','source_revisions','source_steps','source_step_attempts','source_annotations'])database.prepare(`DELETE FROM ${table} WHERE scope_id=?`).run(row.scope_id);
     database.prepare('DELETE FROM article_sources WHERE user_id=? AND document_id=?').run(userId,id);
-    for(const table of ['reading_pages','reading_positions','reading_sessions','source_preparation_jobs'])database.prepare(`DELETE FROM ${table} WHERE user_id=? AND document_id=?`).run(userId,id);
+    for(const table of ['reading_pages','reading_sessions','source_preparation_jobs'])database.prepare(`DELETE FROM ${table} WHERE user_id=? AND document_id=?`).run(userId,id);
+    readingPositions.remove(userId,id);
     abortRetiredWork(retired,()=>fail(410,'文章已删除。'));
   }
+  // Reading pages published so far per article; summaries show 第 N / M 页.
+  function pageCounts(userId){return new Map(database.prepare('SELECT document_id,COUNT(*) AS count FROM reading_pages WHERE user_id=? GROUP BY document_id').all(userId).map(row=>[row.document_id,row.count]));}
   function attachRoutes(app) {
     const base='/api/documents/:id';
     app.get(`${base}/sources`,(req,res)=>{adoptDocument(req.user.id,req.params.id);res.json({sources:listSources(req.user.id,req.params.id)});});
@@ -1305,5 +1308,5 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
   function close(){if(closed)return;stop();closed=true;}
   const taskAdapter=createSourceTaskAdapter({database,scopes,readHtml,body,sourceIdentity,working,latestRequest,ensureRequest,schedule,stamp,retryFailedSteps,requestTargets:request=>requestTargets(request,true),targetsReady,hasRunnableDemand:(userId,documentId)=>!!demand({userId,documentId}),withReadScope});
   schedule();
-  return {taskAdapter,retryFailedSteps,attachRoutes,adoptDocument,createArticleSources,hydrateDocument,readArticle,hasDocument,listSources,getSource,saveSource,markChecked,beginEdit,endEdit,prepareSource,readingPages,heartbeat,reorderSources,validateSelection,persistDocumentMarks,deleteDocument,stop,close,drain};
+  return {taskAdapter,retryFailedSteps,attachRoutes,adoptDocument,createArticleSources,hydrateDocument,readArticle,hasDocument,listSources,getSource,saveSource,markChecked,beginEdit,endEdit,prepareSource,readingPages,heartbeat,reorderSources,validateSelection,persistDocumentMarks,deleteDocument,pageCounts,stop,close,drain};
 }
