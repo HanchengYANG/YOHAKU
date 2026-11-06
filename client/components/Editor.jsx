@@ -728,7 +728,6 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
                   </button>
                 )}
                 {annotating && <p role="status">正在按正文语境生成缺失注音，正文和已有读音保持不变。</p>}
-                {value.annotation?.model && <p>注音来源：{(value.annotation.providerId || value.annotation.execution?.providerId) === "api_base" ? "iliad codix" : "OpenAI"} · {value.annotation.model}{value.annotation.imageReference ? " · 已参考原图" : " · 文字语境"}</p>}
                 {annotationStartedAt !== null && (annotating || annotationError) && (
                   <ImportProgress phase="annotate" startedAt={annotationStartedAt}
                     steps={annotationSteps} failed={!annotating && !!annotationError} />

@@ -59,7 +59,7 @@ test("纯文字文章生成注音先进入编辑器核对，保存前不写入�
     expect(annotated.annotation.readingPolicy).toBe("text_context");
     await expect(page.getByRole("button", { name:"保存并阅读", exact:true })).toBeEnabled();
     await expect(input).toHaveValue(original);
-    await expect(page.getByText(/注音来源：OpenAI/)).toBeVisible();
+    await expect(page.getByText(/注音来源/)).toHaveCount(0);
     const beforeSave = await (await page.request.get(`/api/documents/${document.id}`)).json();
     expect(beforeSave.revision).toBe(document.revision);
     expect(beforeSave.bodyHtml).toBe(document.bodyHtml);
