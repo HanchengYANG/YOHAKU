@@ -15,6 +15,9 @@ import AISettings from "./components/AISettings.jsx";
 import RoleSettings from "./components/RoleSettings.jsx";
 import ImageImport from "./components/ImageImport.jsx";
 import { TaskList, TaskDetail } from "./components/ImageTasks.jsx";
+import ErrorLog from "./components/ErrorLog.jsx";
+import { OPEN_PANEL_EVENT } from "./components/ErrorNotice.mjs";
+import { UserContext } from "./user-context.mjs";
 import { imageTasksChangedEvent, notifyImageTasksChanged } from "./image-tasks.mjs";
 import DocumentChat from "./components/DocumentChat.jsx";
 import { createChatSession } from "./chat-history.mjs";
@@ -64,14 +67,16 @@ export default function App() {
       />
     );
   else content = (
-    <Workspace
-      key={session.user.id}
-      user={session.user}
-      onLoggedOut={() => {
-        history.replaceState(null, "", window.location.pathname);
-        setSession({ user: null, needsSetup: false });
-      }}
-    />
+    <UserContext.Provider value={session.user}>
+      <Workspace
+        key={session.user.id}
+        user={session.user}
+        onLoggedOut={() => {
+          history.replaceState(null, "", window.location.pathname);
+          setSession({ user: null, needsSetup: false });
+        }}
+      />
+    </UserContext.Provider>
   );
   return <><PWAManager session={session} />{content}</>;
 }
@@ -410,7 +415,7 @@ function Workspace({ user, onLoggedOut }) {
     }
   };
   const openPanel = (name) => {
-    if (["settings", "roles"].includes(name) && !user.isAdmin) return;
+    if (["settings", "roles", "errors"].includes(name) && !user.isAdmin) return;
     if (!mayLeave()) return;
     if (name === "chat" && panel !== "chat") rememberReadingPosition();
     importRequest.current++;
@@ -429,6 +434,11 @@ function Workspace({ user, onLoggedOut }) {
     setPromotion(null);
     setAppendTargetId(null);
   };
+  useEffect(() => {
+    const open = (event) => openPanel(event.detail);
+    window.addEventListener(OPEN_PANEL_EVENT, open);
+    return () => window.removeEventListener(OPEN_PANEL_EVENT, open);
+  });
   const openUnifiedImport = (text = false) => {
     openPanel("import"); setImportText(text);
   };
@@ -904,6 +914,13 @@ function Workspace({ user, onLoggedOut }) {
                 <span className="ai-dot" aria-hidden="true" />
                 角色配置
               </button>
+              <button
+                className={`text-button sidebar-settings-button ${panel === "errors" ? "active" : ""}`}
+                type="button" disabled={saving} onClick={() => openPanel("errors")}
+              >
+                <span className="ai-dot" aria-hidden="true" />
+                错误记录
+              </button>
             </div>
           )}
           <UserMenu
@@ -958,6 +975,8 @@ function Workspace({ user, onLoggedOut }) {
           <AISettings onClose={closePanel} />
         ) : panel === "roles" && user.isAdmin ? (
           <RoleSettings onClose={closePanel} />
+        ) : panel === "errors" && user.isAdmin ? (
+          <ErrorLog onClose={closePanel} />
         ) : panel === "import" ? (
           <UnifiedImport key={importSession} initialText={importText} initialBookId={importBookId} initialTargetId={appendTargetId} initialImportId={importDraftId}
             onCancel={closePanel} onDirty={setDirty} onImported={imported} />
