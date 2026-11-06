@@ -856,3 +856,26 @@
   .ai-role-advanced { grid-column: 1 / -1; }
   .ai-role-reasoning-fields { grid-template-columns: repeat(auto-fit, minmax(125px, 1fr)); }
 }
+.error-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--rust) 30%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--rust) 7%, var(--paper));
+  color: var(--rust-dark);
+  font-size: 13px;
+}
+.error-notice-code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-decoration: underline dotted;
+  cursor: copy;
+}
+.error-notice-action { color: var(--green); }
