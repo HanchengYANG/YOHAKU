@@ -9,6 +9,7 @@ import ReadingPreparation from "./components/ReadingPreparation.jsx";
 import PagedReader from "./components/PagedReader.jsx";
 import SourceCorrection from "./components/SourceCorrection.jsx";
 import UnifiedImport from "./components/UnifiedImport.jsx";
+import PhotoImport from "./components/PhotoImport.jsx";
 import Editor from "./components/Editor.jsx";
 import AISettings from "./components/AISettings.jsx";
 import RoleSettings from "./components/RoleSettings.jsx";
@@ -144,6 +145,7 @@ function Workspace({ user, onLoggedOut }) {
   const [notice, setNotice] = useState("");
   const [taskCounts, setTaskCounts] = useState({});
   const [importDraftId,setImportDraftId]=useState(null);
+  const [photoImport, setPhotoImport] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem("yohaku.sidebarCollapsed") === "1"; }
@@ -188,7 +190,7 @@ function Workspace({ user, onLoggedOut }) {
   // The main view chain below falls through to Welcome exactly when this holds.
   // Welcome shows shelf load failures itself; the banner would repeat them there.
   const showsWelcome = !activeId && !draft
-    && !["newBook", "import", "image"].includes(panel)
+    && !["newBook", "import", "image", "photo"].includes(panel)
     && !(user.isAdmin && ["settings", "roles", "errors"].includes(panel))
     && !(panel === "correction" && currentReadingDocument);
   const rememberReadingPosition = () => {
@@ -440,9 +442,10 @@ function Workspace({ user, onLoggedOut }) {
       setError("");
     }
   };
-  const openPanel = (name) => {
-    if (["settings", "roles", "errors"].includes(name) && !user.isAdmin) return;
-    if (!mayLeave()) return;
+  // Returns whether the panel opened (the reader may keep unsaved changes).
+  const openPanel = (name, { handover = false } = {}) => {
+    if (["settings", "roles", "errors"].includes(name) && !user.isAdmin) return false;
+    if (!handover && !mayLeave()) return false;
     if (name === "chat" && panel !== "chat") rememberReadingPosition();
     importRequest.current++;
     if (name === "image" || name === "import") {
@@ -459,6 +462,7 @@ function Workspace({ user, onLoggedOut }) {
     setImportBookId(null);
     setPromotion(null);
     setAppendTargetId(null);
+    return true;
   };
   useEffect(() => {
     const open = (event) => openPanel(event.detail);
@@ -468,11 +472,18 @@ function Workspace({ user, onLoggedOut }) {
   const openUnifiedImport = (text = false) => {
     openPanel("import"); setImportText(text);
   };
+  // Photos go to the photo page: from the home camera button, from pictures
+  // chosen on the add page, or when an unfinished photo draft is continued.
+  // From the add page the pictures are handed over, not left behind.
+  const openPhotoImport = (files, importId = null, handover = false) => {
+    if (openPanel("photo", { handover })) setPhotoImport({ key: crypto.randomUUID(), files, importId });
+  };
   const resumeImportDraft = async (task) => {
     const request=++importRequest.current,view=currentView.current.activeId;
     const next=await api(`/imports/${encodeURIComponent(task.importId)}`);
     if(!mounted.current || request!==importRequest.current || currentView.current.activeId!==view)return;
     if (!mayLeave()) return;
+    if (["photo","screenshot"].includes(next.detectedType)) { openPhotoImport(null, next.id); return; }
     openPanel("import");setImportDraftId(next.id);setImportBookId(next.context?.bookId || null);setAppendTargetId(next.context?.targetId || null);
   };
   const imported = (result) => {
@@ -861,9 +872,13 @@ function Workspace({ user, onLoggedOut }) {
           <RoleSettings onClose={closePanel} />
         ) : panel === "errors" && user.isAdmin ? (
           <ErrorLog onClose={closePanel} />
+        ) : panel === "photo" && photoImport ? (
+          <PhotoImport key={photoImport.key} books={books} initialFiles={photoImport.files} initialImportId={photoImport.importId}
+            onCancel={closePanel} onDirty={setDirty} onCreated={() => setRefresh((n) => n + 1)}
+            onOpenDocument={(id) => { setDirty(false); setPanel(null); openDocument(id); }} />
         ) : panel === "import" ? (
           <UnifiedImport key={importSession} initialText={importText} initialBookId={importBookId} initialTargetId={appendTargetId} initialImportId={importDraftId}
-            onCancel={closePanel} onDirty={setDirty} onImported={imported} />
+            onCancel={closePanel} onDirty={setDirty} onImported={imported} onPhotos={(files, importId) => openPhotoImport(files, importId, true)} />
         ) : panel === "correction" && currentReadingDocument ? (
           <SourceCorrection key={currentReadingDocument.id} document={currentReadingDocument} sourceIds={correctionTarget.sourceIds} reviewSourceId={correctionTarget.reviewSourceId}
             chatSession={chatSessionFor(currentReadingDocument.id)} onDirty={setDirty} onDocumentChanged={refreshCurrentDocument}
@@ -1013,7 +1028,7 @@ function Workspace({ user, onLoggedOut }) {
             onOpenBook={openBook}
             onOpenDocument={openDocument}
             onOpenTasks={() => openDocument("tasks")}
-            onAddPhoto={() => openUnifiedImport()}
+            onAddPhoto={(files) => openPhotoImport(files)}
           />
         )}
       </main>

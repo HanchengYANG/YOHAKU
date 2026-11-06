@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import api, { apiFetch, readApiResult } from "../api.mjs";
 import { taskDisplayName } from "../image-tasks.mjs";
 import { moveChapter, mergeChapter, splitChapter } from "../source-presentation.mjs";
+import ErrorNotice from "./ErrorNotice.mjs";
 import "../sources.css";
 
 const typeNames = { photo:"照片", screenshot:"截图", scan_pdf:"扫描 PDF", text_pdf:"文字 PDF", epub:"EPUB", text:"纯文本／粘贴文字" };
 const draftReference = ({createdAt,taskId}) => taskDisplayName({createdAt,id:taskId});
+const isImageType = (type) => type === "photo" || type === "screenshot";
 const isImageFile = (file) => /^image\/(?:png|jpeg|webp)$/i.test(file.type) || /\.(?:png|jpe?g|webp)$/i.test(file.name);
 const defaultDraftType = (draft) => draft.chapterProcessing?.type ||
   (draft.allowedTypes?.includes(draft.suggestedType) ? draft.suggestedType : draft.detectedType);
@@ -38,7 +40,7 @@ function ChapterPagePreview({ importId, file, chapter, nextChapter, index, total
     </section>}
   </details>;
 }
-export default function UnifiedImport({ onCancel, onImported, onDirty, initialBookId, initialTargetId, initialImportId, initialText = false }) {
+export default function UnifiedImport({ onCancel, onImported, onDirty, onPhotos, initialBookId, initialTargetId, initialImportId, initialText = false }) {
   const [text, setText] = useState("");
   const [title, setTitle] = useState("");
   const [files, setFiles] = useState([]);
@@ -89,6 +91,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
         const result = await api(`/imports/${encodeURIComponent(saved.id)}`,{signal:controller.signal});
         if (stopped) return;
         if (result.status !== "staged") {forgetDraft();await listDrafts();return;}
+        if (isImageType(result.detectedType) && onPhotos) {forgetDraft();onPhotos(null,result.id);return;}
         const restoredType = saved.type || defaultDraftType(result);
         const status = result.chapterProcessing?.status || null;
         const reuseEdits = !["queued","extracting","proposing"].includes(status) && status === saved.chapterProcessingStatus;
@@ -148,6 +151,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
     try {
       const result = await api(`/imports/${encodeURIComponent(id)}`);
       if (result.status !== "staged" || !matchesContext(result)) throw new Error("此导入已完成或不属于当前导入位置，请重新选择。");
+      if (isImageType(result.detectedType) && onPhotos) {onPhotos(null,result.id);return;}
       const restoredType = defaultDraftType(result);
       setDraft(result);setType(restoredType);setTitle(result.title || "");
       setAsBook(!!result.chapterAttempted && restoredType?.includes("pdf"));
@@ -164,6 +168,8 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
   const imageBatch = files.every(({file}) => isImageFile(file));
   const selectFiles = (selected, fromClipboard = false) => {
     if (busy || !selected.length) return;
+    // Pictures go to the photo page, which uploads them one by one.
+    if (onPhotos && !files.length && selected.every(isImageFile)) {onPhotos(selected);return;}
     const append = imageBatch && selected.every(isImageFile);
     if (fromClipboard && files.length && !append) {
       setError("图片和其他文件请分开导入。可移除已选文件，或从设备重新选择。");
@@ -228,10 +234,10 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
   const editChapterStructure = (next) => { if (next !== chapters) {setChapters(next);dirty();} };
   const currentDraftReference = draft && draftReference(draft);
   return <section className="unified-import editor-page" aria-label="统一导入">
-    <div className="source-heading"><div><span className="eyebrow">统一导入</span><h1>添加阅读资料</h1></div>
+    <div className="source-heading"><h1>添加</h1>
       <button className="button subtle" disabled={busy} onClick={onCancel}>返回</button></div>
-    <p>照片、截图、PDF、EPUB 和文字会保留原始来源，按阅读进度准备正文。</p>
-    {(error || processing?.error || draft?.chapterError) && <p className="source-error" role="alert">{error || processing?.error || draft.chapterError}</p>}
+    {!draft && <p>拖入或选择照片、PDF、EPUB、文本文件，也可以粘贴文字。</p>}
+    {(error || processing?.error || draft?.chapterError) && <ErrorNotice error={error || processing?.error || draft.chapterError} />}
     {restoring ? <p role="status">正在恢复导入草稿…</p> : !draft ? <>
       {!!availableDrafts.length && <section aria-label="继续未完成的导入"><h2>继续未完成的导入</h2>
         {availableDrafts.map((item) => {
@@ -246,20 +252,20 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
         })}
       </section>}
       <div className="source-tabs" role="tablist" aria-label="导入方式">
-        <button role="tab" aria-selected={mode === "files"} className="button secondary" disabled={busy} onClick={() => setMode("files")}>上传或粘贴文件</button>
+        <button role="tab" aria-selected={mode === "files"} className="button secondary" disabled={busy} onClick={() => setMode("files")}>文件</button>
         <button role="tab" aria-selected={mode === "text"} className="button secondary" disabled={busy} onClick={() => setMode("text")}>粘贴文字</button>
       </div>
-      <label className="source-field">资料标题<input value={title} disabled={busy} maxLength={160} onChange={(e) => {setTitle(e.target.value);dirty();}} /></label>
+      <label className="source-field">标题<input value={title} disabled={busy} maxLength={160} placeholder="可留空，默认用文件名" onChange={(e) => {setTitle(e.target.value);dirty();}} /></label>
       {mode === "text" ? <label className="source-field">原文<textarea aria-label="导入原文" rows={14} disabled={busy} value={text} onChange={(e) => {setText(e.target.value);dirty();}} /></label>
         : <div className="source-file-drop" tabIndex={0} aria-label="上传或粘贴来源文件" onPaste={(event) => {
           const selected = [...event.clipboardData.files];
           if (selected.length) {event.preventDefault();selectFiles(selected,true);}
-        }}>
-          <div className="source-field"><span>选择文件（一次仅支持同一类型）</span><div><button type="button" className="button secondary" disabled={busy} onClick={() => fileInput.current?.click()}>从设备选择文件</button></div></div>
+        }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => {event.preventDefault();selectFiles([...event.dataTransfer.files]);}}>
+          <div className="source-field"><span>拖到这里，或</span><div><button type="button" className="button secondary" disabled={busy} onClick={() => fileInput.current?.click()}>选择文件</button></div></div>
           <input ref={fileInput} hidden aria-label="选择来源文件" type="file" disabled={busy} multiple
             accept="image/png,image/jpeg,image/webp,application/pdf,application/epub+zip,text/plain,.txt,.epub,.pdf"
             onChange={(e) => {const selected = [...e.currentTarget.files];e.currentTarget.value = "";selectFiles(selected);}} />
-          <p>可分次选择或粘贴图片，按列表顺序阅读。选择其他文件会替换当前列表。</p>
+          <p>一次导入同一类型的文件。</p>
           {files.length > 0 && <ol className="source-file-list" aria-label="已选文件顺序">
             {files.map(({id,file},index) => <li key={id}><div className="source-file-row">
               <span className="source-file-name">{file.name}</span>
@@ -273,27 +279,25 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
             </div></li>)}
           </ol>}
         </div>}
-      <button className="button primary" disabled={busy || (mode === "text" ? !text.trim() : !files.length)} onClick={stage}>{busy ? "正在保存原始资料…" : "继续确认类型"}</button>
+      <button className="button primary" disabled={busy || (mode === "text" ? !text.trim() : !files.length)} onClick={stage}>{busy ? "正在上传…" : "继续"}</button>
     </> : <>
       {currentDraftReference && <div className="source-scope-note">当前草稿 · {currentDraftReference}</div>}
-      <div className="source-import-confirm"><label className="source-field">资料标题<input required value={title} disabled={structureLocked} maxLength={160} onChange={(e) => {setTitle(e.target.value);dirty();}} /></label>
-        <label className="source-field">确认来源类型<select aria-label="确认来源类型" value={type} disabled={structureLocked} onChange={(e) => {setType(e.target.value);setChapters([]);setExclusions([]);if(["photo","screenshot"].includes(e.target.value))setAsBook(false);dirty();}}>
-          {(draft.allowedTypes || Object.keys(typeNames)).map((value) => <option key={value} value={value}>{typeNames[value] || value}</option>)}</select></label>
+      <div className="source-import-confirm"><label className="source-field">标题<input required value={title} disabled={structureLocked} maxLength={160} onChange={(e) => {setTitle(e.target.value);dirty();}} /></label>
+        {(draft.allowedTypes || []).length > 1 && <label className="source-field">文件类型<select aria-label="确认来源类型" value={type} disabled={structureLocked} onChange={(e) => {setType(e.target.value);setChapters([]);setExclusions([]);if(["photo","screenshot"].includes(e.target.value))setAsBook(false);dirty();}}>
+          {draft.allowedTypes.map((value) => <option key={value} value={value}>{typeNames[value] || value}</option>)}</select></label>}
         {!initialBookId && !initialTargetId && !["photo","screenshot"].includes(type) && <label className="source-checkbox"><input type="checkbox" checked={asBook} disabled={structureLocked} onChange={(e) => {setAsBook(e.target.checked);dirty();}} />作为书籍导入</label>}
       </div>
-      <p>{draft.suggestedType ? `相同图片上次确认为${typeNames[draft.suggestedType]}，可在此更改。` : `本地判断为${typeNames[draft.detectedType] || draft.detectedType}。`}
-        {asBook && type.includes("pdf") ? "分章阶段提取全书原始文字，确认章节后再准备阅读正文。" : "确认后才开始准备正文。"}{["photo","screenshot"].includes(type) ? "本次图片将按顺序组成一篇文章。" : ""}</p>
+      {(draft.allowedTypes || []).length > 1 && <p>扫描件选「扫描 PDF」，能直接选中文字的选「文字 PDF」。</p>}
       {asBook && type.includes("pdf") && <div className="source-chapters">
-        <h2>确认章节与正文范围</h2><p>范围使用 PDF 实际页码。可排除封面、目录等内容；待核对边界请对照原页确认。</p>
+        <h2>章节</h2>
         {draft.files?.[0] && <a className="text-button" target="_blank" rel="noreferrer" href={`/api/imports/${draft.id}/files/${draft.files[0].id}/raw`}>查看原 PDF</a>}
-        <p>{type === "scan_pdf" ? "点击「AI 提议章节」后，先对全书进行本地 OCR，再将提取的文字发送给「分章」角色配置的模型。" : "点击「AI 提议章节」后，先在本地提取全书文字，再发送给「分章」角色配置的模型。"}模型会提议章节并标记无关内容。</p>
         {processing && <section aria-label="PDF 分章进度" aria-live="polite" aria-busy={chapterRunning}>
           <p>{type === "scan_pdf" ? "全书本地 OCR" : "全书文字提取"}：{processing.completedPages ?? 0} / {processing.totalPages || "待确定"} 页</p>
           {processing.status === "extracting" && <progress aria-label="全书文字提取页数" value={processing.completedPages || 0} max={Math.max(1,processing.totalPages || 1)} />}
-          <p>{({queued:"资源排队中，等待开始提取和分章。",extracting:"正在提取原始文字，完成全书后开始 AI 分章。",proposing:"全书文字已提取，正在由 AI 分章并识别无关内容。",failed:"分章未完成，可重试或手工添加章节。",timeout:"分章执行超时，可重试或手工添加章节。",done:"章节与建议排除的内容已准备，请确认。"})[processing.status]}</p>
-          {chapterRunning && <p>可以返回其他页面，全书提取和分章会继续在后台进行。</p>}
+          <p>{({queued:"排队中",extracting:"正在提取文字",proposing:"AI 正在分章",failed:"分章未完成",timeout:"分章超时",done:"请确认章节"})[processing.status]}</p>
+          {chapterRunning && <p>可以离开此页，会在后台继续。</p>}
         </section>}
-        {chapterFailed && !chapters.length && <p>AI 尚未给出可用建议。可重试，或对照原 PDF 手动添加章节后确认。</p>}
+        {chapterFailed && !chapters.length && <p>可重试，或手动添加章节。</p>}
         <button type="button" className="button secondary" disabled={structureLocked} onClick={propose}>{chapterRunning ? "正在分章…" : busy ? "正在提议章节…" : chapters.length ? "重新提议章节" : "AI 提议章节"}</button>
         {chapters.map((chapter,index) => <div key={chapter.id || index} className={`source-chapter ${chapter.excluded ? "excluded" : ""}`}>
           <label className="source-checkbox"><input type="checkbox" checked={!chapter.excluded} disabled={structureLocked} onChange={(e) => updateChapter(index,{excluded:!e.target.checked})} />纳入正文</label>

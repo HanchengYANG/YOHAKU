@@ -14,15 +14,16 @@ import { attachTaskRoutes } from '../server/tasks.mjs';
 import { execFileSync } from 'node:child_process';
 import { createErrorLog, errorResponder } from '../server/errors.mjs';
 import { failureText } from '../shared/error-codes.mjs';
+import sharp from 'sharp';
 
 async function fixture(t,{proposal,extractChapterPage,renderSourcePreview,inspectFile,errorLog}={}) {
   const storageDir=await mkdtemp(join(tmpdir(),'yohaku-import-test-'));
   const database=new DatabaseSync(':memory:');
   database.exec('CREATE TABLE books(id TEXT PRIMARY KEY,title TEXT,owner_id TEXT,revision INTEGER,created_at TEXT,updated_at TEXT)');
   const app=express();app.use(express.json());app.use((req,_res,next)=>{req.user={id:req.headers['x-user']||'one'};next();});
-  const attached=[],articles=[],proposals=[],extractions=[],extractionTypes=[];let createCalls=0;
-  const sources={adoptDocument(){},createArticleSources(userId,id,values){attached.push({userId,id,values});return {...articles.find(article=>article.id===id),sources:values};}};
-  const ai={async proposeChapters(_user,input){proposals.push(input);return proposal?proposal(input):{chapters:[{title:'正文',startPage:1,endPage:input.metadata.pageCount,needsReview:true}]};},async saveImage(){return{id:'image-1'};}};
+  const attached=[],articles=[],proposals=[],extractions=[],extractionTypes=[],preparations=[];let createCalls=0,savedImages=0;
+  const sources={adoptDocument(){},createArticleSources(userId,id,values){attached.push({userId,id,values});return {...articles.find(article=>article.id===id),sources:values};},requestPreparation(userId,id,mode,index){preparations.push({userId,id,mode,index});}};
+  const ai={async proposeChapters(_user,input){proposals.push(input);return proposal?proposal(input):{chapters:[{title:'正文',startPage:1,endPage:input.metadata.pageCount,needsReview:true}]};},async saveImage(){return{id:`image-${++savedImages}`};}};
   const books={transaction:work=>work(),requireBook(_user,id){return database.prepare('SELECT * FROM books WHERE id=?').get(id);}};
   const imports=attachImportRoutes({app,database,storageDir,ai,sources,books,renderSourcePreview,inspectFile,errorLog,extractChapterPage:async source=>{extractions.push(source.original.page);extractionTypes.push(source.type);return extractChapterPage?extractChapterPage(source):{text:`第${source.original.page}页正文。\n页脚`};},createImportedArticle(userId,value){createCalls++;const row={id:`article-${createCalls}`,...value};articles.push(row);return row;},requireDocument(_user,id){const row=articles.find(article=>article.id===id);if(!row)throw Object.assign(new Error('missing'),{status:404});return row;}});
   attachTaskRoutes({app,database,adapters:[imports.taskAdapter]});
@@ -34,7 +35,7 @@ async function fixture(t,{proposal,extractChapterPage,renderSourcePreview,inspec
     return {status:response.status,headers:response.headers,data:response.headers.get('content-type')?.includes('application/json')?await response.json():response.headers.get('content-type')?.startsWith('image/')?Buffer.from(await response.arrayBuffer()):await response.text()};
   }
   async function waitChapters(path){for(let count=0;count<500;count++){const result=await request(path);if(!['queued','extracting','proposing'].includes(result.data.chapterProcessing?.status))return result;await new Promise(resolve=>setTimeout(resolve,5));}throw new Error('chapter preparation did not finish');}
-  return {storageDir,request,waitChapters,attached,articles,proposals,extractions,extractionTypes,database,stopImportsAndDatabase(){imports.close();database.close();},drainImports:()=>imports.drain(),get bookCount(){return database.prepare('SELECT count(*) AS count FROM books').get().count;},get createCalls(){return createCalls;}};
+  return {storageDir,request,waitChapters,attached,articles,proposals,extractions,extractionTypes,preparations,database,stopImportsAndDatabase(){imports.close();database.close();},drainImports:()=>imports.drain(),get bookCount(){return database.prepare('SELECT count(*) AS count FROM books').get().count;},get createCalls(){return createCalls;}};
 }
 
 test('pasted import confirms locally, snapshots original, and attaches paragraph groups without AI',async(t)=>{
@@ -471,4 +472,75 @@ test('PDF chapter extraction progress stays page-based and reports partial OCR c
   const review=(await f.request(`/api/tasks/${staged.data.id}`)).data;assert.equal(review.status,'requires_review');assert.deepEqual(review.progress,{completed:3,total:3,unit:'page'});assert.equal(review.archived,false);
   assert.equal((await f.request(path+'/confirm','POST',{type:'scan_pdf',title:'本',asBook:true,chapters:completed.data.chapters})).status,201);
   const saved=(await f.request(`/api/tasks/${staged.data.id}`)).data;assert.equal(saved.archived,true);assert.deepEqual(saved.progress,{completed:3,total:3,unit:'page'});
+});
+
+const photo=(width,height,color='#888')=>sharp({create:{width,height,channels:3,background:color}}).png().toBuffer();
+async function photoDraft(f,count=1){
+  const form=new FormData();
+  for(let index=0;index<count;index++)form.append('files',new Blob([await photo(40,20+index)],{type:'image/png'}),`照片${index+1}.png`);
+  const staged=await f.request('/api/imports','POST',form);assert.equal(staged.status,201);return staged.data;
+}
+const appendPhotos=async(f,id,...sizes)=>{
+  const form=new FormData();
+  for(const [index,[width,height]] of sizes.entries())form.append('files',new Blob([await photo(width,height)],{type:'image/png'}),`追加${index+1}.png`);
+  return f.request(`/api/imports/${id}/files`,'POST',form);
+};
+
+test('photo drafts take appended pictures one by one and keep their order',async(t)=>{
+  const f=await fixture(t);const draft=await photoDraft(f);
+  const added=await appendPhotos(f,draft.id,[30,30]);
+  assert.equal(added.status,200);assert.equal(added.data.files.length,2);
+  assert.equal(new Set(added.data.files.map(file=>file.id)).size,2);
+  const again=await appendPhotos(f,draft.id,[31,31],[32,32]);
+  assert.equal(again.data.files.length,4);
+  const text=new FormData();text.append('files',new Blob(['本文'],{type:'text/plain'}),'a.txt');
+  assert.equal((await f.request(`/api/imports/${draft.id}/files`,'POST',text)).status,400);
+  assert.equal((await appendPhotos(f,draft.id,[10,10]).then(()=>f.request(`/api/imports/${draft.id}/files`,'POST',new FormData()))).status,400);
+  const other=await f.request(`/api/imports/${draft.id}/files`,'POST',(()=>{const form=new FormData();form.append('files',new Blob(['x'],{type:'image/png'}),'x.png');return form;})(),'two');
+  assert.equal(other.status,404);
+  const pasted=(await f.request('/api/imports','POST',{text:'本文',title:'文字'})).data;
+  assert.equal((await appendPhotos(f,pasted.id,[10,10])).status,400);
+});
+
+test('photo drafts reorder, delete all but the last picture and refuse invalid orders',async(t)=>{
+  const f=await fixture(t);const draft=await photoDraft(f,3);const ids=draft.files.map(file=>file.id);
+  const reordered=await f.request(`/api/imports/${draft.id}/files`,'PUT',{order:[ids[2],ids[0],ids[1]]});
+  assert.equal(reordered.status,200);assert.deepEqual(reordered.data.files.map(file=>file.id),[ids[2],ids[0],ids[1]]);
+  for(const order of [[ids[0],ids[1]],[ids[0],ids[0],ids[1]],[ids[0],ids[1],'missing']])
+    assert.equal((await f.request(`/api/imports/${draft.id}/files`,'PUT',{order})).status,400,JSON.stringify(order));
+  const removed=await f.request(`/api/imports/${draft.id}/files/${ids[0]}`,'DELETE');
+  assert.equal(removed.status,200);assert.deepEqual(removed.data.files.map(file=>file.id),[ids[2],ids[1]]);
+  assert.equal((await f.request(`/api/imports/${draft.id}/files/${ids[0]}`,'DELETE')).status,404);
+  await f.request(`/api/imports/${draft.id}/files/${ids[2]}`,'DELETE');
+  const last=await f.request(`/api/imports/${draft.id}/files/${ids[1]}`,'DELETE');
+  assert.equal(last.status,400);assert.match(last.data.error,/至少保留一张/);
+  const saved=await f.request(`/api/imports/${draft.id}/confirm`,'POST',{type:'photo',title:'照片'});
+  assert.equal(saved.status,201);assert.deepEqual(f.attached[0].values.map(source=>source.id),[ids[1]]);
+  assert.equal((await f.request(`/api/imports/${draft.id}/files`,'PUT',{order:[ids[1]]})).status,409);
+});
+
+test('rotating a draft photo turns its pixels and the confirmed source uses the turned picture',async(t)=>{
+  const f=await fixture(t);const draft=await photoDraft(f);const [file]=draft.files;
+  const turned=await f.request(`/api/imports/${draft.id}/files/${file.id}/rotate`,'POST',{turns:1});
+  assert.equal(turned.status,200);
+  const after=turned.data.files[0];assert.equal(after.id,file.id);assert.notEqual(after.previewUrl,file.previewUrl);
+  const raw=await f.request(after.previewUrl);
+  const meta=await sharp(raw.data).metadata();assert.deepEqual([meta.width,meta.height],[20,40]);
+  assert.equal((await f.request(`/api/imports/${draft.id}/files/${file.id}/rotate`,'POST',{turns:2})).status,400);
+  const back=await f.request(`/api/imports/${draft.id}/files/${file.id}/rotate`,'POST',{turns:-1});
+  const restored=await sharp((await f.request(back.data.files[0].previewUrl)).data).metadata();
+  assert.deepEqual([restored.width,restored.height],[40,20]);
+  await f.request(`/api/imports/${draft.id}/confirm`,'POST',{type:'photo',title:'照片'});
+  const [source]=f.attached[0].values;
+  assert.equal(source.original.imageId,'image-3');assert.equal(source.preview.url,back.data.files[0].previewUrl);
+});
+
+test('confirming photos starts preparing the first page; other imports wait for the reader',async(t)=>{
+  const f=await fixture(t);
+  const staged=await f.request('/api/imports','POST',{text:'本文。',title:'原文'});
+  await f.request(`/api/imports/${staged.data.id}/confirm`,'POST',{type:'text',title:'文章'});
+  assert.deepEqual(f.preparations,[]);
+  const draft=await photoDraft(f);
+  const saved=await f.request(`/api/imports/${draft.id}/confirm`,'POST',{type:'photo',title:'照片'});
+  assert.deepEqual(f.preparations,[{userId:'one',id:saved.data.firstDocumentId,mode:'reading',index:0}]);
 });

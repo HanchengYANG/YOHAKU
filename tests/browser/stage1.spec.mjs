@@ -44,12 +44,12 @@ test("导入、选区注音、校对、保存重开、导出及手机布局", { 
   });
   await openAddText(page);
   await page
-    .getByRole("textbox", { name: "资料标题" })
+    .getByRole("textbox", { name: "标题" })
     .fill(`验收歌词 ${info.project.name}`);
   await page
     .getByRole("textbox", { name: "导入原文" })
     .fill("はーい口開けてー\n汚い言葉の歯石が取れないね〜\n\n背中を見た");
-  await page.getByRole("button", {name:"继续确认类型",exact:true}).click();
+  await page.getByRole("button", {name:"继续",exact:true}).click();
   await page.getByRole("button", {name:"确认导入",exact:true}).click();
   await page.getByRole("button",{name:"校对",exact:true}).click();
   await page.getByRole("button", {name:"编辑正文与注音",exact:true}).click();
@@ -168,13 +168,13 @@ test("未保存离开会确认，新建能清空旧草稿，慢速导入期间�
   await expect(page.getByLabel("导入原文")).toHaveValue("未保存草稿");
   page.once("dialog",dialog=>dialog.accept());
   await openAddText(page);
-  await expect(page.getByLabel("资料标题")).toHaveValue("");await expect(page.getByLabel("导入原文")).toHaveValue("");
-  await page.getByLabel("资料标题").fill("慢速保存");await page.getByLabel("导入原文").fill("空を見た。");
-  await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
+  await expect(page.getByLabel("标题")).toHaveValue("");await expect(page.getByLabel("导入原文")).toHaveValue("");
+  await page.getByLabel("标题").fill("慢速保存");await page.getByLabel("导入原文").fill("空を見た。");
+  await page.getByRole("button",{name:"继续",exact:true}).click();
   let release;const delayed=new Promise(resolve=>{release=resolve;});
   await page.route("**/api/imports/*/confirm",async route=>{await delayed;await route.continue();});
   await page.getByRole("button",{name:"确认导入",exact:true}).click();
-  await expect(page.getByLabel("资料标题")).toBeDisabled();await expect(page.getByLabel("确认来源类型")).toBeDisabled();release();
+  await expect(page.getByLabel("标题")).toBeDisabled();release();
   await expect(page.getByRole("heading",{name:"慢速保存",exact:true})).toBeVisible();
   await deleteDocument(page,await page.evaluate(()=>location.hash.slice(1)));
 });
@@ -402,7 +402,7 @@ test("首页继续阅读与最近阅读使用已保存书籍和材料并能正�
     const addFromHome = page.getByRole("button", { name: "拍照添加", exact: true });
     if (suffix === "phone") {
       await addFromHome.click();
-      await expect(page.getByRole("tab", { name: "上传或粘贴文件", exact: true })).toHaveAttribute("aria-selected", "true");
+      await expect(page.getByRole("tab", { name: "文件", exact: true })).toHaveAttribute("aria-selected", "true");
       await page.goto("/");
     } else await expect(addFromHome).toBeHidden();
     const recent = page.getByRole("region", { name: "最近阅读", exact: true });

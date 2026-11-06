@@ -2,8 +2,6 @@ import { test, expect } from "@playwright/test";
 import { parseText } from "../../shared/document.mjs";
 import { blocksToHtml, initializeSentenceBoundaries, bodyText } from "../../shared/article-html.mjs";
 import sharp from "sharp";
-import {mkdir,writeFile} from "node:fs/promises";
-import {createServer} from "node:http";
 const html = (text) => initializeSentenceBoundaries(blocksToHtml(parseText(text)),[text]);
 const original = "今日は空を見た。";
 async function showShelf(page) {
@@ -18,7 +16,7 @@ async function fixture(page, options = {}) {
   const calls = [], saves = [];
   let chapterPolls = 0;
   const chapterProposal = [{id:"ch1",title:"第一章",startPage:2,endPage:8,needsReview:true,excluded:false},{id:"ch2",title:"付録",startPage:9,endPage:10,needsReview:true,excluded:false}];
-  const importDraft = {id:"imp",title:"导入文字",detectedType:options.importType || "text",allowedTypes:options.importType === "screenshot" ? ["photo","screenshot"] : [options.importType || "text"],files:[{id:"file",name:"original.pdf"}],chapters:[],status:"staged",...options.draft};
+  const importDraft = {id:"imp",title:"导入文字",detectedType:options.importType || "text",allowedTypes:options.importType === "screenshot" ? ["photo","screenshot"] : /pdf$/.test(options.importType || "") ? ["scan_pdf","text_pdf"] : [options.importType || "text"],files:[{id:"file",name:"original.pdf"}],chapters:[],status:"staged",...options.draft};
   const proposedExclusions = [{page:1,startLine:1,endLine:2,reason:"重复页眉",text:"版権所有・学習資料",excluded:true},{page:3,startLine:8,endLine:10,reason:"与正文无关的广告",text:"関連図書のお知らせ",excluded:true},...(options.extraExclusions || [])];
   const pageAt = (index) => ({id:`p${index}`,index,ready:true,bodyHtml:options.emptyPublished && !index ? "<p></p>" : index ? html("次の読書ページ。") : source2.bodyHtml,sourceIds:index ? ["s1"] : ["s2"],start:index ? 20 : 6,end:index ? 30 : 6 + bodyText(source2.bodyHtml).length,
     ...(!index ? options.firstPage : {})});
@@ -669,9 +667,9 @@ test("unified text import confirms detected type before preparing the current pa
   const state=await fixture(page);await page.goto("/");
   await showShelf(page);
   await page.getByRole("button",{name:"添加",exact:true}).click();await page.getByRole("tab",{name:"粘贴文字",exact:true}).click();
-  await page.getByLabel("资料标题").fill("新资料");await page.getByLabel("导入原文").fill(original);
-  await page.getByRole("button",{name:"继续确认类型"}).click();
-  await expect(page.getByLabel("确认来源类型")).toHaveValue("text");
+  await page.getByLabel("标题").fill("新资料");await page.getByLabel("导入原文").fill(original);
+  await page.getByRole("button",{name:"继续"}).click();
+  await expect(page.getByLabel("确认来源类型")).toHaveCount(0);
   expect(state.calls.filter((item)=>item.path.includes("reading-session"))).toHaveLength(0);
   await page.getByRole("button",{name:"确认导入",exact:true}).click();
   await expect(page.getByLabel("日语原文")).toContainText(original);
@@ -1112,83 +1110,13 @@ test("imported PDF correction displays a loaded original-page image with zoom an
   await page.getByLabel("PDF 原页缩放").fill("100");await page.screenshot({path:`artifacts/pdf-original-page-${info.project.name}.png`,fullPage:true});
 });
 
-test("pasted screenshot keeps a confirmable image type",async({page})=>{
-  const state=await fixture(page,{importType:"screenshot"});await page.goto("/");
-  await showShelf(page);
-  await page.getByRole("button",{name:"添加",exact:true}).click();
-  await page.getByLabel("上传或粘贴来源文件").evaluate((element)=>{const transfer=new DataTransfer();transfer.items.add(new File(["test-image"],"pasted.png",{type:"image/png"}));element.dispatchEvent(new ClipboardEvent("paste",{bubbles:true,clipboardData:transfer}));});
-  await expect(page.locator(".source-file-list")).toContainText("pasted.png");
-  await page.getByRole("button",{name:"继续确认类型"}).click();
-  await expect(page.getByLabel("确认来源类型")).toHaveValue("screenshot");
-  await expect(page.getByLabel("作为书籍导入")).toHaveCount(0);
-  await page.getByLabel("资料标题").fill("截图资料");
-  await page.getByRole("button",{name:"确认导入",exact:true}).click();
-  await expect(page.getByLabel("日语原文")).toBeVisible();
-  expect(state.calls.find((call)=>call.path === "/imports/imp/confirm").input).toMatchObject({type:"screenshot",asBook:false});
-});
-
-for(const reopen of [false,true])test(`same-file screenshot suggestion ${reopen ? "defaults when reopening a saved draft" : "defaults on upload and yields to a manual type on restore"}`,async({page})=>{
-  const draft={id:"imp",title:"再次导入的图片",detectedType:"photo",suggestedType:"screenshot",allowedTypes:["photo","screenshot"],
-    files:[{id:"file",name:"113.png"}],context:{bookId:null,targetId:null},status:"staged"};
-  const state=await fixture(page,{draft,serverDrafts:reopen?[draft]:[]});
-  const reads=[];
-  await page.route("**/api/imports/imp",route=>{
-    if(route.request().method()!=="GET")return route.fallback();
-    reads.push(draft.id);
-    return route.fulfill({json:draft});
-  });
-  const openImport=async()=>{
-    await showShelf(page);
-    await page.getByRole("button",{name:"添加",exact:true}).click();
-  };
-  await page.goto("/");await openImport();
-  if(reopen){
-    await page.getByRole("button",{name:`继续导入：${draft.title}`,exact:true}).click();
-  }else{
-    const png=await sharp({create:{width:12,height:12,channels:3,background:"white"}}).png().toBuffer();
-    await page.getByLabel("选择来源文件",{exact:true}).setInputFiles({name:"113.png",mimeType:"image/png",buffer:png});
-    await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
-  }
-  const type=page.getByLabel("确认来源类型",{exact:true});
-  await expect(type).toHaveValue("screenshot");
-  await expect(page.getByText("相同图片上次确认为截图，可在此更改。")).toBeVisible();
-  const uploads=()=>state.calls.filter(call=>call.path==="/imports"&&call.method==="POST");
-  const confirms=()=>state.calls.filter(call=>call.path==="/imports/imp/confirm"&&call.method==="POST");
-  expect(confirms()).toEqual([]);
-  if(reopen){
-    expect(reads).toEqual([draft.id]);
-    await page.evaluate(id=>{
-      const context={initialBookId:null,initialTargetId:null};
-      sessionStorage.setItem(`yohaku:import-draft:${JSON.stringify(context)}`,JSON.stringify({id,context}));
-    },draft.id);
-    await page.reload();await openImport();
-    await expect(type).toHaveValue("screenshot");
-    expect(reads).toEqual([draft.id,draft.id]);
-    expect(uploads()).toEqual([]);
-    return;
-  }
-
-  await type.selectOption("photo");
-  await expect.poll(()=>page.evaluate(()=>{
-    const context={initialBookId:null,initialTargetId:null};
-    return JSON.parse(sessionStorage.getItem(`yohaku:import-draft:${JSON.stringify(context)}`)||"null")?.type;
-  })).toBe("photo");
-  await page.reload();await openImport();
-  await expect(type).toHaveValue("photo");
-  await page.getByRole("button",{name:"确认导入",exact:true}).click();
-  await expect(page.getByLabel("日语原文")).toBeVisible();
-  expect(reads).toEqual([draft.id]);
-  expect(uploads()).toHaveLength(1);
-  expect(confirms().map(call=>call.input)).toEqual([{type:"photo",title:draft.title,asBook:false}]);
-});
-
 test("PDF chapter edits use physical ranges and retain uncertain boundaries after confirmation",async({page})=>{
   const state=await fixture(page,{importType:"text_pdf"});await page.goto("/");
   await showShelf(page);
   await page.getByRole("button",{name:"添加",exact:true}).click();
   await page.getByLabel("选择来源文件").setInputFiles({name:"original.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-fixture")});
-  await page.getByRole("button",{name:"继续确认类型"}).click();
-  await page.getByLabel("资料标题").fill("PDF 书籍");await page.getByLabel("作为书籍导入").check();
+  await page.getByRole("button",{name:"继续"}).click();
+  await page.getByLabel("标题").fill("PDF 书籍");await page.getByLabel("作为书籍导入").check();
   await page.getByRole("button",{name:"AI 提议章节",exact:true}).click();
   await page.getByLabel("章节 1 起始页").fill("3");await page.getByLabel("章节 1 标题").fill("调整后的正文");
   await page.locator(".source-chapter").nth(1).getByLabel("纳入正文").uncheck();
@@ -1209,7 +1137,7 @@ test("PDF chapter review lazily previews physical boundary pages without marking
   await page.goto("/");await showShelf(page);
   await page.getByRole("button",{name:"添加",exact:true}).click();
   await page.getByLabel("选择来源文件").setInputFiles({name:"original.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-fixture")});
-  await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
+  await page.getByRole("button",{name:"继续",exact:true}).click();
   await page.getByLabel("作为书籍导入").check();
   await page.getByRole("button",{name:"AI 提议章节",exact:true}).click();
   const first=page.locator(".source-chapter").nth(0),second=page.locator(".source-chapter").nth(1);
@@ -1243,8 +1171,8 @@ async function startScannedBook(page,options={}) {
   await showShelf(page);
   await page.getByRole("button",{name:"添加",exact:true}).click();
   await page.getByLabel("选择来源文件").setInputFiles({name:"scanned.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-scanned-fixture")});
-  await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
-  await page.getByLabel("资料标题").fill("扫描书籍");await page.getByLabel("作为书籍导入").check();
+  await page.getByRole("button",{name:"继续",exact:true}).click();
+  await page.getByLabel("标题").fill("扫描书籍");await page.getByLabel("作为书籍导入").check();
   await page.getByRole("button",{name:"AI 提议章节",exact:true}).click();return state;
 }
 
@@ -1252,7 +1180,7 @@ test("scanned books show whole-book OCR then AI chapter progress and review ever
   const state=await startScannedBook(page);
   const progress=page.getByLabel("PDF 分章进度");await expect(progress).toContainText("全书本地 OCR：0 / 10 页");
   await expect(page.getByRole("button",{name:"确认导入",exact:true})).toBeDisabled();await expect(page.getByRole("button",{name:"返回",exact:true})).toBeEnabled();
-  await expect(progress).toContainText("全书本地 OCR：3 / 10 页");await expect(progress).toContainText("正在由 AI 分章");
+  await expect(progress).toContainText("全书本地 OCR：3 / 10 页");await expect(progress).toContainText("AI 正在分章");
   await expect(page.getByLabel("章节 1 标题")).toHaveValue("第一章");
   const exclusions=page.getByLabel("建议排除的内容");await expect(exclusions).toContainText("版権所有・学習資料");await expect(exclusions).toContainText("関連図書のお知らせ");
   await expect(exclusions).toContainText("原始 OCR 结果完整保留");
@@ -1292,7 +1220,7 @@ test("PDF review can keep all suggested lines in included chapters and still exc
 test("queued PDF chapter tasks keep polling and stay locked until ready",async({page})=>{
   await startScannedBook(page,{queuedChapters:true});
   const progress=page.getByLabel("PDF 分章进度");
-  await expect(progress).toContainText("资源排队中");
+  await expect(progress).toContainText("排队中");
   await expect(page.getByRole("button",{name:"确认导入",exact:true})).toBeDisabled();
   await expect(page.getByLabel("章节 1 标题")).toHaveValue("第一章");
   await expect(page.getByRole("button",{name:"确认导入",exact:true})).toBeEnabled();
@@ -1348,7 +1276,7 @@ test("an uploaded PDF draft can be left when its browser cache cannot be written
   const state=await fixture(page,{importType:"scan_pdf"});await page.goto("/");await showShelf(page);
   await page.getByRole("button",{name:"添加",exact:true}).click();
   await page.getByLabel("选择来源文件",{exact:true}).setInputFiles({name:"saved.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-saved-fixture")});
-  await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
+  await page.getByRole("button",{name:"继续",exact:true}).click();
   await expect(page.getByLabel("确认来源类型",{exact:true})).toHaveValue("scan_pdf");
   await leaveSavedImportWithoutDialog(page);
   expect(state.calls.filter(call=>call.path==="/imports"&&call.method==="POST")).toHaveLength(1);
@@ -1396,7 +1324,7 @@ test("reopening an import after refresh restores its draft and resumes existing 
   await showShelf(page);
   await page.getByRole("button",{name:"添加",exact:true}).click();
   await expect(page.getByLabel("PDF 分章进度")).toContainText("全书本地 OCR：3 / 10 页");
-  await expect(page.getByLabel("资料标题")).toHaveValue("扫描书籍");await expect(page.getByLabel("作为书籍导入")).toBeChecked();
+  await expect(page.getByLabel("标题")).toHaveValue("扫描书籍");await expect(page.getByLabel("作为书籍导入")).toBeChecked();
   await expect.poll(()=>state.calls.filter((call)=>call.path === "/imports/imp" && call.method === "GET").length).toBeGreaterThan(reads+1);
   expect(state.calls.filter((call)=>call.path === "/imports" && call.method === "POST")).toHaveLength(1);
   expect(state.calls.filter((call)=>call.path === "/imports/imp/chapters")).toHaveLength(1);
@@ -1424,106 +1352,27 @@ test("a selected file that has not been uploaded still warns before leaving",asy
   expect(state.calls.filter(call=>call.path==="/imports"&&call.method==="POST")).toHaveLength(0);
 });
 
-test("an image can be removed and selected again from the same native file path",async({page},info)=>{
-  await fixture(page,{importType:"photo"});
+test("a new file selection replaces the list, pictures are kept apart from other files and go to the photo page",async({page})=>{
+  await fixture(page,{importType:"text_pdf"});
   const png=await sharp({create:{width:12,height:12,channels:3,background:"white"}}).png().toBuffer();
-  await mkdir(info.outputDir,{recursive:true});const path=info.outputPath("same.png");await writeFile(path,png);
-  let uploaded;
-  // Chromium's intercepted postData omits disk-backed file bytes; inspect the actual HTTP upload.
-  const receiver=createServer(async(request,response)=>{
-    const chunks=[];for await(const chunk of request)chunks.push(chunk);uploaded=Buffer.concat(chunks);
-    response.writeHead(200,{"content-type":"application/json","access-control-allow-origin":"*"});
-    response.end(JSON.stringify({id:"imp",status:"staged",detectedType:"photo",allowedTypes:["photo"]}));
-  });
-  await new Promise(resolve=>receiver.listen(0,"127.0.0.1",resolve));
-  try{
-    await page.route("**/api/imports",route=>route.request().method()==="POST"?route.continue({url:`http://127.0.0.1:${receiver.address().port}/upload`}):route.fallback());
-    await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"添加",exact:true}).click();
-    const chooseButton=page.getByRole("button",{name:"从设备选择文件",exact:true});
-    await expect(chooseButton).toBeVisible();
-    const accessibility=await page.context().newCDPSession(page);
-    const {nodes}=await accessibility.send("Accessibility.getFullAXTree");
-    await accessibility.detach();
-    const pickerNames=nodes.filter(node=>!node.ignored&&node.role?.value==="button").map(node=>node.name?.value)
-      .filter(name=>["从设备选择文件","选择来源文件"].includes(name));
-    expect(pickerNames).toEqual(["从设备选择文件"]);
-    const choose=async()=>{
-      const selected=page.waitForEvent("filechooser");await chooseButton.click();await(await selected).setFiles(path);
-    };
-    await choose();
-    await page.getByRole("button",{name:"移除 same.png",exact:true}).click();
-    await expect(page.getByRole("button",{name:"继续确认类型",exact:true})).toBeDisabled();
-    await choose();
-    await expect(page.locator(".source-file-list li")).toHaveCount(1);
-    await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
-    await expect(page.getByLabel("确认来源类型",{exact:true})).toHaveValue("photo");
-    expect(uploaded.includes(png)).toBe(true);
-    expect(uploaded.toString("latin1").match(/filename="same\.png"/g)).toHaveLength(1);
-  }finally{await new Promise(resolve=>receiver.close(resolve));}
-});
-
-test("repeated image selections upload in the adjusted order and a new selection starts empty",async({page},info)=>{
-  await fixture(page,{importType:"photo"});
-  const png=await sharp({create:{width:12,height:12,channels:3,background:"white"}}).png().toBuffer();
-  const firstImage=info.outputPath("114.png"),secondImage=info.outputPath("105.png");
-  await mkdir(info.outputDir,{recursive:true});
-  await Promise.all([writeFile(firstImage,png),writeFile(secondImage,png)]);
-
-  let uploaded;
-  // A local HTTP receiver captures the browser's actual multipart body, including disk-backed files.
-  const receiver=createServer(async(request,response)=>{
-    const chunks=[];for await(const chunk of request)chunks.push(chunk);uploaded=Buffer.concat(chunks);
-    response.writeHead(200,{"content-type":"application/json","access-control-allow-origin":"*"});
-    response.end(JSON.stringify({id:"imp",status:"staged",detectedType:"photo",allowedTypes:["photo"]}));
-  });
-  await new Promise(resolve=>receiver.listen(0,"127.0.0.1",resolve));
-  try{
-    await page.route("**/api/imports",route=>route.request().method()==="POST"?route.continue({url:`http://127.0.0.1:${receiver.address().port}/upload`}):route.fallback());
-    await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"添加",exact:true}).click();
-    const input=page.getByLabel("选择来源文件",{exact:true});
-    const chooseButton=page.getByRole("button",{name:"从设备选择文件",exact:true});
-    const stageButton=page.getByRole("button",{name:"继续确认类型",exact:true});
-    const rows=page.locator(".source-file-list li");
-    const expectOrder=async(names)=>{
-      await expect(rows).toHaveCount(names.length);
-      for(const [index,name] of names.entries()){
-        await expect(rows.nth(index).getByRole("button",{name:`移除 ${name}`,exact:true})).toBeVisible();
-      }
-    };
-    const pasteImage=()=>page.getByLabel("上传或粘贴来源文件").evaluate((element,bytes)=>{
-      const transfer=new DataTransfer();
-      transfer.items.add(new File([new Uint8Array(bytes)],"pasted.png",{type:"image/png"}));
-      element.dispatchEvent(new ClipboardEvent("paste",{bubbles:true,clipboardData:transfer}));
-    },[...png]);
-
-    await input.setInputFiles({name:"original.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-original")});
-    await expectOrder(["original.pdf"]);
-    await input.setInputFiles({name:"replacement.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-replacement")});
-    await expectOrder(["replacement.pdf"]);
-    await pasteImage();
-    await expect(page.getByRole("alert")).toContainText("图片和其他文件请分开导入");
-    await expectOrder(["replacement.pdf"]);
-    await page.getByRole("button",{name:"移除 replacement.pdf",exact:true}).click();
-
-    for(const path of [firstImage,secondImage]){
-      const selected=page.waitForEvent("filechooser");await chooseButton.click();await(await selected).setFiles(path);
-    }
-    await expectOrder(["114.png","105.png"]);
-    await pasteImage();
-    await expectOrder(["114.png","105.png","pasted.png"]);
-    await page.getByRole("button",{name:"上移 105.png",exact:true}).click();
-    const expectedOrder=["105.png","114.png","pasted.png"];
-    await expectOrder(expectedOrder);
-
-    await stageButton.click();
-    await expect(page.getByLabel("确认来源类型",{exact:true})).toHaveValue("photo");
-    expect([...uploaded.toString("latin1").matchAll(/filename="([^"]+)"/g)].map((match)=>match[1])).toEqual(expectedOrder);
-
-    await page.getByRole("button",{name:"重新选择",exact:true}).click();
-    await expect(chooseButton).toBeEnabled();
-    await expectOrder([]);
-    await expect(stageButton).toBeDisabled();
-  }finally{await new Promise(resolve=>receiver.close(resolve));}
+  await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"添加",exact:true}).click();
+  const input=page.getByLabel("选择来源文件",{exact:true}),rows=page.locator(".source-file-list li");
+  const pasteImage=()=>page.getByLabel("上传或粘贴来源文件").evaluate((element,bytes)=>{
+    const transfer=new DataTransfer();
+    transfer.items.add(new File([new Uint8Array(bytes)],"pasted.png",{type:"image/png"}));
+    element.dispatchEvent(new ClipboardEvent("paste",{bubbles:true,clipboardData:transfer}));
+  },[...png]);
+  await input.setInputFiles({name:"original.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-original")});
+  await expect(rows).toHaveCount(1);await expect(rows).toContainText("original.pdf");
+  await input.setInputFiles({name:"replacement.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-replacement")});
+  await expect(rows).toHaveCount(1);await expect(rows).toContainText("replacement.pdf");
+  await pasteImage();
+  await expect(page.getByRole("alert")).toContainText("图片和其他文件请分开导入");
+  await expect(rows).toHaveCount(1);
+  await page.getByRole("button",{name:"移除 replacement.pdf",exact:true}).click();
+  await expect(page.getByRole("button",{name:"继续",exact:true})).toBeDisabled();
+  await input.setInputFiles({name:"page.png",mimeType:"image/png",buffer:png});
+  await expect(page.getByRole("region",{name:"拍照添加",exact:true})).toBeVisible();
 });
 
 test("file upload persists the entered title for a draft reopened without session storage",async({page})=>{
@@ -1538,21 +1387,20 @@ test("file upload persists the entered title for a draft reopened without sessio
     return route.fulfill({json:draft()});
   });
   await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"添加",exact:true}).click();
-  await page.getByLabel("资料标题",{exact:true}).fill(title);
+  await page.getByLabel("标题",{exact:true}).fill(title);
   await page.getByLabel("选择来源文件",{exact:true}).setInputFiles({name:"pg31757-images.epub",mimeType:"application/epub+zip",buffer:Buffer.from("epub-fixture")});
-  await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
-  await expect(page.getByLabel("确认来源类型",{exact:true})).toHaveValue("epub");
+  await page.getByRole("button",{name:"继续",exact:true}).click();
+  await expect(page.getByLabel("确认来源类型",{exact:true})).toHaveCount(0);
   expect(savedTitle).toBe(title);
   await page.evaluate(()=>sessionStorage.clear());
   await page.route("**/api/imports/imp",route=>route.fulfill({json:draft()}));
   await page.reload();await showShelf(page);await page.getByRole("button",{name:"添加",exact:true}).click();
   await page.getByRole("button",{name:`继续导入：${title}`,exact:true}).click();
-  await expect(page.getByLabel("资料标题",{exact:true})).toHaveValue(title);
+  await expect(page.getByLabel("标题",{exact:true})).toHaveValue(title);
 });
 
 test("a pending file upload locks file changes and preserves its server error until a new selection",async({page})=>{
-  await fixture(page,{importType:"photo"});
-  const png=await sharp({create:{width:12,height:12,channels:3,background:"white"}}).png().toBuffer();
+  await fixture(page,{importType:"text_pdf"});
   let release,entered=false,uploaded;
   const held=new Promise(resolve=>release=resolve);
   await page.route("**/api/imports",async route=>{
@@ -1563,25 +1411,25 @@ test("a pending file upload locks file changes and preserves its server error un
   try{
     await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"添加",exact:true}).click();
     const input=page.getByLabel("选择来源文件",{exact:true});
-    await input.setInputFiles({name:"first.png",mimeType:"image/png",buffer:png});
-    await page.getByRole("button",{name:"继续确认类型",exact:true}).click();await expect.poll(()=>entered).toBe(true);
-    await expect(page.getByRole("button",{name:"移除 first.png",exact:true})).toBeDisabled();
+    await input.setInputFiles({name:"first.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-first")});
+    await page.getByRole("button",{name:"继续",exact:true}).click();await expect.poll(()=>entered).toBe(true);
+    await expect(page.getByRole("button",{name:"移除 first.pdf",exact:true})).toBeDisabled();
     await expect(input).toBeDisabled();
-    await expect(page.getByRole("button",{name:"从设备选择文件",exact:true})).toBeDisabled();
+    await expect(page.getByRole("button",{name:"选择文件",exact:true})).toBeDisabled();
     await expect(page.getByRole("tab",{name:"粘贴文字",exact:true})).toBeDisabled();
-    await expect(page.getByRole("tab",{name:"上传或粘贴文件",exact:true})).toBeDisabled();
-    await page.getByLabel("上传或粘贴来源文件",{exact:true}).evaluate((element,bytes)=>{
-      const data=new DataTransfer();data.items.add(new File([new Uint8Array(bytes)],"late.png",{type:"image/png"}));
+    await expect(page.getByRole("tab",{name:"文件",exact:true})).toBeDisabled();
+    await page.getByLabel("上传或粘贴来源文件",{exact:true}).evaluate(element=>{
+      const data=new DataTransfer();data.items.add(new File(["%PDF-late"],"late.pdf",{type:"application/pdf"}));
       element.dispatchEvent(new ClipboardEvent("paste",{bubbles:true,clipboardData:data}));
-    },[...png]);
+    });
     await expect(page.locator(".source-file-list li")).toHaveCount(1);
-    await expect(page.locator(".source-file-list")).toContainText("first.png");
-    expect(uploaded.toString("latin1")).toContain('filename="first.png"');
-    expect(uploaded.toString("latin1")).not.toContain("late.png");
+    await expect(page.locator(".source-file-list")).toContainText("first.pdf");
+    expect(uploaded.toString("latin1")).toContain('filename="first.pdf"');
+    expect(uploaded.toString("latin1")).not.toContain("late.pdf");
     release();await expect(page.getByRole("alert")).toContainText("当前上传未能保存");
-    await input.setInputFiles({name:"new.png",mimeType:"image/png",buffer:png});
+    await input.setInputFiles({name:"new.pdf",mimeType:"application/pdf",buffer:Buffer.from("%PDF-new")});
     await expect(page.getByRole("alert")).toHaveCount(0);
-    await expect(page.locator(".source-file-list")).toContainText("new.png");
+    await expect(page.locator(".source-file-list")).toContainText("new.pdf");
   }finally{release();}
 });
 
@@ -1590,7 +1438,7 @@ test("choosing files again clears the previous import flow's error",async({page}
   await page.route("**/api/imports/imp/confirm",route=>route.fulfill({status:400,json:{error:"请提供来源列表。"}}));
   await page.goto("/");await showShelf(page);await page.getByRole("button",{name:"添加",exact:true}).click();
   await page.getByLabel("选择来源文件",{exact:true}).setInputFiles({name:"old.epub",mimeType:"application/epub+zip",buffer:Buffer.from("epub-fixture")});
-  await page.getByRole("button",{name:"继续确认类型",exact:true}).click();
+  await page.getByRole("button",{name:"继续",exact:true}).click();
   await page.getByRole("button",{name:"确认导入",exact:true}).click();
   await expect(page.getByRole("alert")).toContainText("请提供来源列表");
   await page.getByRole("button",{name:"重新选择",exact:true}).click();
@@ -1616,7 +1464,7 @@ test("a new tab without session cache resumes a server draft from the matching i
     await expect(list.getByRole("button",{name:"继续导入：其他书籍的后台任务",exact:true})).toHaveCount(0);
     await expect(list.getByRole("button",{name:"继续导入：已经确认的导入",exact:true})).toHaveCount(0);
     await list.getByRole("button",{name:"继续导入：后台扫描书籍",exact:true}).click();
-    await expect(otherTab.getByLabel("资料标题")).toHaveValue("后台扫描书籍");
+    await expect(otherTab.getByLabel("标题")).toHaveValue("后台扫描书籍");
     await expect(otherTab.getByLabel("确认来源类型")).toHaveValue("scan_pdf");await expect(otherTab.getByLabel("作为书籍导入")).toBeChecked();
     await expect(otherTab.getByLabel("PDF 分章进度")).toContainText("全书本地 OCR：3 / 10 页");
     await expect.poll(()=>state.calls.filter((call)=>call.path === "/imports/imp" && call.method === "GET").length).toBeGreaterThan(1);

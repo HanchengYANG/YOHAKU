@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import Icon from "./Icon.jsx";
 import ErrorNotice from "./ErrorNotice.mjs";
 import { continueReading, recentEntries } from "../library-model.mjs";
@@ -20,11 +21,15 @@ export default function Welcome({
   const current = continueReading(articles, books);
   const recent = recentEntries(books, documents);
   const empty = !current && !recent.length;
+  const camera = useRef(null);
   return (
     <section className="home" aria-label="阅读首页">
       <h1 className="sr-only">首页</h1>
       {error && <ErrorNotice error={error} />}
-      <button className="home-photo-action" type="button" onClick={onAddPhoto}>
+      {/* Opens the camera directly on phones; desktops show a picture chooser. */}
+      <input ref={camera} hidden type="file" accept="image/*" capture="environment" aria-label="拍照添加照片"
+        onChange={(event) => { const files = [...event.currentTarget.files]; event.currentTarget.value = ""; if (files.length) onAddPhoto(files); }} />
+      <button className="home-photo-action" type="button" onClick={() => camera.current?.click()}>
         <span aria-hidden="true">📷</span>拍照添加
       </button>
       {current ? (

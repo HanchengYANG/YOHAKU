@@ -1,4 +1,5 @@
 import multer from 'multer';
+import sharp from 'sharp';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { mkdir, writeFile, rm, stat, copyFile, rename } from 'node:fs/promises';
@@ -194,6 +195,21 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
       draft.chapterProcessing={...draft.chapterProcessing,status:error.status===504?'timeout':'failed',error:draft.chapterError,finishedAt:new Date().toISOString(),execution:error.execution};persist(draft);
     }
   }
+  async function storeFile(userId,importId,uploaded,type){
+    const fileId=randomUUID(),filePath=join(storageDir,'imports',importId,fileId);
+    await writeFile(filePath,uploaded.buffer,{mode:0o400,flag:'wx'});
+    try{
+      const file={id:fileId,name:cleanName(uploaded.originalname),mimeType:uploaded.mimetype||'application/octet-stream',bytes:uploaded.buffer.length,filePath,type,previewUrl:`/api/imports/${importId}/files/${fileId}/raw`};
+      const parsed=await inspectFileEntry(file,{userId,importId});
+      // Keep the code already recorded for this failure so the HTTP layer does not record it again.
+      if(!parsed&&!isPdf(type)&&type!=='epub'){const recorded=parseFailure(file.info.error);throw Object.assign(fail(file.inspection.httpStatus,file.info.error),recorded?{errorCode:recorded.code,errorAction:recorded.action}:{});}
+      if(isImage(type)){
+        file.imageId=(await ai.saveImage(userId,uploaded.buffer,{mimeType:uploaded.mimetype,originalName:file.name})).id;
+        file.contentHash=createHash('sha256').update(uploaded.buffer).digest('hex');
+      }
+      return file;
+    }catch(error){await rm(filePath,{force:true});throw error;}
+  }
   app.post('/api/imports', (req,res,next)=> {
     if(req.is('multipart/form-data'))upload.array('files',100)(req,res,next);else next();
   },async(req,res)=>{
@@ -212,20 +228,8 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
     await mkdir(directory,{recursive:true,mode:0o700});
     try {
       const incoming=pasted!==null?[{buffer:Buffer.from(pasted),originalname:'粘贴文字.txt',mimetype:'text/plain'}]:files;
-      for(let index=0;index<incoming.length;index++) {
-        const uploaded=incoming[index],fileId=randomUUID(),filePath=join(directory,fileId);
-        await writeFile(filePath,uploaded.buffer,{mode:0o400,flag:'wx'});
-        const type=pasted!==null?'text':detected[index];
-        const file={id:fileId,name:cleanName(uploaded.originalname),mimeType:uploaded.mimetype||'application/octet-stream',bytes:uploaded.buffer.length,filePath,type,previewUrl:`/api/imports/${id}/files/${fileId}/raw`};
-        const parsed=await inspectFileEntry(file,{userId:req.user.id,importId:id});
-        // Keep the code already recorded for this failure so the HTTP layer does not record it again.
-        if(!parsed&&!isPdf(type)&&type!=='epub'){const recorded=parseFailure(file.info.error);throw Object.assign(fail(file.inspection.httpStatus,file.info.error),recorded?{errorCode:recorded.code,errorAction:recorded.action}:{});}
-        if(isImage(type)){
-          file.imageId=(await ai.saveImage(req.user.id,uploaded.buffer,{mimeType:uploaded.mimetype,originalName:file.name})).id;
-          file.contentHash=createHash('sha256').update(uploaded.buffer).digest('hex');
-        }
-        draft.files.push(file);
-      }
+      for(let index=0;index<incoming.length;index++)
+        draft.files.push(await storeFile(req.user.id,id,incoming[index],pasted!==null?'text':detected[index]));
       draft.detectedType=assertHomogeneousImport(draft.files.map(file=>file.type));
       if(isImage(draft.detectedType))draft.suggestedType=await suggestImageType(req.user.id,draft.files,incoming);
       database.prepare('INSERT INTO import_drafts(id,user_id,title,type,status,draft_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
@@ -238,6 +242,68 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
     res.json({drafts:rows.map(row=>present(get(req.user.id,row.id)))});
   });
   app.get('/api/imports/:id',(req,res)=>res.json(present(get(req.user.id,req.params.id))));
+  // Photo drafts are edited picture by picture while the reader is still taking
+  // them. Every change re-reads the draft right before saving, so uploads that
+  // finish in parallel never overwrite each other.
+  function editablePhotos(userId,id){
+    const draft=get(userId,id);
+    if(draft.status!=='staged'||draft.taskDeletedAt)throw fail(409,'这次导入已经完成，请重新开始。');
+    if(!isImage(draft.detectedType))throw fail(400,'只有照片和截图可以逐张调整。');
+    return draft;
+  }
+  const photoFile=(draft,fileId)=>{const file=draft.files.find(item=>item.id===fileId);if(!file)throw fail(404,'找不到这张照片。');return file;};
+  app.post('/api/imports/:id/files',(req,res,next)=>upload.array('files',100)(req,res,next),async(req,res)=>{
+    const files=req.files||[];
+    editablePhotos(req.user.id,req.params.id);
+    if(!files.length)throw fail(400,'请先选择照片。');
+    const detected=files.map(file=>guessImportType({name:file.originalname,mimeType:file.mimetype,head:file.buffer.subarray(0,4096)}));
+    if(detected.some(type=>!isImage(type)))throw fail(400,'只能追加照片或截图。');
+    const added=[];
+    try{for(const [index,uploaded] of files.entries())added.push(await storeFile(req.user.id,req.params.id,uploaded,detected[index]));}
+    catch(error){for(const file of added)await rm(file.filePath,{force:true});throw error;}
+    const draft=editablePhotos(req.user.id,req.params.id);
+    if(draft.files.length+added.length>100){for(const file of added)await rm(file.filePath,{force:true});throw fail(400,'一次导入最多 100 张照片。');}
+    const suggested=await suggestImageType(req.user.id,added,files);
+    const latest=editablePhotos(req.user.id,req.params.id);
+    latest.files.push(...added);
+    if(latest.suggestedType!==suggested)delete latest.suggestedType;
+    persist(latest);res.json(present(get(req.user.id,req.params.id)));
+  });
+  app.put('/api/imports/:id/files',(req,res)=>{
+    const draft=editablePhotos(req.user.id,req.params.id),order=req.body?.order;
+    if(!Array.isArray(order)||order.length!==draft.files.length||new Set(order).size!==order.length||order.some(id=>!draft.files.some(file=>file.id===id)))
+      throw fail(400,'照片顺序无效，请刷新后重试。');
+    draft.files=order.map(id=>draft.files.find(file=>file.id===id));
+    persist(draft);res.json(present(get(req.user.id,req.params.id)));
+  });
+  app.delete('/api/imports/:id/files/:fileId',async(req,res)=>{
+    const draft=editablePhotos(req.user.id,req.params.id),file=photoFile(draft,req.params.fileId);
+    if(draft.files.length===1)throw fail(400,'至少保留一张照片。要放弃这次导入，请在任务中删除。');
+    draft.files=draft.files.filter(item=>item.id!==file.id);
+    persist(draft);await rm(file.filePath,{force:true});
+    res.json(present(get(req.user.id,req.params.id)));
+  });
+  app.post('/api/imports/:id/files/:fileId/rotate',async(req,res)=>{
+    const turns=req.body?.turns;
+    if(turns!==1&&turns!==-1)throw fail(400,'请选择向左或向右旋转。');
+    const file=photoFile(editablePhotos(req.user.id,req.params.id),req.params.fileId);
+    let buffer;
+    try{buffer=await sharp(await sharp(file.filePath).rotate().toBuffer()).rotate(turns*90).toBuffer();}
+    catch{throw fail(415,'这张照片无法旋转，请删除后重新拍摄。');}
+    const filePath=join(storageDir,'imports',req.params.id,`${file.id}.${randomUUID()}`);
+    await writeFile(filePath,buffer,{mode:0o400,flag:'wx'});
+    try{
+      const imageId=(await ai.saveImage(req.user.id,buffer,{mimeType:file.mimeType,originalName:file.name})).id;
+      const draft=editablePhotos(req.user.id,req.params.id),current=photoFile(draft,file.id);
+      if(current.filePath!==file.filePath)throw fail(409,'这张照片刚被更新，请重试。');
+      const revision=(current.revision||0)+1;
+      Object.assign(current,{filePath,bytes:buffer.length,imageId,revision,contentHash:createHash('sha256').update(buffer).digest('hex'),
+        previewUrl:`/api/imports/${draft.id}/files/${file.id}/raw?v=${revision}`});
+      persist(draft);
+    }catch(error){await rm(filePath,{force:true});throw error;}
+    await rm(file.filePath,{force:true});
+    res.json(present(get(req.user.id,req.params.id)));
+  });
   function cachedPreview(draft,file,page) {
     const key=`${draft.id}:${file.id}:${page}`;
     if(previewJobs.has(key))return previewJobs.get(key);
@@ -428,6 +494,10 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
         .run(title,'confirmed',JSON.stringify({...draft,result:undefined}),JSON.stringify(result),new Date().toISOString(),draft.id,req.user.id);
       return result;
     });
+    // Photos are mostly taken on a phone and read later on a computer: start the
+    // first reading page now. Preparation problems show in the reader.
+    if(isImage(req.body?.type))try{sources.requestPreparation?.(req.user.id,result.firstDocumentId,'reading',0);}
+    catch(error){errorLog.capture(error,{userId:req.user.id,scope:'import',location:'import:prepare-first-page',context:{importId:result.id}});}
     res.status(201).json(result);
   });
   function taskId(draft){return (draft.generation||1)===1?draft.id:`${draft.id}:g${draft.generation}`;}

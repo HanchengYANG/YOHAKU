@@ -1315,5 +1315,5 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
   function close(){if(closed)return;stop();closed=true;}
   const taskAdapter=createSourceTaskAdapter({database,scopes,readHtml,body,sourceIdentity,working,latestRequest,ensureRequest,schedule,stamp,retryFailedSteps,requestTargets:request=>requestTargets(request,true),targetsReady,hasRunnableDemand:(userId,documentId)=>!!demand({userId,documentId}),withReadScope});
   schedule();
-  return {preparedDocuments,taskAdapter,retryFailedSteps,attachRoutes,adoptDocument,createArticleSources,hydrateDocument,readArticle,hasDocument,listSources,getSource,saveSource,markChecked,beginEdit,endEdit,prepareSource,readingPages,heartbeat,reorderSources,validateSelection,persistDocumentMarks,deleteDocument,pageCounts,stop,close,drain};
+  return {preparedDocuments,requestPreparation,taskAdapter,retryFailedSteps,attachRoutes,adoptDocument,createArticleSources,hydrateDocument,readArticle,hasDocument,listSources,getSource,saveSource,markChecked,beginEdit,endEdit,prepareSource,readingPages,heartbeat,reorderSources,validateSelection,persistDocumentMarks,deleteDocument,pageCounts,stop,close,drain};
 }
