@@ -91,3 +91,13 @@ test('stable polling does not rewrite catalog rows, while native field changes p
   assert.equal(stored.generation,2);assert.equal(stored.archived,1);assert.equal(stored.updated_at,'2026-01-02');assert.deepEqual(JSON.parse(stored.target_json).targets,[{mode:'reading',index:4}]);
   await f.request('?scope=archived');assert.equal(changes()-before,1);
 });
+
+test('task counts report how many unarchived tasks need the reader',async t=>{
+  const f=await fixture(t);
+  f.add('failed');f.add('review',{status:'requires_review'});f.add('draft',{status:'draft',canDelete:false});
+  f.add('running',{status:'running',canDelete:false});f.add('done',{status:'completed',archived:true,canDelete:false});
+  const {status,data}=await f.request('?limit=1');
+  assert.equal(status,200);
+  assert.equal(data.counts.active,4);
+  assert.equal(data.counts.attention,3);
+});

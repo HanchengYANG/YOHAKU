@@ -1,3 +1,4 @@
+import { taskAttention } from '../shared/task-attention.mjs';
 const fail=(status,message,code)=>Object.assign(new Error(message),{status,expose:true,code});
 const activeStates=new Set(['queued','running','retrying','retry_wait','resource_wait','waiting_resource']);
 const errorStates=new Set(['failed','timeout','timed_out','blocked','needs_attention','error']);
@@ -68,7 +69,8 @@ export function attachTaskRoutes({app,database,adapters=[]}) {
     const snapshots=sync(req.user.id);
     const rows=database.prepare('SELECT * FROM task_catalog WHERE owner_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id').all(req.user.id);
     const tasks=rows.map(row=>{try{return normalize(row,snapshots.get(snapshotKey(row.type,row.native_ref))||byType.get(row.type).get(req.user.id,row.native_ref));}catch(error){if(error.status===404)return null;throw error;}}).filter(Boolean);
-    const counts={active:tasks.filter(task=>!task.archived).length,archived:tasks.filter(task=>task.archived).length};
+    const counts={active:tasks.filter(task=>!task.archived).length,archived:tasks.filter(task=>task.archived).length,
+      attention:tasks.filter(task=>taskAttention(task)==='attention').length};
     const filtered=tasks.filter(task=>task.archived===(scope==='archived')&&(!type||task.type===type));
     const rank={running:0,queued:1,resource_wait:1,dependency_wait:2,failed:3,timeout:3,needs_attention:3,draft:4,completed:5};
     filtered.sort((a,b)=>(rank[a.status]??3)-(rank[b.status]??3)||String(b.updatedAt).localeCompare(String(a.updatedAt))||a.id.localeCompare(b.id));
