@@ -828,7 +828,7 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
         {canDeleteArticle && !body.trim() && <p className="editor-message" role="status">正文已清空，可直接点击“删除整篇文章”。</p>}
         {canSaveAsNew && <p className="editor-message" role="status">保存未完成，当前校对内容已保留。可继续修改后另存为新文章，原文章和原问答记录保留。</p>}
         {taskResultStale && <p className="editor-message" role="status">当前编辑内容仍保留在本页。请先手动复制留存，再重新打开任务的最新结果；这份旧稿无法保存。</p>}
-        {taskUnavailable && <p className="editor-message" role="status">任务已删除或无法访问，当前编辑内容仍保留在本页。请手动复制留存，或通过导入文字新建文章。</p>}
+        {taskUnavailable && <p className="editor-message" role="status">任务已删除或无法访问，当前编辑内容仍保留在本页。请手动复制留存，或从「添加」新建文章。</p>}
         {!sourceScope && (sourceImageId ? <details className="editor-meta-details"><summary>{value.title || "文章信息"} · {books.find((item) => item.id === value.bookId)?.title || "独立材料"}<span>修改文章信息</span></summary>{metadataFields}</details> : metadataFields)}
         {sourceImageId && (
           <details className="ocr-review-overview"><summary>识别记录 · {warnings.length ? `${warnings.length} 条待核对提示` : "无待核对提示"}{nonBody.length ? ` · ${nonBody.length} 条非正文` : ""}</summary>

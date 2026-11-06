@@ -174,3 +174,23 @@
   background: #ffffff12;
   color: #fbf4e6;
 }
+.sidebar .shelf-new-book:disabled {
+  background: transparent;
+  color: #d3dfd2;
+}
+
+/* The shelf scrolls on its own; keep its scrollbar thin and dark-friendly. */
+.sidebar .document-list {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+.sidebar .document-list::-webkit-scrollbar {
+  width: 6px;
+}
+.sidebar .document-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar .document-list::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.22);
+}

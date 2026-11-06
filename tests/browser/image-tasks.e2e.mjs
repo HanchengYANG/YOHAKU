@@ -420,7 +420,7 @@ test("同任务两设备不同校对稿保存冲突后，B可保留最新版另�
   } finally { await removeDocument(page, copyId); await removeDocument(page, savedA?.id); await otherContext.close(); }
 });
 
-test("无当前任务隐藏入口，草稿具备可辨名称，保存后归档且可从导入页找回", async ({ page, browser }, info) => {
+test("无待处理任务不显示数字，草稿具备可辨名称，保存后归档且可从导入页找回", async ({ page, browser }, info) => {
   // A separate real website account starts with no tasks; never remove the
   // shared fixture owner's history merely to obtain an empty-state assertion.
   const invitation = await page.request.post("/api/invitations", { data: {} });
@@ -440,7 +440,8 @@ test("无当前任务隐藏入口，草稿具备可辨名称，保存后归档�
     await member.goto("/");
     await expect(member.getByRole("region", { name: "阅读首页", exact: true })).toBeVisible();
     await expect(member.locator(".home-task-card")).toHaveCount(0);
-    await expect(member.locator(".sidebar-task-link")).toHaveCount(0);
+    await expect(member.locator(".sidebar-task-link")).toHaveCount(1);
+    await expect(member.locator(".sidebar-task-link .count")).toHaveCount(0);
 
     const createEmpty = async () => {
       const response = await member.request.post("/api/image-tasks", { data: { idempotencyKey: randomUUID() } });
@@ -449,7 +450,7 @@ test("无当前任务隐藏入口，草稿具备可辨名称，保存后归档�
     };
     const first = await createEmpty(), second = await createEmpty();
     await expect(member.locator(".home-task-card")).toBeVisible();
-    await expect(member.locator(".sidebar-task-link")).toHaveCount(1);
+    await expect(member.locator(".sidebar-task-link .count")).toHaveText("2");
     await member.locator(".home-task-card").click();
     const firstCard = member.locator(`[data-task-id="${first.id}"]`);
     const secondCard = member.locator(`[data-task-id="${second.id}"]`);
@@ -488,17 +489,17 @@ test("无当前任务隐藏入口，草稿具备可辨名称，保存后归档�
     await expect(firstCard.locator(".task-state")).toHaveText("待校对");
     await member.goto("/");
     await expect(member.locator(".home-task-card")).toBeVisible();
-    await expect(member.locator(".sidebar-task-link")).toHaveCount(1);
+    await expect(member.locator(".sidebar-task-link .count")).toHaveCount(1);
 
     await member.goto(`/#tasks/${first.id}`);
     await member.getByRole("button", { name: "开始校对", exact: true }).click();
     const saved = await saveAndRead(member); savedId = saved.id;
     expect(saved.title).not.toMatch(/#|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
-    await expect(member.locator(".sidebar-task-link")).toHaveCount(0);
+    await expect(member.locator(".sidebar-task-link .count")).toHaveCount(0);
     await member.goto("/");
     await expect(member.getByRole("region", { name: "阅读首页", exact: true })).toBeVisible();
     await expect(member.locator(".home-task-card")).toHaveCount(0);
-    await expect(member.locator(".sidebar-task-link")).toHaveCount(0);
+    await expect(member.locator(".sidebar-task-link .count")).toHaveCount(0);
     const active = await (await member.request.get("/api/image-tasks")).json();
     expect(active.activeCount).toBe(0); expect(active.total).toBe(0); expect(active.tasks).toEqual([]);
 
@@ -573,7 +574,7 @@ test("另一设备重试出错任务只补失败步骤，旧手动稿保存失�
     expect(unavailable.status()).toBe(404);
     expect((await unavailable.json()).code).toBe("TASK_UNAVAILABLE");
     await expect(input).toHaveValue(manualText);
-    await expect(page.getByText("任务已删除或无法访问，当前编辑内容仍保留在本页。请手动复制留存，或通过导入文字新建文章。", { exact: true })).toBeVisible();
+    await expect(page.getByText("任务已删除或无法访问，当前编辑内容仍保留在本页。请手动复制留存，或从「添加」新建文章。", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "另存为新文章", exact: true })).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   } finally { await otherContext.close(); }

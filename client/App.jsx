@@ -780,7 +780,7 @@ function Workspace({ user, onLoggedOut }) {
         collapseButtonRef={sidebarCollapseButton} onCollapse={toggleDesktopSidebar}
         saving={saving} bookBusy={bookBusy} activeId={activeId} activeBookId={book?.id}
         shelfBooks={shelfBooks} documents={documents} loading={loading}
-        query={query} onQueryChange={setQuery} taskCount={taskCounts.attention ?? 0}
+        query={query} onQueryChange={setQuery} taskCount={taskCounts.attention}
         onHome={goHome} onAdd={() => openUnifiedImport()} onNewBook={() => openPanel("newBook")}
         onTasks={() => openDocument("tasks")} onOpenBook={openBook} onOpenDocument={openDocument}
         onOpenPanel={openPanel} onBeforeLogout={mayLeave} onLoggedOut={onLoggedOut}
