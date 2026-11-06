@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import api, { readApiResult } from "../api.mjs";
+import api, { apiFetch, readApiResult } from "../api.mjs";
 import { taskDisplayName } from "../image-tasks.mjs";
 import { moveChapter, mergeChapter, splitChapter } from "../source-presentation.mjs";
 import "../sources.css";
@@ -191,7 +191,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
         body.append("title",title);
         if (initialBookId) body.append("bookId",initialBookId);
         if (initialTargetId) body.append("targetId",initialTargetId);
-        result = await readApiResult(await fetch("/api/imports", {method:"POST",body}));
+        result = await readApiResult(await apiFetch("/api/imports", {method:"POST",body}));
         setFiles([]);
       }
       setDraft(result); setType(defaultDraftType(result)); setTitle(result.title || title);

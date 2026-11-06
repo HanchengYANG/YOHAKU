@@ -1,8 +1,8 @@
-import { readApiResult } from "./api.mjs";
+import { apiFetch, readApiResult } from "./api.mjs";
 import { readEventStream } from "../shared/event-stream.mjs";
 
 export async function sendChat(path, { body, signal, onEvent } = {}) {
-  const response = await fetch(`/api${path}`, {
+  const response = await apiFetch(`/api${path}`, {
     method:"POST", signal, body,
     headers:{"Content-Type":"application/json",Accept:"text/event-stream"},
   });
@@ -12,7 +12,7 @@ export async function sendChat(path, { body, signal, onEvent } = {}) {
     let event;
     try { event = JSON.parse(frame.data); }
     catch { throw new Error("回答传输中断，未完成的内容没有保存。请重试。"); }
-    if (event.type === "error") throw Object.assign(new Error(event.error || "回答中断，请重试。"), {status:event.status,code:event.code});
+    if (event.type === "error") throw Object.assign(new Error(event.error || "回答中断，请重试。"), {status:event.status,code:event.code,errorCode:event.errorCode,action:event.action});
     if (event.type === "done") result = event.conversation;
     else onEvent?.(event);
   }

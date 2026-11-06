@@ -16,7 +16,7 @@ import DocumentChat from "./DocumentChat.jsx";
 import ArticleBody from "./ArticleBody.jsx";
 import BodyEditor from "./BodyEditor.jsx";
 import { kinds } from "../constants.mjs";
-import api from "../api.mjs";
+import api, { apiFetch } from "../api.mjs";
 import Icon from "./Icon.jsx";
 import RubyText from "./RubyText.jsx";
 import ImportProgress from "./ImportProgress.jsx";
@@ -220,7 +220,7 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
       try {
         if (!imageMetadata || imageMetadataLoading)
           throw new Error("尚未读取到图片版本，请先重新读取图片信息。");
-        const response = await fetch(
+        const response = await apiFetch(
           `/api/images/${encodeURIComponent(sourceImageId)}/rotate`,
           {
             method: "POST",
