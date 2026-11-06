@@ -63,6 +63,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     CREATE INDEX IF NOT EXISTS source_attempts_scope ON source_step_attempts(scope_id,input_version,updated_at);
     CREATE TABLE IF NOT EXISTS source_annotations(scope_id TEXT NOT NULL,version INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,execution_json TEXT,created_at TEXT NOT NULL,PRIMARY KEY(scope_id,version,start,end));
     CREATE TABLE IF NOT EXISTS reading_pages(id TEXT PRIMARY KEY,document_id TEXT NOT NULL,user_id TEXT NOT NULL,position INTEGER NOT NULL,ranges_json TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(document_id,position));
+    CREATE INDEX IF NOT EXISTS reading_pages_user ON reading_pages(user_id,document_id);
     CREATE TABLE IF NOT EXISTS reading_sessions(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,document_id TEXT NOT NULL,mode TEXT NOT NULL,source_id TEXT,page_index INTEGER NOT NULL,active INTEGER NOT NULL,expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS source_preparation_requests(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,document_id TEXT NOT NULL,generation INTEGER NOT NULL,version INTEGER NOT NULL DEFAULT 1,signature TEXT,deleted_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS source_request_document ON source_preparation_requests(user_id,document_id,generation);

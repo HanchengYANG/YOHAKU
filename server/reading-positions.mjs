@@ -38,12 +38,15 @@ export function createReadingPositions(database, { now = () => new Date().toISOS
 }
 
 // Articles outside the source workflow have no reading-session heartbeat; the
-// client records that they were opened with this route.
-export function attachReadingPositionRoutes({ app, readingPositions, requireDocument }) {
+// client records that they were opened with this route. Paged articles belong
+// to the heartbeat, which drops delayed writes, so this route must not touch
+// them. Unpaged articles have no reading pages: page 0 is the only position.
+export function attachReadingPositionRoutes({ app, readingPositions, requireDocument, isPaged }) {
   app.put("/api/documents/:id/reading-position", (req, res) => {
     requireDocument(req.user.id, req.params.id);
+    if (isPaged(req.user.id, req.params.id)) throw fail(409, "阅读位置已更新，请刷新。");
     const pageIndex = req.body?.pageIndex;
-    if (!Number.isSafeInteger(pageIndex) || pageIndex < 0) throw fail(400, "阅读页位置无效。");
-    res.json(readingPositions.save(req.user.id, req.params.id, { pageIndex }));
+    if (pageIndex !== 0) throw fail(400, "阅读页位置无效。");
+    res.json({ ...readingPositions.save(req.user.id, req.params.id, { pageIndex }), pageCount: 0 });
   });
 }

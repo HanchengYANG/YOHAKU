@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createApp } from "../server/app.mjs";
-import { ensureSession, sessionHeaders } from "./helpers/session.mjs";
+import { cookieFromResponse, ensureSession, sessionHeaders } from "./helpers/session.mjs";
 import { applySentenceBoundaries, blocksToHtml } from "../shared/article-html.mjs";
 import { parseText } from "../shared/document.mjs";
 
@@ -25,10 +25,10 @@ async function fixture(t) {
     application.close();
     await rm(dataDir, { recursive: true, force: true });
   });
-  async function request(path, method = "GET", body) {
+  async function request(path, method = "GET", body, session = sessionHeaders(url)) {
     const response = await fetch(`${url}${path}`, {
       method,
-      headers: { ...sessionHeaders(url), ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+      headers: { ...session, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(10000),
     });
@@ -40,7 +40,20 @@ async function fixture(t) {
     try { return database.prepare("SELECT COUNT(*) AS n FROM reading_positions WHERE document_id=?").get(documentId).n; }
     finally { database.close(); }
   }
-  return { application, user, request, savedRows };
+  // A second account by invitation. The session helper caches one cookie per
+  // origin, so the member's cookie is returned instead.
+  async function member() {
+    const invitation = await request("/api/invitations", "POST");
+    assert.equal(invitation.status, 201);
+    const registered = await fetch(`${url}/api/accounts/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "test_member", password: "fixture-only-password", inviteToken: invitation.data.token }),
+    });
+    assert.equal(registered.status, 201);
+    return { Cookie: cookieFromResponse(registered) };
+  }
+  return { application, user, request, savedRows, member };
 }
 
 const article = (title, extra = {}) => ({ title, kind: "article", orientation: "horizontal", content: "{日本語|にほんご}を読む。", ...extra });
@@ -64,6 +77,9 @@ test("翻页心跳写入进度，文章与书籍摘要带出页码、页数和�
   assert.equal(listed.readingPosition.pageCount, beat.data.pages.length);
   assert.ok(listed.readingPosition.pageCount >= 2);
   assert.ok(listed.readingPosition.updatedAt >= before);
+  const overwrite = await f.request(`/api/documents/${id}/reading-position`, "PUT", { pageIndex: 0 });
+  assert.equal(overwrite.status, 409, "分页文章的进度只由心跳写入");
+  assert.equal(overwrite.data.error, "阅读位置已更新，请刷新。");
 
   const detail = (await f.request(`/api/books/${book.id}`)).data;
   assert.deepEqual(detail.pages[0].readingPosition, listed.readingPosition);
@@ -81,11 +97,11 @@ test("未分页文章用 PUT 记录打开，参数无效时拒绝", async (t) =>
   assert.equal((await f.request("/api/documents")).data.documents.find((item) => item.id === id).readingPosition, null);
   const saved = await f.request(`/api/documents/${id}/reading-position`, "PUT", { pageIndex: 0 });
   assert.equal(saved.status, 200);
-  assert.equal(saved.data.pageIndex, 0);
+  assert.deepEqual(saved.data, { pageIndex: 0, pageCount: 0, updatedAt: saved.data.updatedAt });
   assert.match(saved.data.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
   const listed = (await f.request("/api/documents")).data.documents.find((item) => item.id === id);
-  assert.deepEqual(listed.readingPosition, { pageIndex: 0, pageCount: 0, updatedAt: saved.data.updatedAt });
-  for (const pageIndex of [-1, 1.5, "2", undefined])
+  assert.deepEqual(listed.readingPosition, saved.data);
+  for (const pageIndex of [-1, 1, 1.5, "2", undefined])
     assert.equal((await f.request(`/api/documents/${id}/reading-position`, "PUT", { pageIndex })).status, 400, String(pageIndex));
   assert.equal((await f.request("/api/documents/missing/reading-position", "PUT", { pageIndex: 0 })).status, 404);
 });
@@ -105,4 +121,24 @@ test("删除文章或书籍时一并删除阅读进度", async (t) => {
   const current = (await f.request(`/api/books/${book.id}`)).data;
   assert.equal((await f.request(`/api/books/${book.id}`, "DELETE", { revision: current.revision })).status, 204);
   assert.equal(f.savedRows(page.id), 0);
+});
+
+test("其他账号读不到也写不了别人的文章进度", async (t) => {
+  const f = await fixture(t);
+  const book = (await f.request("/api/books", "POST", { title: "我的书" })).data;
+  const page = (await f.request("/api/documents", "POST", article("我的文章", { kind: "book", bookId: book.id }))).data;
+  assert.equal((await f.request(`/api/documents/${page.id}/reading-position`, "PUT", { pageIndex: 0 })).status, 200);
+  const member = await f.member();
+  assert.equal((await f.request(`/api/documents/${page.id}`, "GET", undefined, member)).status, 404);
+  assert.equal((await f.request(`/api/documents/${page.id}/reading-position`, "PUT", { pageIndex: 0 }, member)).status, 404);
+  assert.equal(f.savedRows(page.id), 1);
+
+  const ownBook = (await f.request("/api/books", "POST", { title: "成员的书" }, member)).data;
+  const ownPage = (await f.request("/api/documents", "POST", article("成员的文章", { kind: "book", bookId: ownBook.id }), member)).data;
+  const documents = (await f.request("/api/documents?all=1", "GET", undefined, member)).data.documents;
+  assert.deepEqual(documents.map((item) => [item.id, item.readingPosition]), [[ownPage.id, null]]);
+  const books = (await f.request("/api/books", "GET", undefined, member)).data.books;
+  assert.deepEqual(books.map((item) => [item.id, item.lastOpenedAt]), [[ownBook.id, null]]);
+  assert.equal((await f.request(`/api/books/${ownBook.id}`, "GET", undefined, member)).data.pages[0].readingPosition, null);
+  assert.equal((await f.request("/api/documents?all=1")).data.documents.find((item) => item.id === page.id).readingPosition.pageIndex, 0);
 });

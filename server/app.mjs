@@ -505,7 +505,8 @@ export function createApp({
 
   const sources = createSourceService({ database, ai, requireDocument, fromRow, errorLog, readingPositions });
   sources.attachRoutes(app);
-  attachReadingPositionRoutes({ app, readingPositions, requireDocument });
+  attachReadingPositionRoutes({ app, readingPositions, requireDocument,
+    isPaged: (userId, documentId) => sources.hasDocument(userId, documentId) });
   ai.setSourceScopeValidator?.((userId, documentId, selection) => sources.validateSelection?.(userId, documentId, selection) || {});
   ai.setSourceMarksWriter?.((userId, documentId, html) => sources.persistDocumentMarks(userId, documentId, html));
   ai.setManagedDocument?.((userId, documentId) => sources.hasDocument(userId, documentId));

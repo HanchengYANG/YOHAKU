@@ -1,6 +1,5 @@
-import { taskAttention } from '../shared/task-attention.mjs';
+import { taskAttention, workingStatuses as activeStates } from '../shared/task-attention.mjs';
 const fail=(status,message,code)=>Object.assign(new Error(message),{status,expose:true,code});
-const activeStates=new Set(['queued','running','retrying','retry_wait','resource_wait','waiting_resource']);
 const errorStates=new Set(['failed','timeout','timed_out','blocked','needs_attention','error']);
 const statusAliases={needs_attention:'failed',blocked:'failed',ready:'completed',succeeded:'completed',done:'completed',draft:'draft'};
 const stamp=()=>new Date().toISOString();

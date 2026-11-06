@@ -6,9 +6,11 @@ const attentionStatuses = new Set([
   "failed", "timeout", "timed_out", "needs_attention", "blocked", "error",
   "interrupted", "requires_review", "needs_review", "draft",
 ]);
-const workingStatuses = new Set([
+// Also the server's list of task states that are still running (server/tasks.mjs).
+export const workingStatuses = new Set([
   "queued", "running", "retrying", "retry_wait", "resource_wait", "waiting_resource",
 ]);
+// Legacy image-task states "paused" and "cancelled" are no longer written, so they count as neither.
 
 export function taskAttention(task) {
   if (!task || task.archived) return null;
