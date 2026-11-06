@@ -820,7 +820,11 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
       database.prepare('UPDATE article_sources SET edit_expires=? WHERE edit_session=? AND user_id=? AND document_id=?').run(now()+sessionTtlMs,sessionId,userId,id);
     }
     const snapshot=readingPages(userId,id,index);
-    if(active&&mode==='reading')readingPositions.save(userId,id,{pageIndex:snapshot.index,pageId:snapshot.currentPage?.id||null});
+    // Keepalives repeat the session's page every few seconds; only a new
+    // session, a reactivated one or a real page turn records progress, so an
+    // idle tab cannot pull back a position another device moved on.
+    const turned=!existing||!existing.active||existing.mode!=='reading'||existing.page_index!==index;
+    if(active&&mode==='reading'&&turned)readingPositions.save(userId,id,{pageIndex:snapshot.index,pageId:snapshot.currentPage?.id||null});
     schedule();return {sessionId,...snapshot};
   }
   function prepareSource(userId,id,sourceId,input={}) {

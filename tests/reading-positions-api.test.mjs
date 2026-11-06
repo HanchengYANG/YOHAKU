@@ -89,6 +89,20 @@ test("翻页心跳写入进度，文章与书籍摘要带出页码、页数和�
 
   const reopened = (await f.request(`/api/documents/${id}`)).data;
   assert.equal(reopened.reading.index, 1, "打开文章时从记录的页开始");
+
+  // Another device reads on to page 3; the idle session's keepalive on page 2
+  // must not pull the position (or its timestamp) back.
+  const phone = await f.request(`/api/documents/${id}/reading-session`, "POST", { sessionId: "phone-session", sequence: 1, index: 2 });
+  assert.equal(phone.data.index, 2);
+  const moved = (await f.request("/api/documents?all=1")).data.documents.find((item) => item.id === id).readingPosition;
+  const keepalive = await f.request(`/api/documents/${id}/reading-session`, "POST", { sessionId: "progress-session", sequence: 2, index: 1 });
+  assert.equal(keepalive.status, 200);
+  const after = (await f.request("/api/documents?all=1")).data.documents.find((item) => item.id === id).readingPosition;
+  assert.deepEqual(after, moved, "同一页的保活心跳不改进度");
+  const turned = await f.request(`/api/documents/${id}/reading-session`, "POST", { sessionId: "progress-session", sequence: 3, index: 0 });
+  assert.equal(turned.data.index, 0);
+  const back = (await f.request("/api/documents?all=1")).data.documents.find((item) => item.id === id).readingPosition;
+  assert.equal(back.pageIndex, 0, "真正翻页仍然写入");
 });
 
 test("未分页文章用 PUT 记录打开，参数无效时拒绝", async (t) => {

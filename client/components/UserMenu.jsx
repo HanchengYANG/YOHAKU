@@ -101,6 +101,9 @@ export default function UserMenu({ user, onLoggedOut, onBeforeLogout, onOpenPane
   const choose = (item) => {
     if (item.id === "invite") return invite();
     if (item.id === "logout") return logout();
+    // The chosen item unmounts with the menu; keep focus on the trigger
+    // instead of letting it fall to <body>.
+    trigger.current?.focus();
     close();
     onOpenPanel?.(item.panel);
   };

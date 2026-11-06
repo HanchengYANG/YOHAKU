@@ -130,7 +130,7 @@ function Workspace({ user, onLoggedOut }) {
   const [bookBusy, setBookBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [detailFailed, setDetailFailed] = useState(false);
+  const [failedRoute, setFailedRoute] = useState("");
   const [shelfError, setShelfError] = useState("");
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
@@ -298,7 +298,7 @@ function Workspace({ user, onLoggedOut }) {
       setDocument(null);
       setBook(null);
       setDetailLoading(false);
-      setDetailFailed(false);
+      setFailedRoute("");
       return;
     }
     // Saving already returned the complete document. Show it immediately
@@ -306,7 +306,7 @@ function Workspace({ user, onLoggedOut }) {
     if (savedDetail.current === activeId) {
       savedDetail.current = null;
       setDetailLoading(false);
-      setDetailFailed(false);
+      setFailedRoute("");
       return;
     }
     const controller = new AbortController();
@@ -316,7 +316,7 @@ function Workspace({ user, onLoggedOut }) {
       ? current.id === activeId.slice(5)
       : current.pages.some((page) => page.id === activeId)) ? current : null);
     setDetailLoading(true);
-    setDetailFailed(false);
+    setFailedRoute("");
     api(isBook
       ? `/books/${encodeURIComponent(activeId.slice(5))}`
       : `/documents/${encodeURIComponent(activeId)}`, { signal: controller.signal })
@@ -336,7 +336,7 @@ function Workspace({ user, onLoggedOut }) {
       .catch((e) => {
         if (e.name !== "AbortError") {
           setError(e.message);
-          setDetailFailed(true);
+          setFailedRoute(activeId);
         }
       })
       .finally(() => {
@@ -975,7 +975,7 @@ function Workspace({ user, onLoggedOut }) {
               />
             )}
           </div>
-        ) : book && activeId.startsWith("book/") ? (
+        ) : book && activeId === `book/${book.id}` ? (
           <BookView
             key={book.id}
             book={book}
@@ -992,9 +992,9 @@ function Workspace({ user, onLoggedOut }) {
           {bookNavigation}
           <div className="loading-page">
             {/* The fetch starts in an effect, so the first render after a
-                route change has neither loading nor failed set; treat that
-                as loading rather than flashing a failure. */}
-            {!detailFailed ? (
+                route change still carries the previous route's state; only a
+                failure recorded for this route counts as one. */}
+            {failedRoute !== activeId ? (
               "正在打开…"
             ) : (
               <>
