@@ -7,6 +7,7 @@ import { diagnosticForError } from './ai/diagnostics.mjs';
 import { executionUsage } from './ai/execution-usage.mjs';
 import { mergeReadings } from './source-merge.mjs';
 import { createSourceTaskAdapter } from './source-task-adapter.mjs';
+import { createErrorLog } from './errors.mjs';
 
 const fail=(status,message)=>Object.assign(new Error(message),{status,expose:true});
 const json=value=>JSON.stringify(value);
@@ -33,7 +34,8 @@ function consecutivePdfPages(previous,current){
     decode(previous.range_json)?.end===undefined&&(decode(current.range_json)?.start??0)===0;
 }
 
-export function createSourceService({database,ai={},requireDocument,fromRow,now=()=>Date.now(),sessionTtlMs=45000}={}) {
+export function createSourceService({database,ai={},requireDocument,fromRow,now=()=>Date.now(),sessionTtlMs=45000,errorLog=createErrorLog(database)}={}) {
+  const failure=(error,row,step)=>errorLog.capture(error,{userId:row.user_id,scope:'source',location:`source:${step}`,context:{documentId:row.document_id,sourceId:row.source_id}});
   // Read operations are synchronous: reuse their immutable database snapshot,
   // then discard it before any provider callback or later mutation can run.
   let readScope=null;
@@ -241,7 +243,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
       }
       if(!Number.isFinite(execution.elapsedMs)&&startedAt)execution.elapsedMs=Math.max(0,now()-Date.parse(startedAt));
       const diagnostic=['failed','requires_review'].includes(state)?diagnosticForError(value):null;
-      const message=state==='failed'?(value?.expose&&typeof value.message==='string'?value.message.slice(0,500):'来源处理失败，请重试或查看诊断信息。'):state==='requires_review'?'正文出现较大改动，请核对差异。':null;
+      const message=state==='failed'?failure(value,row,step):state==='requires_review'?'正文出现较大改动，请核对差异。':null;
       database.prepare('UPDATE source_step_attempts SET state=?,queued_at=?,started_at=?,finished_at=?,updated_at=?,execution_json=?,diagnostic_json=?,message=? WHERE id=?').run(state,queuedAt,startedAt,finished,finished,json(execution),diagnostic?json(diagnostic):null,message,id);
     };
     trackWorkNode(execution,row,step)?.attempts.push(finish);
@@ -1010,8 +1012,8 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
       const current=scope(row.user_id,row.document_id,row.source_id);
       if(current.version!==version){attempt.finish('stale',error);return;}
       attempt.finish('failed',error);
-      database.prepare("UPDATE article_sources SET status='failed',error=? WHERE scope_id=? AND version=?").run(error.message||'来源处理失败，请重试。',row.scope_id,version);
-      database.prepare("UPDATE source_steps SET status='failed',error=?,result_json=COALESCE(?,result_json),updated_at=? WHERE scope_id=? AND step=? AND input_version=?").run(error.message||'处理失败',error.result===undefined?null:json(error.result),stamp(),row.scope_id,step,version);
+      database.prepare("UPDATE article_sources SET status='failed',error=? WHERE scope_id=? AND version=?").run(failure(error,row,step),row.scope_id,version);
+      database.prepare("UPDATE source_steps SET status='failed',error=?,result_json=COALESCE(?,result_json),updated_at=? WHERE scope_id=? AND step=? AND input_version=?").run(failure(error,row,step),error.result===undefined?null:json(error.result),stamp(),row.scope_id,step,version);
     }
   }
   async function performAnnotationRange(row,range,priority,execution) {
@@ -1055,8 +1057,8 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
       if(closed||!workValid(execution))return;
       if(!database.prepare('SELECT 1 FROM article_sources WHERE scope_id=? AND version=?').get(row.scope_id,row.version)){attempt.finish('stale',error);return;}
       attempt.finish('failed',error);
-      database.prepare("UPDATE article_sources SET status='failed',error=? WHERE scope_id=? AND version=?").run(error.message,row.scope_id,row.version);
-      database.prepare("UPDATE source_steps SET status='failed',error=?,updated_at=? WHERE scope_id=? AND step=? AND input_version=?").run(error.message,stamp(),row.scope_id,step,row.version);
+      database.prepare("UPDATE article_sources SET status='failed',error=? WHERE scope_id=? AND version=?").run(failure(error,row,step),row.scope_id,row.version);
+      database.prepare("UPDATE source_steps SET status='failed',error=?,updated_at=? WHERE scope_id=? AND step=? AND input_version=?").run(failure(error,row,step),stamp(),row.scope_id,step,row.version);
     }
   }
   async function performAnnotationBatch(first,range,priority,execution,reservedGroup) {
@@ -1096,8 +1098,8 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
       if(closed||!workValid(execution)||!database.prepare('SELECT 1 FROM article_sources WHERE scope_id=?').get(row.scope_id))return;
       const current=scope(row.user_id,row.document_id,row.source_id),frozen=current.version!==row.version||current.edit_session&&current.edit_expires>now();
       (task.attempt||task.localAttempt)?.finish(frozen?'stale':'failed',error);
-      database.prepare("UPDATE source_steps SET status=?,error=?,result_json=COALESCE(?,result_json),updated_at=? WHERE scope_id=? AND step=? AND input_version=?").run(frozen?'stale':'failed',error.message,error.result===undefined?null:json(error.result),stamp(),row.scope_id,step,row.version);
-      if(current.version===row.version)database.prepare('UPDATE article_sources SET status=?,error=? WHERE scope_id=? AND version=?').run(frozen?'pending':'failed',frozen?null:error.message,row.scope_id,row.version);
+      database.prepare("UPDATE source_steps SET status=?,error=?,result_json=COALESCE(?,result_json),updated_at=? WHERE scope_id=? AND step=? AND input_version=?").run(frozen?'stale':'failed',failure(error,row,step),error.result===undefined?null:json(error.result),stamp(),row.scope_id,step,row.version);
+      if(current.version===row.version)database.prepare('UPDATE article_sources SET status=?,error=? WHERE scope_id=? AND version=?').run(frozen?'pending':'failed',frozen?null:failure(error,row,step),row.scope_id,row.version);
     };
     try{
       let result;
@@ -1121,7 +1123,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
               // A batch validation failure blocks each requested source even
               // when an earlier local result has already been cached.
               if(task.local)task.localAttempt=startAttempt(row,localStep,execution);
-              database.prepare("UPDATE source_steps SET status='failed',error=?,result_json=COALESCE(?,result_json),updated_at=? WHERE scope_id=? AND step=? AND input_version=? AND status='running'").run(error.message,error.result===undefined?null:json(error.result),stamp(),row.scope_id,localStep,row.version);
+              database.prepare("UPDATE source_steps SET status='failed',error=?,result_json=COALESCE(?,result_json),updated_at=? WHERE scope_id=? AND step=? AND input_version=? AND status='running'").run(failure(error,row,localStep),error.result===undefined?null:json(error.result),stamp(),row.scope_id,localStep,row.version);
             }
             throw error;
           }
@@ -1216,7 +1218,7 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
     }catch(error){
       if(closed||!workValid(execution))return;
       attempts.forEach((attempt,index)=>attempt.finish(database.prepare('SELECT 1 FROM article_sources WHERE scope_id=? AND version=?').get(group[index].scope_id,group[index].version)?'failed':'stale',error));
-      for(const row of group){database.prepare("UPDATE article_sources SET status='failed',error=? WHERE scope_id=? AND version=?").run(error.message,row.scope_id,row.version);database.prepare("UPDATE source_steps SET status='failed',error=?,result_json=COALESCE(?,result_json),updated_at=? WHERE scope_id=? AND step=? AND input_version=?").run(error.message,error.result===undefined?null:json(error.result),stamp(),row.scope_id,step,row.version);}
+      for(const row of group){database.prepare("UPDATE article_sources SET status='failed',error=? WHERE scope_id=? AND version=?").run(failure(error,row,step),row.scope_id,row.version);database.prepare("UPDATE source_steps SET status='failed',error=?,result_json=COALESCE(?,result_json),updated_at=? WHERE scope_id=? AND step=? AND input_version=?").run(failure(error,row,step),error.result===undefined?null:json(error.result),stamp(),row.scope_id,step,row.version);}
     }
   }
   function schedule() {

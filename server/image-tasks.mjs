@@ -2,6 +2,7 @@ import { randomUUID, createHash } from "node:crypto";
 import multer from "multer";
 import { blocksToHtml, htmlToBlocks, appendImageBodyHtml, bodyText, hasCompleteSentenceBoundaries } from "../shared/article-html.mjs";
 import { serializeBlocks, plainText, parseText } from "../shared/document.mjs";
+import { createErrorLog } from "./errors.mjs";
 
 const phases = ["prepare", "recognize", "annotate"];
 const fail = (status, message, code) => Object.assign(new Error(message), { status, expose: true, ...(code ? { code } : {}) });
@@ -25,7 +26,7 @@ function textInput(value, maximum, label, { empty = true } = {}) {
 }
 
 /** Durable, single-process image import queue. AI work never belongs to an HTTP request. */
-export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppliedDocument, validateDestination = () => ({}), runnerOptions = {} }) {
+export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppliedDocument, validateDestination = () => ({}), runnerOptions = {}, errorLog = createErrorLog(database) }) {
   const { enabled = true, pollIntervalMs = 1000, retryDelayMs = 2000, blockedRetryMs = 15000,
     maxAutomaticRetries = 2, now = () => Date.now() } = runnerOptions;
   database.exec(`
@@ -328,7 +329,8 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
         const busy = error.code === "AI_BUSY";
         const transient = error.name === "TypeError" || [408, 429, 500, 502, 503, 504].includes(error.status) || ["ETIMEDOUT", "ECONNRESET", "ENETUNREACH"].includes(error.code);
         const retry = authRequired || busy || transient && step.attempts <= maxAutomaticRetries;
-        const message = authRequired ? "网站 AI 授权需要恢复，请联系网站拥有者；已上传图片和已完成结果均已保留。" : String(error.message || "处理失败，请重试或手动处理。").slice(0, 1000);
+        const message = errorLog.capture(error, { userId: task.user_id, scope: "task", location: `image:${phase}`,
+          context: { taskId: task.id, ...(item?.id ? { itemId: item.id } : {}) } });
         const failed = { ...step, ...(error.execution ? { execution: {...step.execution,...error.execution} } : {}), state: retry ? "pending" : "failed",resourceState:retry?'retry_wait':error.status===504?'timeout':'failed',finishedAt:iso(),error: message,
           attempts: authRequired || busy ? Math.max(0, step.attempts - 1) : step.attempts,
           nextRunAt: retry ? now() + (authRequired ? blockedRetryMs : retryDelayMs * Math.max(1, step.attempts)) : 0 };

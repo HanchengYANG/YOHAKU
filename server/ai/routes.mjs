@@ -18,6 +18,7 @@ import { createLocalRuby } from "../ocr/ruby.mjs";
 import { createHybridAnnotation } from "./hybrid-annotation.mjs";
 import { diagnosticForError } from "./diagnostics.mjs";
 import { executionUsage, summarizeExecutionUsage } from "./execution-usage.mjs";
+import { createErrorLog } from "../errors.mjs";
 import {
   CORRECTION_SCHEMA,
   expandOcrCorrection,
@@ -56,6 +57,7 @@ export function attachAIRoutes({
   mangaOcr = createMangaOcr(),
   ndlOcr = createNdlOcr(),
   localRuby = createLocalRuby(),
+  errorLog = createErrorLog(database),
   httpConcurrency = Number(process.env.AI_HTTP_CONCURRENCY) || 4,
   cliConcurrency = Number(process.env.OPENAI_CLI_WORKERS) || 2,
   executionTimeoutMs = Number(process.env.AI_EXECUTION_TIMEOUT_MS) || 180000,
@@ -1100,7 +1102,9 @@ export function attachAIRoutes({
       database.prepare("UPDATE conversations SET thread_id=?,messages_json=?,last_error=NULL,document_revision=?,updated_at=?,account_id=?,provider_id=?,model=?,reasoning_json=? WHERE id=? AND user_id=?").run(result.threadId, JSON.stringify(messages), row.revision, at, expected.expectedAccountId, provider.id, route.model || result.model || null, route.reasoning ? JSON.stringify(route.reasoning) : null, record.id, req.user.id);
       return presentConversation(database.prepare("SELECT * FROM conversations WHERE id=? AND user_id=?").get(record.id, req.user.id));
     } catch (cause) {
-      if (!closed) database.prepare("UPDATE conversations SET last_error=?,updated_at=? WHERE id=? AND user_id=?").run(cause.message, new Date().toISOString(), record.id, req.user.id);
+      if (!closed) database.prepare("UPDATE conversations SET last_error=?,updated_at=? WHERE id=? AND user_id=?").run(
+        errorLog.capture(cause, { userId: req.user.id, scope: "chat", location: "chat:answer", context: { documentId: row.id, conversationId: record.id } }),
+        new Date().toISOString(), record.id, req.user.id);
       throw cause;
     }
   }

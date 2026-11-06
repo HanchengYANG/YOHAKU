@@ -9,6 +9,7 @@ import { createNdlOcr } from './ocr/ndl.mjs';
 import { blocksToHtml } from '../shared/article-html.mjs';
 import { parseText } from '../shared/document.mjs';
 import { createLocalWorkerPool } from './ocr/worker-pool.mjs';
+import { createErrorLog } from './errors.mjs';
 const fail=(status,message)=>Object.assign(new Error(message),{status,expose:true});
 const utf8Name=value=>{
   const text=String(value||'');
@@ -38,7 +39,7 @@ async function matchesOriginal(path,bytes) {
   }catch{return false;}
 }
 
-export function attachImportRoutes({app,database,storageDir,ai,sources,books,createImportedArticle,requireDocument,extractChapterPage,renderSourcePreview=renderImportedSource,localOcr:providedOcr,inspectFile=inspectImportFile}) {
+export function attachImportRoutes({app,database,storageDir,ai,sources,books,createImportedArticle,requireDocument,extractChapterPage,renderSourcePreview=renderImportedSource,localOcr:providedOcr,inspectFile=inspectImportFile,errorLog=createErrorLog(database)}) {
   database.exec(`CREATE TABLE IF NOT EXISTS import_drafts (
     id TEXT PRIMARY KEY,user_id TEXT NOT NULL,title TEXT NOT NULL,type TEXT NOT NULL,
     status TEXT NOT NULL,draft_json TEXT NOT NULL,result_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL
@@ -78,7 +79,7 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
   const parserPool=createLocalWorkerPool({method:'inspect',workers:process.env.LOCAL_PARSE_WORKERS||1,label:'本地文件解析',create(){
     const controller=new AbortController();return{inspect:input=>inspectFile({...input,signal:controller.signal}),close:()=>controller.abort()};
   }});
-  async function inspectFileEntry(file,{signal,onStatus}={}){
+  async function inspectFileEntry(file,{signal,onStatus,userId=null,importId=null}={}){
     file.inspection={status:'queued'};let started;
     try{
       const info=await parserPool.inspect({filePath:file.filePath,type:file.type},{signal,onStatus:status=>{
@@ -90,7 +91,7 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
         execution:{...file.inspection.execution,elapsedMs:Math.round(performance.now()-(started??performance.now()))}};
       return true;
     }catch(error){
-      file.info={...(file.info||{}),detectedType:file.type,error:error.expose?error.message:'本地文件解析未完成，请重试。'};
+      file.info={...(file.info||{}),detectedType:file.type,error:errorLog.capture(error,{userId,scope:'import',location:'import:inspect',context:{importId,fileId:file.id}})};
       file.inspection={...file.inspection,status:error.status===504?'timeout':'failed',error:file.info.error,httpStatus:error.status||502,finishedAt:new Date().toISOString(),
         execution:{...file.inspection.execution,elapsedMs:started===undefined?0:Math.round(performance.now()-started)}};
       return false;
@@ -188,7 +189,7 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
       delete draft.chapterError;draft.chapterProcessing={...draft.chapterProcessing,status:'done',type,completedPages:totalPages,totalPages,finishedAt:new Date().toISOString()};persist(draft);
     }catch(error){
       if(!draft||!validAttempt(userId,id,generation))return;
-      draft.chapterError=error.expose?error.message:'AI 分章未完成，可重试，或对照原文件手动添加章节。';
+      draft.chapterError=errorLog.capture(error,{userId,scope:'import',location:'import:chapters',context:{importId:id}});
       draft.chapterProcessing={...draft.chapterProcessing,status:error.status===504?'timeout':'failed',error:draft.chapterError,finishedAt:new Date().toISOString(),execution:error.execution};persist(draft);
     }
   }
@@ -215,7 +216,7 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
         await writeFile(filePath,uploaded.buffer,{mode:0o400,flag:'wx'});
         const type=pasted!==null?'text':detected[index];
         const file={id:fileId,name:cleanName(uploaded.originalname),mimeType:uploaded.mimetype||'application/octet-stream',bytes:uploaded.buffer.length,filePath,type,previewUrl:`/api/imports/${id}/files/${fileId}/raw`};
-        const parsed=await inspectFileEntry(file);
+        const parsed=await inspectFileEntry(file,{userId:req.user.id,importId:id});
         if(!parsed&&!isPdf(type)&&type!=='epub')throw fail(file.inspection.httpStatus,file.info.error);
         if(isImage(type)){
           file.imageId=(await ai.saveImage(req.user.id,uploaded.buffer,{mimeType:uploaded.mimetype,originalName:file.name})).id;
@@ -314,7 +315,7 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
       try{
         for(const file of draft.files.filter(file=>file.info?.error)){
           if(!validAttempt(draft.userId,draft.id,generation))return;
-          await inspectFileEntry(file,{signal:controller.signal,onStatus:status=>{
+          await inspectFileEntry(file,{userId:draft.userId,importId:draft.id,signal:controller.signal,onStatus:status=>{
             if(!validAttempt(draft.userId,draft.id,generation))return;
             draft.inspectionProcessing={status:status.state,execution:status};persist(draft);
           }});
@@ -326,7 +327,7 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
         draft.inspectionProcessing={status:draft.files.some(file=>file.info?.error)?'failed':'done'};persist(draft);
       }catch(error){
         if(!validAttempt(draft.userId,draft.id,generation))return;
-        draft.inspectionProcessing={status:error.status===504?'timeout':'failed',error:error.expose?error.message:'本地文件解析未完成，请重试。'};persist(draft);
+        draft.inspectionProcessing={status:error.status===504?'timeout':'failed',error:errorLog.capture(error,{userId:draft.userId,scope:'import',location:'import:inspect',context:{importId:draft.id}})};persist(draft);
       }
     });
     jobs.set(draft.id,{promise:job,controller,generation});

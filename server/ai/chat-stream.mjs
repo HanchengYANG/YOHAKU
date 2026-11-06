@@ -1,3 +1,4 @@
+import { publicErrorBody } from "../errors.mjs";
 // Opt-in transport keeps existing JSON callers and HTTP error codes intact.
 export async function respondToChat(req, res, work) {
   if (!req.get("accept")?.includes("text/event-stream")) {
@@ -26,9 +27,11 @@ export async function respondToChat(req, res, work) {
     const result = await work(emit);
     await emit({type:"done",conversation:result.conversation});
   } catch (cause) {
-    const status = cause.status || 500;
-    await emit({type:"error",status,code:cause.code,
-      error:status >= 500 && !cause.expose ? "服务暂时遇到问题，请稍后再试。" : cause.message});
+    const { status, body } = publicErrorBody(cause, {
+      errorLog: req.app.locals.errorLog, userId: req.user?.id ?? null, scope: "chat",
+      location: `${req.method} ${req.originalUrl.split("?")[0]}`,
+    });
+    await emit({ type: "error", status, code: cause?.code, ...body });
   } finally {
     clearInterval(heartbeat);
     if (!res.destroyed && !res.writableEnded) res.end();
