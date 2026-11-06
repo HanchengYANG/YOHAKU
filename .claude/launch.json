@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "yohaku-dev",
+      "runtimeExecutable": "env",
+      "runtimeArgs": ["PORT=4317", "npm", "run", "dev"],
+      "port": 5173
+    }
+  ]
+}
