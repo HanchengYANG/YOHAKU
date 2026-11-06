@@ -38,8 +38,9 @@ export function classifyError(error) {
   const status = Number.isInteger(error?.status) ? error.status : 500;
   const code = typeof error?.code === "string" ? error.code : null;
   const kind = code || (typeof error?.diagnostic?.code === "string" ? error.diagnostic.code : null);
-  // Provider errors raised inside a role carry execution details but may lack a diagnostic.
-  const fromAI = Boolean(error?.diagnostic) || Boolean(error?.execution?.providerId) || Boolean(code?.startsWith("AI_"));
+  // Providers mark their own errors with aiProvider; `execution` is not a signal,
+  // because withRole attaches it to every error thrown inside a role, user errors included.
+  const fromAI = Boolean(error?.diagnostic) || Boolean(code?.startsWith("AI_")) || error?.aiProvider === true;
   if (code === "AI_AUTH_REQUIRED" || (fromAI && [401, 403].includes(status)))
     return { record: true, kind: "AI_AUTH_REQUIRED", action: AI_SETTINGS_ACTION };
   if (status < 500 && (!fromAI || userFixableAICodes.has(kind)))

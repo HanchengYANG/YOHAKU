@@ -73,6 +73,7 @@ export function createCodexRuntime({
     const error = new Error(safe(message));
     error.status = status;
     error.expose = true;
+    error.aiProvider = true; // Tells the error log this failure came from the AI provider.
     return error;
   }
   function send(message) {

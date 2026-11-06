@@ -4,7 +4,8 @@ import { CHAT_INSTRUCTIONS } from "./runtime.mjs";
 import { readEventStream } from "../../../shared/event-stream.mjs";
 import { normalizeReasoning } from "../../../shared/ai-roles.mjs";
 
-const failure = (message, status = 502) => Object.assign(new Error(message), { status, expose: true });
+// aiProvider tells the error log that this failure came from the AI provider.
+const failure = (message, status = 502) => Object.assign(new Error(message), { status, expose: true, aiProvider: true });
 function publicUrl(value) {
   try { const url = new URL(value); return ["https:", "http:"].includes(url.protocol) ? url.href : null; } catch { return null; }
 }

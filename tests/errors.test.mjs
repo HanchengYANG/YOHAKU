@@ -33,8 +33,13 @@ test("用户能自己解决的错误不记录", () => {
   })), { record: false, kind: "AI_CANCELLED", action: null });
 });
 
-test("带 AI 执行信息的 4xx 视为 AI 错误并记录", () => {
-  assert.deepEqual(classifyError(fail(400, "所选模型不支持图片输入，尚未发起推理。", { execution: { providerId: "openai", role: "ocr" } })),
+test("角色内的用户错误只带执行信息时不记录", () => {
+  assert.deepEqual(classifyError(fail(409, "正文草稿已变化，请重新提交。", { execution: { providerId: "openai", role: "annotation" } })),
+    { record: false, kind: null, action: null });
+});
+
+test("提供方自己抛出的 4xx 视为 AI 错误并记录", () => {
+  assert.deepEqual(classifyError(fail(400, "所选模型不支持图片输入，尚未发起推理。", { aiProvider: true })),
     { record: true, kind: null, action: null });
 });
 
