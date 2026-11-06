@@ -143,13 +143,13 @@ async function firstPublicationFixture(page,{holdReturningGet=false,lateDocument
 async function manuallyReviewFirstUnpublishedSource(page){
   await page.goto("/#doc");
   await expect(page.getByRole("region",{name:"准备当前阅读页",exact:true})).toContainText("正文出现较大改动");
-  await page.getByRole("button",{name:"校对正文",exact:true}).click();
+  await page.getByRole("button",{name:"校对",exact:true}).click();
   await page.getByRole("button",{name:"核对并编辑此提议",exact:true}).click();
   await page.getByLabel("来源正文",{exact:true}).fill("ＩＭＣへようこそ。");
   await page.getByRole("button",{name:"保存正文",exact:true}).click();
   await expect(page.getByRole("status").filter({hasText:"已保存，将仅补齐"})).toBeVisible();
   await page.getByRole("button",{name:"返回阅读",exact:true}).click();
-  await expect(page.getByRole("region",{name:"准备当前阅读页",exact:true})).toContainText("等待分句");
+  await expect(page.getByRole("region",{name:"准备当前阅读页",exact:true})).toContainText(/正在准备|注音还在准备/);
 }
 
 test("first publication after manual review survives late empty document snapshots",async({page},info)=>{
@@ -184,7 +184,7 @@ test("reading preparation shows real progress then automatically displays the co
   await expect(page.getByLabel("日语原文")).toHaveCount(0);
   state.stage="annotate";state.percent=40;state.completed=400;state.total=1000;
   await expect(progress).toHaveAttribute("aria-valuenow","40");
-  await expect(page.getByRole("region",{name:"准备当前阅读页",exact:true})).toContainText("正在注音");
+  await expect(page.getByRole("region",{name:"准备当前阅读页",exact:true})).toContainText("正在准备");
   await page.screenshot({path:`artifacts/reading-progress-${info.project.name}.png`,fullPage:true});
   state.ready=true;
   await expect(page.getByLabel("日语原文")).toContainText(original);
@@ -199,16 +199,15 @@ test("an unpublished reading page shows a plain provisional preview during slow 
   await page.goto("/#doc");
   const preparation=page.getByRole("region",{name:"准备当前阅读页",exact:true});
   const preview=page.getByRole("region",{name:"已提取正文预览",exact:true});
-  await expect(preparation).toContainText("正在校正正文");
+  await expect(preparation).toContainText("注音还在准备");
   await expect(preparation).toHaveAttribute("aria-busy","true");
   await expect(preview).toBeVisible();
-  await expect(preview).toContainText(source.label);
-  await expect(preview).toContainText("准备完成后会自动显示正式阅读页");
+  await expect(preview).not.toContainText(source.label);
   await expect(preview).toContainText("<em>次の行</em>…");
   await expect(preview.locator("em")).toHaveCount(0);
   expect(await preview.evaluate(element=>element.previousElementSibling?.getAttribute("aria-label"))).toBe("准备当前阅读页");
   await expect(page.getByLabel("日语原文")).toHaveCount(0);
-  await expect(page.getByRole("button",{name:"对话记录",exact:true})).toHaveCount(0);
+  await expect(page.getByRole("button",{name:/^对话/})).toHaveCount(0);
   await preview.evaluate(element=>{
     const range=document.createRange();range.selectNodeContents(element);
     const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
@@ -278,8 +277,6 @@ test("prepared source pages refresh authoritative shelf totals once per content 
   await expect(shelfItem).toContainText("0 字");
   total=271;state.ready=true;
   await expect(page.getByLabel("日语原文")).toBeVisible();
-  await expect(page.locator(".document-meta")).toContainText("271 字");
-  await expect(page.locator(".document-meta")).toContainText("45 处注音");
   await expect(shelfItem).toContainText("271 字");
   const afterReady=summaries,previousPolls=state.polls;
   await expect.poll(()=>state.polls).toBeGreaterThan(previousPolls);
@@ -287,7 +284,6 @@ test("prepared source pages refresh authoritative shelf totals once per content 
   total=351;
   state.extraPages=[{id:"p1",index:1,ready:true,bodyHtml:html("あ".repeat(79)+"。"),sourceIds:["s3"],start:271,end:351}];
   await expect(shelfItem).toContainText("351 字");
-  await expect(page.locator(".document-meta")).toContainText("271 字");
   await page.locator(".brand").click();
   await expect(page.getByRole("region",{name:"最近阅读",exact:true})).toContainText("351 字");
   await expect(page.getByRole("button",{name:"继续阅读：分页阅读资料",exact:true})).toContainText("351 字");
@@ -295,7 +291,7 @@ test("prepared source pages refresh authoritative shelf totals once per content 
 
 test("reading preparation links to its existing background task",async({page})=>{
   const state=await preparationFixture(page);state.taskId="preparation-task";await page.goto("/#doc");
-  await expect(page.getByRole("link",{name:"查看后台任务",exact:true})).toHaveAttribute("href","#tasks/preparation-task");
+  await expect(page.getByRole("link",{name:"查看任务",exact:true})).toHaveAttribute("href","#tasks/preparation-task");
 });
 
 test("queued running and automatic backoff preparation cannot submit a manual retry",async({page})=>{
@@ -308,12 +304,12 @@ test("queued running and automatic backoff preparation cannot submit a manual re
   });
   await page.goto("/#doc");
   const preparation=page.getByRole("region",{name:"准备当前阅读页",exact:true});
-  for(const [status,label] of [["queued","排队中"],["running","处理中"],["retry_wait","等待自动重试"]]){
+  for(const status of ["queued","running","retry_wait"]){
     state.diagnostics.current={...state.diagnostics.current,state:status};
-    await expect(preparation).toContainText(label);
-    await expect(preparation.getByRole("button",{name:"重试准备",exact:true})).toHaveCount(0);
-    await expect(preparation.getByRole("link",{name:"查看后台任务",exact:true})).toHaveAttribute("href","#tasks/preparation-task");
-    await expect(preparation.getByRole("button",{name:"校对正文",exact:true})).toBeEnabled();
+    await expect(preparation).toContainText("正在准备");
+    await expect(preparation.getByRole("button",{name:"重试",exact:true})).toHaveCount(0);
+    await expect(preparation.getByRole("link",{name:"查看任务",exact:true})).toHaveAttribute("href","#tasks/preparation-task");
+    await expect(page.getByRole("button",{name:"校对",exact:true})).toBeEnabled();
   }
   await expect.poll(()=>requests.filter(request=>request.active===true).length).toBeGreaterThan(0);
   expect(requests.filter(request=>request.retry===true)).toHaveLength(0);
@@ -339,8 +335,8 @@ test("failed preparation allows one explicit retry and hides it once queued agai
     await page.goto("/#doc");
     const preparation=page.getByRole("region",{name:"准备当前阅读页",exact:true});
     await expect(preparation).toContainText("远端正文校对失败");
-    await expect(preparation.getByRole("link",{name:"查看后台任务",exact:true})).toBeVisible();
-    await preparation.getByRole("button",{name:"重试准备",exact:true}).click();
+    await expect(preparation.getByRole("link",{name:"查看任务",exact:true})).toBeVisible();
+    await preparation.getByRole("button",{name:"重试",exact:true}).click();
     await expect.poll(()=>requests.filter(request=>request.retry===true).length).toBe(1);
     const retry=requests.find(request=>request.retry===true);
     const onlinePosts=await page.evaluate(async()=>{
@@ -359,8 +355,8 @@ test("failed preparation allows one explicit retry and hides it once queued agai
     expect(onlinePosts).toBe(0);
 
     releaseRetry();
-    await expect(preparation).toContainText("排队中");
-    await expect(preparation.getByRole("button",{name:"重试准备",exact:true})).toHaveCount(0);
+    await expect(preparation).toContainText("正在准备");
+    await expect(preparation.getByRole("button",{name:"重试",exact:true})).toHaveCount(0);
     await page.evaluate(()=>window.dispatchEvent(new Event("online")));
     await expect.poll(()=>requests.some(request=>request.active===true&&!request.retry&&request.sequence>retry.sequence)).toBe(true);
     state.ready=true;await expect(page.getByLabel("日语原文")).toContainText(original);
@@ -382,14 +378,15 @@ test("reading diagnostics show the queued and running source without inventing a
   state.diagnostics={current:{state:"queued",step:"correct",source:{id:"s2",type:"scan_pdf",label:"PDF 第27页",page:27},elapsedMs:65000,providerId:"api_base",model:"Deepseek/deepseek-v4-flash-0731",operationId:"operation-27"},recentFailures:[]};
   await page.goto("/#doc");
   const preparation=page.getByRole("region",{name:"准备当前阅读页",exact:true});
-  await expect(preparation).toContainText("排队中");
-  await expect(preparation).toContainText("PDF 第27页");
-  await expect(preparation).toContainText("已排队 1 分 05 秒");
+  await expect(preparation).toContainText("正在准备");
+  await expect(preparation).not.toContainText("PDF 第27页");
+  await expect(preparation).not.toContainText("已排队");
   await expect(preparation.locator(".is-indeterminate")).toHaveCount(0);
-  await expect(preparation.locator(".reading-page-progress-track>span")).toHaveCSS("width","0px");
+  await expect(preparation.locator(".reading-status-track>span")).toHaveCSS("width","0px");
   state.diagnostics.current={...state.diagnostics.current,state:"running",elapsedMs:12000};
-  await expect(preparation).toContainText("正在校正正文");
-  await expect(preparation).toContainText("已运行 12 秒");
+  await expect(preparation.locator(".is-indeterminate")).toHaveCount(1);
+  await expect(preparation).toContainText("正在准备");
+  await expect(preparation).not.toContainText("已运行");
   await expect(preparation.getByText("处理详情",{exact:true})).toHaveCount(0);
   await expect(preparation).not.toContainText("Deepseek/deepseek-v4-flash-0731");
   await expect(preparation).not.toContainText("预计");
@@ -403,9 +400,8 @@ test("reading diagnostics stop failed progress and retain safe failure history a
   state.diagnostics={current:{state:"failed",step:"correct",source:failure.source,updatedAt:failure.at,...failure.execution,error:{message:failure.message,diagnostic:failure.diagnostic}},recentFailures:[failure]};
   await page.goto("/#doc");
   const preparation=page.getByRole("region",{name:"准备当前阅读页",exact:true});
-  await expect(preparation).toContainText("正文校正失败");
-  await expect(preparation).toContainText("已失败");
-  await expect(preparation).toContainText("35% · 已失败");
+  await expect(preparation).toContainText("服务暂时不可用");
+  await expect(preparation.getByRole("progressbar")).toHaveCount(0);
   await expect(preparation).not.toContainText("处理中");
   await expect(preparation).not.toContainText("正在校正");
   await expect(preparation).toHaveAttribute("aria-busy","false");
@@ -426,10 +422,10 @@ test("a legacy preparation failure stops its running label and indeterminate ani
   const state=await preparationFixture(page);state.error="API 调用失败";
   await page.goto("/#doc");
   const preparation=page.getByRole("region",{name:"准备当前阅读页",exact:true});
-  await expect(preparation).toContainText("已暂停");
+  await expect(preparation).toContainText("API 调用失败");
   await expect(preparation).not.toContainText("处理中");
   await expect(preparation.locator(".is-indeterminate")).toHaveCount(0);
-  await expect(preparation.getByRole("button",{name:"重试准备",exact:true})).toBeEnabled();
+  await expect(preparation.getByRole("button",{name:"重试",exact:true})).toBeEnabled();
 });
 
 test("a late pending heartbeat cannot replace an automatically loaded completed reading page",async({page})=>{
@@ -577,13 +573,15 @@ test("returning to a prepared reading page reuses its ready body while another p
     const preview=page.getByRole("region",{name:"已提取正文预览",exact:true});
     await expect(preview).toContainText(secondText);
     await expect(preview).not.toContainText(original);
-    await navigation.getByText("文章目录",{exact:true}).click();
-    await navigation.getByRole("button",{name:"第 3 页 · 准备中",exact:true}).click();
+    const contents=page.locator(".reading-bar-pages"),toc=page.getByRole("dialog",{name:"目录",exact:true});
+    await contents.click();
+    await toc.getByRole("button",{name:"第 3 页 · 准备中",exact:true}).click();
     await expect.poll(()=>state.held).toBeGreaterThan(0);
     await expect(page.getByRole("alert")).toHaveCount(0);
     await expect(preview).toHaveCount(0);
     await expect(page.getByRole("region",{name:"准备当前阅读页",exact:true})).not.toContainText(/较大改动|暂停|待核对/);
-    await navigation.getByRole("button",{name:"第 1 页",exact:true}).click();
+    await contents.click();
+    await toc.getByRole("button",{name:"第 1 页",exact:true}).click();
     await expect(page.getByLabel("日语原文")).toContainText(original);
     await expect(preview).toHaveCount(0);
     await expect(page.getByRole("region",{name:"准备当前阅读页",exact:true})).toHaveCount(0);
@@ -719,7 +717,7 @@ test("reading heartbeats advance the same session across page changes and source
     await expect(reader).toContainText(secondText);
 
     const correctionStart=requests.length;
-    await page.getByRole("button",{name:"校对正文",exact:true}).click();
+    await page.getByRole("button",{name:"校对",exact:true}).click();
     await expect(page.getByLabel("切换校对来源",{exact:true})).toHaveValue("s1");
     await expect.poll(()=>!!stopAfter(first.sessionId,correctionStart)).toBe(true);
     const correctionStop=stopAfter(first.sessionId,correctionStart),returnStart=requests.length;
@@ -774,7 +772,7 @@ for(const save of [false,true])test(`returning from second-page source correctio
     await navigation.getByRole("button",{name:"下一页",exact:true}).click();
     await expect(reader).toContainText(secondText);
     await expect.poll(()=>savedIndex).toBe(1);
-    await page.getByRole("button",{name:"校对正文",exact:true}).click();
+    await page.getByRole("button",{name:"校对",exact:true}).click();
     await expect(page.getByLabel("切换校对来源",{exact:true})).toHaveValue("s2");
     await page.getByRole("button",{name:"编辑正文与注音",exact:true}).click();
     const editor=page.getByLabel("来源正文",{exact:true});
@@ -793,7 +791,7 @@ for(const save of [false,true])test(`returning from second-page source correctio
     await expect.poll(()=>returnBeats[0]).toBe(1);
     await expect.poll(()=>returnReads[0]).toBe("1");
     expect(showedFirstPage).toBe(0);
-    await expect(navigation).toContainText("第 2 / 2 页");
+    await expect(navigation).toContainText("2 / 2");
     await expect(reader).toContainText(save ? editedText : secondText);
     expect(returnBeats).not.toContain(0);
     expect(savedIndex).toBe(1);
@@ -803,7 +801,7 @@ for(const save of [false,true])test(`returning from second-page source correctio
 
 test("source correction opens the mapped source, saves its version and preserves immutable preview",async({page},testInfo)=>{
   const state=await fixture(page);await page.goto("/#doc");
-  await page.getByRole("button",{name:"校对正文",exact:true}).click();
+  await page.getByRole("button",{name:"校对",exact:true}).click();
   await expect(page.getByLabel("切换校对来源")).toHaveValue("s2");
   await expect(page.locator(".source-original-text")).toHaveText("保存された原文。");
   await page.getByRole("button",{name:"编辑正文与注音",exact:true}).click();
@@ -839,9 +837,8 @@ for(const example of [
   });
   await page.goto("/#doc");
   if(example.ready)await expect(page.getByLabel("日语原文")).toBeVisible();
-  else if(example.sourceId)await expect(page.getByRole("region",{name:"准备当前阅读页",exact:true})).toContainText("PDF 第110页");
-  else await expect(page.getByText("文章目录",{exact:true})).toBeVisible();
-  await page.getByRole("button",{name:"校对正文",exact:true}).click();
+  else await expect(page.getByRole("region",{name:"准备当前阅读页",exact:true})).toBeVisible();
+  await page.getByRole("button",{name:"校对",exact:true}).click();
   await expect(page.getByLabel("切换校对来源",{exact:true})).toHaveValue(example.expected);
   expect(state.calls.filter(call=>call.path.endsWith("/prepare")).map(call=>call.path)).toEqual([`/documents/doc/sources/${example.expected}/prepare`]);
 });
@@ -860,7 +857,7 @@ async function delayedProposalEditFixture(page) {
     return route.fulfill({json:{ok:true}});
   });
   await page.goto("/#doc");
-  await page.getByRole("button",{name:"校对正文",exact:true}).click();
+  await page.getByRole("button",{name:"校对",exact:true}).click();
   await expect(page.getByRole("button",{name:"核对并编辑此提议",exact:true})).toBeVisible();
   return state;
 }
@@ -887,7 +884,7 @@ test("old edit lease renewal and release cannot interfere with a reopened source
   });
   try{
     await page.goto("/#doc");
-    await page.getByRole("button",{name:"校对正文",exact:true}).click();
+    await page.getByRole("button",{name:"校对",exact:true}).click();
     const edit=page.getByRole("button",{name:"编辑正文与注音",exact:true}),editor=page.getByLabel("来源正文",{exact:true});
     await edit.click();
     await expect(editor).toHaveValue(original);
@@ -963,7 +960,7 @@ test("leaving during edit acquisition cannot replace a lease opened after return
 
   try{
     await page.goto("/#doc");
-    const correction=page.getByRole("button",{name:"校对正文",exact:true}),edit=page.getByRole("button",{name:"编辑正文与注音",exact:true});
+    const correction=page.getByRole("button",{name:"校对",exact:true}),edit=page.getByRole("button",{name:"编辑正文与注音",exact:true});
     await correction.click();await edit.click();
     await expect.poll(()=>acquires.length).toBe(1);
     const abandoned=acquires[0];
@@ -1081,7 +1078,7 @@ for(const conflict of [false,true])test(`keeping current source text ${conflict 
 test("a segmentation failure offers explicit retry but cannot keep current text as a correction fallback",async({page})=>{
   const state=await fixture(page,{source:{status:"failed",error:"分句失败",steps:[{step:"segment",status:"failed"}],failedCorrection:null}});
   await page.goto("/#doc");
-  await page.getByRole("button",{name:"校对正文",exact:true}).click();
+  await page.getByRole("button",{name:"校对",exact:true}).click();
   const correction=page.getByRole("region",{name:"校对正文",exact:true});
   await expect(correction.locator(".source-current-body")).toContainText(original);
   await expect(correction.getByRole("button",{name:"使用当前正文继续",exact:true})).toHaveCount(0);
@@ -1097,7 +1094,7 @@ test("a segmentation failure offers explicit retry but cannot keep current text 
 for (const sourceType of ["text_pdf","epub"]) test(`${sourceType} correction previews preserve original page and ruby`,async({page})=>{
   const source = sourceType === "text_pdf" ? {type:"text_pdf",preview:{type:"pdf",url:"/original.pdf",page:12}} : {type:"epub",preview:{type:"html",html:blocksToHtml(parseText("{原文|げんぶん}を残す。"))},original:{chapterHtml:blocksToHtml(parseText("{原文|げんぶん}を残す。\n章全体の続き。"))}};
   await fixture(page,{source});await page.goto("/#doc");
-  await page.getByRole("button",{name:"校对正文",exact:true}).click();
+  await page.getByRole("button",{name:"校对",exact:true}).click();
   if(sourceType === "text_pdf") await expect(page.getByTitle("PDF 原始页面")).toHaveAttribute("src","/original.pdf#page=12");
   else {await expect(page.locator(".source-original-html ruby")).toContainText("原文");await expect(page.locator(".source-original-html rt")).toHaveText("げんぶん");await page.getByText("查看完整原始章节",{exact:true}).click();await expect(page.locator(".source-original-chapter")).toContainText("章全体の続き。");}
 });
@@ -1106,7 +1103,7 @@ test("imported PDF correction displays a loaded original-page image with zoom an
   await fixture(page,{source:{type:"scan_pdf",preview:{type:"pdf",url:"/api/imports/imp/files/file/raw",page:12}}});
   const png=await sharp(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="900"><rect width="640" height="900" fill="white"/><text x="55" y="90" font-size="30" fill="#263e34">PDF PAGE 12</text><text x="55" y="165" font-size="24" fill="#263e34">Original source page</text><path d="M55 210H585M55 265H585M55 320H585M55 375H585" stroke="#89958c" stroke-width="3"/></svg>')).png().toBuffer();
   await page.route("**/api/imports/imp/files/file/pages/12",(route)=>route.fulfill({contentType:"image/png",body:png}));
-  await page.goto("/#doc");await page.getByRole("button",{name:"校对正文",exact:true}).click();
+  await page.goto("/#doc");await page.getByRole("button",{name:"校对",exact:true}).click();
   const originalPage=page.getByRole("img",{name:"PDF 原始页面，第 12 页",exact:true});
   await expect(originalPage).toBeVisible();await expect.poll(()=>originalPage.evaluate((element)=>element.complete && element.naturalWidth > 0)).toBe(true);
   await expect(originalPage).toHaveAttribute("src","/api/imports/imp/files/file/pages/12");await expect(page.getByTitle("PDF 原始页面")).toHaveCount(0);
@@ -1676,7 +1673,7 @@ test("reselecting a restored PDF draft distinguishes identical saved drafts by t
 
 
 test("source questions carry current sentence and stable source scope",async({page})=>{
-  const state=await fixture(page);await page.goto("/#doc");await page.getByRole("button",{name:"校对正文",exact:true}).click();
+  const state=await fixture(page);await page.goto("/#doc");await page.getByRole("button",{name:"校对",exact:true}).click();
   await expect(page.locator(".source-current-body .article-body")).toContainText(original);
   await page.locator(".source-current-body .article-body p").evaluate((element)=>{const range=document.createRange();range.selectNodeContents(element);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);document.dispatchEvent(new Event("selectionchange"));});
   await page.getByRole("button",{name:"翻译选区",exact:true}).click();
@@ -1688,7 +1685,7 @@ test("source questions carry current sentence and stable source scope",async({pa
 
 
 test("source correction can remove all non-body text without changing the original",async({page})=>{
-  const state=await fixture(page);await page.goto("/#doc");await page.getByRole("button",{name:"校对正文",exact:true}).click();
+  const state=await fixture(page);await page.goto("/#doc");await page.getByRole("button",{name:"校对",exact:true}).click();
   await page.getByRole("button",{name:"编辑正文与注音",exact:true}).click();await page.getByLabel("来源正文",{exact:true}).fill("");
   await expect(page.getByRole("button",{name:"保存正文",exact:true})).toBeEnabled();await page.getByRole("button",{name:"保存正文",exact:true}).click();
   await expect.poll(()=>state.saves.length).toBe(1);expect(bodyText(state.saves[0].bodyHtml)).toBe("");
@@ -1701,7 +1698,7 @@ test("full-body review distinguishes prepared blank and excluded sources from pe
     source:{bodyHtml:"<p></p>",firstExtraction:{text:"广告内容"},original:{importExclusions:[{startLine:1,endLine:1}]}},
     extraSources:[{id:"pending",type:"text",position:2,status:"pending",bodyHtml:"",firstExtraction:null},{id:"failed",type:"text",position:3,status:"failed",bodyHtml:"",firstExtraction:{text:""}}],
   });
-  await page.goto("/#doc");await page.getByRole("button",{name:"校对正文",exact:true}).click();
+  await page.goto("/#doc");await page.getByRole("button",{name:"校对",exact:true}).click();
   await page.getByRole("button",{name:"全文检查",exact:true}).click();
   await expect(page.getByText("此来源没有正文",{exact:true})).toHaveCount(1);
   await expect(page.getByText("非正文内容已排除",{exact:true})).toHaveCount(1);
@@ -1712,15 +1709,15 @@ test("full-body review distinguishes prepared blank and excluded sources from pe
 test("empty completed articles show an editing path without an endless preparation gate",async({page})=>{
   await fixture(page,{empty:true});await page.goto("/#doc");
   await expect(page.getByRole("heading",{name:"当前文章没有正文"})).toBeVisible();
-  await expect(page.getByRole("button",{name:"校对正文",exact:true})).toBeVisible();
-  await expect(page.getByRole("button",{name:"重试准备",exact:true})).toHaveCount(0);
-  await expect(page.getByLabel("准备当前阅读页")).toHaveAttribute("aria-busy","false");
+  await expect(page.getByRole("button",{name:"校对",exact:true})).toBeVisible();
+  await expect(page.getByRole("button",{name:"重试",exact:true})).toHaveCount(0);
+  await expect(page.getByRole("progressbar")).toHaveCount(0);
 });
 
 test("an unpublished next page never repeats the previous page as new content",async({page})=>{
   await fixture(page,{pendingNext:true});await page.goto("/#doc");
   await expect(page.getByLabel("日语原文")).toContainText(original);await page.getByLabel("阅读分页",{exact:true}).getByRole("button",{name:"下一页"}).click();
-  await expect(page.getByRole("heading",{name:"正在准备当前阅读页"})).toBeVisible();
+  await expect(page.getByRole("region",{name:"准备当前阅读页",exact:true})).toContainText("正在准备");
   await expect(page.getByLabel("日语原文")).toHaveCount(0);
   await expect(page.getByLabel("阅读分页",{exact:true})).toContainText("第 2 页");
   await expect(page.getByLabel("阅读分页",{exact:true}).getByRole("button",{name:"下一页"})).toBeDisabled();
@@ -1736,15 +1733,15 @@ test("new paginated articles retain the existing book promotion action",async({p
 test("an emptied published page retains its position and navigation",async({page})=>{
   await fixture(page,{emptyPublished:true});await page.goto("/#doc");
   await expect(page.getByRole("heading",{name:"本页正文已清空",exact:true})).toBeVisible();
-  await expect(page.getByRole("button",{name:"重试准备",exact:true})).toHaveCount(0);
-  await page.getByLabel("页末阅读分页").getByRole("button",{name:"下一页",exact:true}).click();
+  await expect(page.getByRole("button",{name:"重试",exact:true})).toHaveCount(0);
+  await page.getByLabel("阅读分页",{exact:true}).getByRole("button",{name:"下一页",exact:true}).click();
   await expect(page.getByLabel("日语原文")).toContainText("次の読書ページ。");
 });
 
 test("source-scoped editing preserves batch readings and undo",async({page})=>{
   const text="空を見る。空が青い。";
   const state=await fixture(page,{source:{bodyHtml:html(text)}});await page.goto("/#doc");
-  await page.getByRole("button",{name:"校对正文",exact:true}).click();await page.getByRole("button",{name:"编辑正文与注音",exact:true}).click();
+  await page.getByRole("button",{name:"校对",exact:true}).click();await page.getByRole("button",{name:"编辑正文与注音",exact:true}).click();
   await page.getByRole("tab",{name:"批量注音",exact:true}).click();
   const batch=page.getByRole("tabpanel",{name:"批量注音",exact:true});
   await batch.getByLabel("要标注的词语").fill("空");await batch.getByRole("button",{name:"查找位置",exact:true}).click();
@@ -1777,10 +1774,65 @@ test("home shows the saved page of a paged article and resumes there",async({pag
   await page.goto("/");
   const current=page.getByRole("region",{name:"继续阅读",exact:true});
   await expect(current.getByRole("heading",{name:"分页阅读资料",exact:true})).toBeVisible();
-  await expect(current).toContainText("第 2 / 2 页");
+  await expect(current).toContainText("2 / 2");
   await current.getByRole("button",{name:"继续阅读",exact:true}).click();
   await expect(page).toHaveURL(/#doc$/);
   await expect(page.getByLabel("日语原文",{exact:true})).toContainText(secondText);
-  await expect(page.getByRole("navigation",{name:"阅读分页",exact:true})).toContainText("第 2 / 2 页");
+  await expect(page.getByRole("navigation",{name:"阅读分页",exact:true})).toContainText("2 / 2");
   expect(requested[0]).toBeNull();
+});
+
+test("the reading bar lists book and page contents, arrow keys turn pages and the last page links the next article",async({page})=>{
+  await fixture(page);
+  const texts=["一頁目の本文。","二頁目の本文。","三頁目の本文。"];let offset=0;
+  const pages=texts.map((text,index)=>{const start=offset;offset+=text.length;return {id:`p${index}`,index,ready:true,bodyHtml:html(text),sourceIds:["s2"],start,end:offset};});
+  const book={id:"bk",title:"读书笔记",revision:1,pages:[{id:"doc",title:"分页阅读资料"},{id:"doc2",title:"第二篇文章"}]};
+  const now=new Date().toISOString();
+  await page.route("**/api/documents/doc",route=>route.fulfill({json:{id:"doc",title:"分页阅读资料",kind:"article",orientation:"horizontal",
+    sourceWorkflow:true,bookId:"bk",bodyHtml:html(texts.join("")),bodyHash:"hash",blocks:parseText(texts.join("")),revision:1,createdAt:now,updatedAt:now}}));
+  await page.route("**/api/books/bk",route=>route.fulfill({json:book}));
+  await page.route("**/api/documents/doc/reading-*",route=>{
+    const request=route.request(),url=new URL(request.url());
+    if(request.method()==="POST")return route.fulfill({json:{sessionId:"test"}});
+    const index=Number(url.searchParams.get("index")??0);
+    return route.fulfill({json:{pages,currentPage:pages[index],index,position:index,complete:true,totalPages:3,hasNext:index<2}});
+  });
+  await page.goto("/#doc");
+  const article=page.getByLabel("日语原文",{exact:true});
+  await expect(article).toContainText(texts[0]);
+  await expect(page.getByRole("button",{name:"返回书籍：读书笔记",exact:true})).toBeVisible();
+  await page.getByRole("button",{name:"1 / 3 页",exact:true}).click();
+  const toc=page.getByRole("dialog",{name:"目录",exact:true});
+  await expect(toc.getByRole("button",{name:"分页阅读资料",exact:true})).toHaveAttribute("aria-current","page");
+  await expect(toc.getByRole("button",{name:/^第 \d 页$/})).toHaveCount(3);
+  await toc.getByRole("button",{name:"第 3 页",exact:true}).click();
+  await expect(toc).toHaveCount(0);
+  await expect(article).toContainText(texts[2]);
+  await expect(page.getByRole("button",{name:"下一篇：第二篇文章",exact:true})).toBeVisible();
+  await page.keyboard.press("ArrowLeft");
+  await expect(article).toContainText(texts[1]);
+  await expect(page.getByRole("button",{name:/^下一篇/})).toHaveCount(0);
+  await page.keyboard.press("ArrowRight");
+  await expect(article).toContainText(texts[2]);
+  await expect(page.getByLabel("阅读分页",{exact:true})).toContainText("3 / 3");
+  await expect(page.getByLabel("阅读分页",{exact:true}).getByRole("button",{name:"下一页",exact:true})).toBeDisabled();
+  await page.getByRole("button",{name:"下一篇：第二篇文章",exact:true}).click();
+  await expect(page).toHaveURL(/#doc2$/);
+});
+
+test("a failed page with extracted text stays readable with its error code and no selection questions",async({page})=>{
+  const state=await preparationFixture(page,{unpublished:true});
+  state.error="出错了，请重试 · 错误代码 7K2QD9";
+  state.diagnostics={current:{state:"failed",step:"correct",source:{id:"s2",type:"screenshot",label:"图片 1"}},recentFailures:[]};
+  state.provisionalPreview={text:"抽出された本文。",truncated:false,source:{label:"图片 1"}};
+  await page.goto("/#doc");
+  const preparation=page.getByRole("region",{name:"准备当前阅读页",exact:true});
+  await expect(preparation.getByRole("alert")).toContainText("准备失败");
+  await expect(preparation.getByRole("button",{name:"复制错误代码 7K2QD9",exact:true})).toBeVisible();
+  await expect(preparation.getByRole("button",{name:"重试",exact:true})).toBeEnabled();
+  await expect(preparation.getByRole("progressbar")).toHaveCount(0);
+  const preview=page.getByRole("region",{name:"已提取正文预览",exact:true});
+  await expect(preview).toContainText("抽出された本文。");
+  await expect(page.getByLabel("日语原文")).toHaveCount(0);
+  await expect(page.getByRole("button",{name:/^对话/})).toHaveCount(0);
 });

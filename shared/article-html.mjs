@@ -218,10 +218,27 @@ function mapRanges(html, boundaries, transform) {
   }
   return renderBody(paragraphs);
 }
+// A heading usually has no final punctuation, so segmentation can join it to
+// the first sentence. Heading paragraphs always start and end a sentence.
+function headingCuts(html) {
+  const cuts = [];
+  let offset = 0;
+  for (const p of parseBody(html)) {
+    const length = p.atoms.reduce((sum, atom) => sum + atom.text.length, 0);
+    if (p.type === "heading") cuts.push(offset, offset + length);
+    offset += length + 1;
+  }
+  return cuts;
+}
 function sentenceBoundaries(html, fragments, preserveExisting) {
   if (!Array.isArray(fragments) || fragments.some((fragment) => typeof fragment !== "string" || !fragment.length) || fragments.join("") !== bodyText(html)) throw error("分句结果改写了原文，请重试。");
+  const cuts = headingCuts(html);
   let offset = 0;
-  const ranges = fragments.map((fragment) => { const start = offset; offset += fragment.length; return { start, end: offset, id: randomUuid() }; });
+  const ranges = fragments.flatMap((fragment) => {
+    const start = offset; offset += fragment.length;
+    const points = [start, ...cuts.filter((cut) => cut > start && cut < offset), offset];
+    return points.slice(0, -1).map((point, index) => ({ start: point, end: points[index + 1], id: randomUuid() }));
+  });
   let rangeIndex = 0;
   return mapRanges(html, ranges.map((range) => range.end), (atom, start) => {
     while (rangeIndex < ranges.length - 1 && start >= ranges[rangeIndex].end) rangeIndex++;

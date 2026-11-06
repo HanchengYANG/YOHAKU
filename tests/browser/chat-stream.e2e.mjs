@@ -62,7 +62,7 @@ test("流式回答在完成前可见，收起恢复、切换片段、失败重�
     await selectArticleText(page,"風");
     const blocked=page.getByRole("dialog",{name:"划词提问",exact:true});
     await expect(blocked).toContainText("正在回答上一问");
-    for(const name of ["翻译","解释语法","自定义问题"]) await expect(blocked.getByRole("button",{name,exact:true})).toBeDisabled();
+    for(const name of ["翻译","讲解语法","提问…"]) await expect(blocked.getByRole("button",{name,exact:true})).toBeDisabled();
     await blocked.getByRole("button",{name:"关闭划词提问",exact:true}).click();
     await f.article.locator(`mark[data-qa-group-ids="${f.groupB}"]`).click();
     await expect(partial).toHaveCount(0); await expect(chat).toContainText("庭的已有讨论");
@@ -128,7 +128,7 @@ test("新选区流式提问仅显示本次讨论，完成后替换临时消息�
     await control(page,{text:"这是新选区的增量解释，先显示已生成的部分，不等待整篇回答。\n\n**完整的新选区解释**。",hold:true,prefixLength:22});
     await selectArticleText(page,"風");
     const popup=page.getByRole("dialog",{name:"划词提问",exact:true});
-    await popup.getByRole("button",{name:"自定义问题",exact:true}).click();
+    await popup.getByRole("button",{name:"提问…",exact:true}).click();
     await popup.getByRole("textbox",{name:"选区自定义问题"}).fill("风在这里怎么理解？");
     await popup.getByRole("button",{name:"发送",exact:true}).click();
     const partial=chat.getByLabel("AI 正在回答",{exact:true});

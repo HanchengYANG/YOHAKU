@@ -9,6 +9,15 @@
         "if [ -s \"$HOME/.nvm/nvm.sh\" ]; then . \"$HOME/.nvm/nvm.sh\" && nvm use 24 >/dev/null; fi; HOST=127.0.0.1 TLS_KEY= TLS_CERT= PORT=4317 exec npm run dev"
       ],
       "port": 5173
+    },
+    {
+      "name": "yohaku-fixture",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "if [ -s \"$HOME/.nvm/nvm.sh\" ]; then . \"$HOME/.nvm/nvm.sh\" && nvm use 24 >/dev/null; fi; PORT=4320 DATA_DIR=artifacts/preview-data exec node tests/browser/server.mjs"
+      ],
+      "port": 4320
     }
   ]
 }

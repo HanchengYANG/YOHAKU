@@ -12,6 +12,10 @@ const characters = (count) => `${(count || 0).toLocaleString("zh-CN")} 字`;
 // Articles outside the source workflow have no reading pages (pageCount 0).
 export function pageProgress(position) {
   if (!position || !(position.pageCount > 0)) return null;
+  // While the article is still being prepared, pageCount only counts the pages
+  // ready so far; a fraction would claim the end too early.
+  if (position.pagesFinal === false)
+    return { page: position.pageIndex + 1, total: null, label: `第 ${position.pageIndex + 1} 页`, percent: null };
   const page = Math.min(position.pageIndex + 1, position.pageCount);
   return { page, total: position.pageCount, label: `第 ${page} / ${position.pageCount} 页`,
     percent: Math.round((page / position.pageCount) * 100) };

@@ -47,6 +47,6 @@ export function attachReadingPositionRoutes({ app, readingPositions, requireDocu
     if (isPaged(req.user.id, req.params.id)) throw fail(409, "阅读位置已更新，请刷新。");
     const pageIndex = req.body?.pageIndex;
     if (pageIndex !== 0) throw fail(400, "阅读页位置无效。");
-    res.json({ ...readingPositions.save(req.user.id, req.params.id, { pageIndex }), pageCount: 0 });
+    res.json({ ...readingPositions.save(req.user.id, req.params.id, { pageIndex }), pageCount: 0, pagesFinal: false });
   });
 }

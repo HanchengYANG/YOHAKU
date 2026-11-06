@@ -158,3 +158,14 @@ test("跨段落同一句的范围与完整快照包含换行，追加接入时�
   assert.equal(bodyRanges(joined).sentences[0].id, bodyRanges(base).sentences[0].id);
   assert.equal(bodyRanges(joined).sentences[0].end, "途中の文\n続き。".length);
 });
+
+test("标题段落不与前后正文共用一个句子，即使分句结果把它们连在一起", () => {
+  const html = '<p data-paragraph-id="h" data-block-type="heading">雨の音</p><p data-paragraph-id="a">第1段。次の文。</p>';
+  for (const apply of [applySentenceBoundaries, initializeSentenceBoundaries]) {
+    const sentences = bodyRanges(apply(html, ["雨の音\n第1段。", "次の文。"])).sentences;
+    assert.deepEqual(sentences.map((sentence) => sentence.text), ["雨の音", "第1段。", "次の文。"]);
+    assert.equal(new Set(sentences.map((sentence) => sentence.id)).size, 3);
+  }
+  const plain = '<p data-paragraph-id="p">雨の音</p><p data-paragraph-id="a">第1段。</p>';
+  assert.equal(bodyRanges(applySentenceBoundaries(plain, ["雨の音\n第1段。"])).sentences.length, 1);
+});

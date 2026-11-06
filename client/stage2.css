@@ -672,7 +672,6 @@
   .reader-workspace.has-chat {
     grid-template-columns: minmax(0, 1fr) var(--chat-panel-width);
   }
-  .reader-workspace .book-navigation,
   .reader-workspace .reader-page {
     width: min(960px, calc(100% - 48px));
   }

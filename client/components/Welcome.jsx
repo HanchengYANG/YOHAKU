@@ -36,10 +36,10 @@ export default function Welcome({
             {current.progress && (
               <div className="home-continue-progress">
                 <span>{current.progress.label}</span>
-                <span className="home-progress-track" role="progressbar" aria-label="阅读进度"
+                {current.progress.percent !== null && <span className="home-progress-track" role="progressbar" aria-label="阅读进度"
                   aria-valuemin={1} aria-valuemax={current.progress.total} aria-valuenow={current.progress.page}>
                   <span style={{ width: `${current.progress.percent}%` }} />
-                </span>
+                </span>}
               </div>
             )}
           </div>

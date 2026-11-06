@@ -83,9 +83,9 @@ test("旧文章自动分句失败隐藏正文，保留编辑和返回入口且�
     await expect(page.getByRole("region", {name:"准备阅读",exact:true})).toBeVisible();
     await expect(page.getByRole("alert")).toContainText("旧文章分句暂不可用");
     await expect(page.getByRole("button", {name:"重试分句",exact:true})).toBeEnabled();
-    await expect(page.getByRole("button", {name:"校对文字与注音",exact:true})).toBeEnabled();
-    await expect(page.getByRole("button", {name:"返回书架",exact:true})).toBeEnabled();
-    await expect(page.getByRole("button", {name:"对话记录",exact:true})).toHaveCount(0);
+    await expect(page.getByRole("button", {name:"校对",exact:true})).toBeEnabled();
+    await expect(page.getByRole("button", {name:"书架",exact:true})).toBeEnabled();
+    await expect(page.getByRole("button", {name:/^对话/})).toHaveCount(0);
     await page.waitForLoadState("networkidle");
     expect(attempts).toBe(1);
     const unchanged = await current(page, document.id);
@@ -137,11 +137,11 @@ for (const partial of [false, true]) test(`${partial ? "部分分句" : "未分�
     await started;
     const waiting = page.getByRole("region", {name:"准备阅读",exact:true});
     await expect(waiting).toBeVisible();
-    await expect(waiting.getByRole("progressbar", {name:"正在分句",exact:true})).toBeVisible();
+    await expect(waiting.getByRole("progressbar", {name:"正在准备",exact:true})).toBeVisible();
     await expect(waiting.getByRole("progressbar")).not.toHaveAttribute("aria-valuenow");
     await expect(page.getByRole("article", {name:"日语原文",exact:true})).toHaveCount(0);
     await expect(page.locator(".article-body,.selection-questions,.document-chat")).toHaveCount(0);
-    await expect(page.getByRole("button", {name:"对话记录",exact:true})).toHaveCount(0);
+    await expect(page.getByRole("button", {name:/^对话/})).toHaveCount(0);
     expect(await page.evaluate(() => window.__readingGateFlashed)).toBe(false);
     await page.evaluate(() => { window.__readingGateAllowed = true; });
     release();

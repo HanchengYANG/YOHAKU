@@ -51,7 +51,7 @@ test("导入、选区注音、校对、保存重开、导出及手机布局", { 
     .fill("はーい口開けてー\n汚い言葉の歯石が取れないね〜\n\n背中を見た");
   await page.getByRole("button", {name:"继续确认类型",exact:true}).click();
   await page.getByRole("button", {name:"确认导入",exact:true}).click();
-  await page.getByRole("button", {name:"校对正文",exact:true}).click();
+  await page.getByRole("button",{name:"校对",exact:true}).click();
   await page.getByRole("button", {name:"编辑正文与注音",exact:true}).click();
   await expect(page.getByRole("textbox", { name: "假名读音", exact: true })).toHaveCount(0);
   await selectWord(page, 3, 4);
@@ -109,9 +109,12 @@ test("导入、选区注音、校对、保存重开、导出及手机布局", { 
   // Font ranges include ascent whitespace; ruby must sit above the base's middle.
   expect(rects.rubyBottom).toBeLessThan(rects.baseMiddle);
   expect(rects.rubyHeight).toBeLessThan(rects.baseHeight);
-  await page.getByRole("button", { name: "隐藏注音" }).click();
+  const rubyToggle = page.getByRole("button", { name: "注音", exact: true });
+  await expect(rubyToggle).toHaveAttribute("aria-pressed", "true");
+  await rubyToggle.click();
   await expect(article.locator("rt").first()).toHaveCSS("visibility", "hidden");
-  await page.getByRole("button", { name: "显示注音" }).click();
+  await rubyToggle.click();
+  await page.getByRole("button", { name: "字号", exact: true }).click();
   await page.getByRole("slider", { name: "阅读字号" }).fill("30");
   await expect(article.locator(".japanese-text")).toHaveCSS(
     "font-size",
@@ -139,7 +142,7 @@ test("导入、选区注音、校对、保存重开、导出及手机布局", { 
       () => document.documentElement.scrollWidth <= window.innerWidth,
     ),
   ).toBe(true);
-  await page.getByRole("button", { name: "校对正文" }).click();
+  await page.getByRole("button",{name:"校对",exact:true}).click();
   await page.getByRole("button", { name: "编辑正文与注音", exact: true }).click();
   await page
     .getByRole("textbox", { name: "来源正文" })
@@ -179,7 +182,7 @@ test("未保存离开会确认，新建能清空旧草稿，慢速导入期间�
 test("同一来源的多页面版本冲突后可以保留草稿并重新打开最新正文", async ({ page }) => {
   const created=await page.request.post("/api/documents",{data:{title:"并发修改",kind:"article",orientation:"horizontal",content:"最初の文章。"}});
   const old=await created.json();await page.goto(`/#${old.id}`);
-  await page.getByRole("button",{name:"校对正文",exact:true}).click();await page.getByRole("button",{name:"编辑正文与注音",exact:true}).click();
+  await page.getByRole("button",{name:"校对",exact:true}).click();await page.getByRole("button",{name:"编辑正文与注音",exact:true}).click();
   await page.getByLabel("来源正文",{exact:true}).fill("旧页面的修改。");
   const list=await(await page.request.get(`/api/documents/${old.id}/sources`)).json();const source=list.sources[0];
   const updated=await page.request.put(`/api/documents/${old.id}/sources/${source.id}`,{data:{version:source.version,text:"其他页面已更新。"}});expect(updated.ok()).toBe(true);
@@ -227,7 +230,7 @@ test("原词示例与完整词注音统一横排，注音在上方并能保存�
   expect(created.ok()).toBe(true);
   const initial = await created.json();
   await page.goto(`/#${initial.id}`);
-  await page.getByRole("button", { name: "校对正文", exact: true }).click();
+  await page.getByRole("button",{name:"校对",exact:true}).click();
   await page.getByRole("button", { name: "编辑正文与注音", exact: true }).click();
   await expect(page.getByRole("combobox", { name: "阅读方向" })).toHaveCount(0);
   await page.getByRole("tab", { name: /^注音校正/ }).click();
@@ -306,7 +309,7 @@ test("原词示例与完整词注音统一横排，注音在上方并能保存�
     path: `artifacts/stage1-horizontal-whole-word-${info.project.name}.png`,
     fullPage: true,
   });
-  await page.getByRole("button", { name: "校对正文", exact: true }).click();
+  await page.getByRole("button",{name:"校对",exact:true}).click();
   await page.getByRole("button", { name: "编辑正文与注音", exact: true }).click();
   await page.getByRole("tab", { name: /注音校正/ }).click();
   await expect(page.getByRole("textbox", { name: "食べる的读音（第6行）", exact: true }))
@@ -339,7 +342,7 @@ test("假名锚点只让汉字显示注音，前后缀与多汉字整词保存�
     expect(text).toBe(expectedBody);
   };
   await checkDisplay();
-  await page.getByRole("button", { name: "校对正文", exact: true }).click();
+  await page.getByRole("button",{name:"校对",exact:true}).click();
   await page.getByRole("button", { name: "编辑正文与注音", exact: true }).click();
   await expect(page.getByRole("textbox", { name: "来源正文", exact: true })).toHaveValue(expectedBody);
   await page.getByRole("tab", { name: /注音校正/ }).click();

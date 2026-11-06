@@ -16,7 +16,7 @@ const safeSource = (source) => {
   try { return /^https?:$/.test(new URL(url).protocol) ? url : null; } catch { return null; }
 };
 
-export default function DocumentChat({ document, open, onOpen, onClose, session: suppliedSession, request, navigation, onDocumentChanged, onRequestHandled, onBusyChange }) {
+export default function DocumentChat({ document, open, onOpen, onClose, session: suppliedSession, request, navigation, onDocumentChanged, onRequestHandled, onBusyChange, onGroupCount }) {
   const [session] = useState(() => suppliedSession || createChatSession());
   const [conversation, setConversation] = useState(null);
   const [groupId, setGroupId] = useState(session.groupId);
@@ -38,6 +38,7 @@ export default function DocumentChat({ document, open, onOpen, onClose, session:
   const viewKey = pendingSelection ? "request:" + pendingSelection.key : scopeKey(scopeGroupIds);
   const currentView = useRef(viewKey); currentView.current = viewKey;
   const groups = conversation?.groups || [];
+  useEffect(() => { onGroupCount?.(groups.length); }, [groups.length, onGroupCount]);
   const followupGroups = availableChatGroups(groups, scopeGroupIds);
   const messages = useMemo(() => pendingSelection ? [] : visibleChatMessages(conversation?.messages, scopeGroupIds), [pendingSelection, conversation?.messages, scopeGroupIds]);
   const activeGroup = groups.find((group) => group.id === groupId);

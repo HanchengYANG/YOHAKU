@@ -558,10 +558,10 @@ export function createApp({
   // Reading progress for summaries: the saved page plus how many reading pages
   // the article has so far (0 for articles outside the source workflow).
   function readingSummaries(userId) {
-    const counts = sources.pageCounts(userId);
+    const counts = sources.pageCounts(userId), prepared = sources.preparedDocuments(userId);
     const summaries = new Map();
     for (const [documentId, position] of readingPositions.forUser(userId))
-      summaries.set(documentId, { ...position, pageCount: counts.get(documentId) || 0 });
+      summaries.set(documentId, { ...position, pageCount: counts.get(documentId) || 0, pagesFinal: prepared.has(documentId) });
     return summaries;
   }
 

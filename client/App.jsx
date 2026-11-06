@@ -15,7 +15,7 @@ import RoleSettings from "./components/RoleSettings.jsx";
 import ImageImport from "./components/ImageImport.jsx";
 import { TaskList, TaskDetail } from "./components/ImageTasks.jsx";
 import ErrorLog from "./components/ErrorLog.jsx";
-import { OPEN_PANEL_EVENT } from "./components/ErrorNotice.mjs";
+import ErrorNotice, { OPEN_PANEL_EVENT } from "./components/ErrorNotice.mjs";
 import { UserContext } from "./user-context.mjs";
 import { imageTasksChangedEvent, notifyImageTasksChanged } from "./image-tasks.mjs";
 import DocumentChat from "./components/DocumentChat.jsx";
@@ -23,7 +23,7 @@ import { createChatSession } from "./chat-history.mjs";
 import AccountGate from "./components/AccountGate.jsx";
 import Sidebar from "./components/Sidebar.jsx";
 import BookView from "./components/BookView.jsx";
-import BookNavigation from "./components/BookNavigation.jsx";
+import ReadingBar from "./components/ReadingBar.jsx";
 import PWAManager from "./PWAManager.jsx";
 import { useConfirmation } from "./components/ConfirmDialog.jsx";
 
@@ -124,12 +124,12 @@ function Workspace({ user, onLoggedOut }) {
   const [chatRequest, setChatRequest] = useState(null);
   const [chatNavigation, setChatNavigation] = useState(null);
   const [answering, setAnswering] = useState(false);
+  const [chatCount, setChatCount] = useState(0);
   const [appendTargetId, setAppendTargetId] = useState(null);
   const [segmentation, setSegmentation] = useState({ id: null, request: 0, busy: false, error: "" });
   const [promotion, setPromotion] = useState(null);
   const [bookBusy, setBookBusy] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [detailLoading, setDetailLoading] = useState(false);
   const [failedRoute, setFailedRoute] = useState("");
   const [shelfError, setShelfError] = useState("");
   const [error, setError] = useState("");
@@ -157,6 +157,9 @@ function Workspace({ user, onLoggedOut }) {
       : null,
   );
   const savedDetail = useRef(null);
+  // A refresh after a failed book action: the book page already shows that
+  // error, so a failing refresh must not add a second notice in the banner.
+  const quietRefresh = useRef(null);
   const deletingArticle = useRef(false);
   const importRequest = useRef(0);
   const segmentationRequest = useRef(0);
@@ -297,7 +300,6 @@ function Workspace({ user, onLoggedOut }) {
     if (!activeId || activeId === "tasks" || activeId.startsWith("tasks/")) {
       setDocument(null);
       setBook(null);
-      setDetailLoading(false);
       setFailedRoute("");
       return;
     }
@@ -305,17 +307,17 @@ function Workspace({ user, onLoggedOut }) {
     // instead of clearing it and fetching the identical record again.
     if (savedDetail.current === activeId) {
       savedDetail.current = null;
-      setDetailLoading(false);
       setFailedRoute("");
       return;
     }
     const controller = new AbortController();
+    const quiet = quietRefresh.current === activeId;
+    quietRefresh.current = null;
     const isBook = activeId.startsWith("book/");
     setDocument(null);
     setBook((current) => current && (isBook
       ? current.id === activeId.slice(5)
       : current.pages.some((page) => page.id === activeId)) ? current : null);
-    setDetailLoading(true);
     setFailedRoute("");
     api(isBook
       ? `/books/${encodeURIComponent(activeId.slice(5))}`
@@ -335,12 +337,9 @@ function Workspace({ user, onLoggedOut }) {
       })
       .catch((e) => {
         if (e.name !== "AbortError") {
-          setError(e.message);
+          if (!quiet) setError(e.message);
           setFailedRoute(activeId);
         }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setDetailLoading(false);
       });
     return () => controller.abort();
   }, [activeId, detailRefresh]);
@@ -760,6 +759,7 @@ function Workspace({ user, onLoggedOut }) {
       return updated;
     } catch (cause) {
       // The book page shows the error next to the action.
+      quietRefresh.current = activeId;
       setDetailRefresh((n) => n + 1);
       throw cause;
     } finally { setBookBusy(false); }
@@ -782,17 +782,28 @@ function Workspace({ user, onLoggedOut }) {
       setRefresh((n) => n + 1);
       setNotice("书籍已删除");
     } catch (cause) {
+      quietRefresh.current = viewId;
       setDetailRefresh((n) => n + 1);
       throw cause;
     } finally { setBookBusy(false); }
   };
-  const bookNavigation = book && book.pages.some((page) => page.id === activeId)
-    && (!currentReadingDocument || currentReadingDocument.bookId === book.id) ? <BookNavigation
-      book={book} currentPageId={activeId} onOpenBook={() => openBook(book.id)} onOpenPage={openDocument}
-      onAddImage={beginBookPage} disabled={saving || bookBusy} /> : null;
+  // Reading hides the sidebar without changing the user's saved choice; the
+  // bar's shelf button opens it as an overlay.
+  const reading = !!currentReadingDocument && (!panel || panel === "chat");
+  const readingBook = currentReadingDocument && book?.id === currentReadingDocument.bookId ? book : null;
+  const readingIndex = readingBook ? readingBook.pages.findIndex((page) => page.id === currentReadingDocument.id) : -1;
+  const nextArticle = readingIndex >= 0 ? readingBook.pages[readingIndex + 1] || null : null;
+  const toggleChat = () => { if (panel === "chat") closePanel(); else { setChatRequest(null); openPanel("chat"); } };
+  const readingBar = currentReadingDocument ? {
+    document: currentReadingDocument, book: readingBook,
+    onOpenBook: () => openBook(currentReadingDocument.bookId), onOpenShelf: goHome, onOpenArticle: openDocument,
+    onOpenSidebar: () => setSidebarOpen(true),
+    showRuby, setShowRuby, fontSize, setFontSize,
+    onEdit: beginEdit, onDiscuss: readingReady ? toggleChat : null, chatOpen: panel === "chat", chatCount,
+  } : null;
 
   return (
-    <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+    <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${reading ? "reading-mode" : ""}`}>
       <Sidebar
         user={user} open={sidebarOpen} onClose={() => setSidebarOpen(false)}
         collapseButtonRef={sidebarCollapseButton} onCollapse={toggleDesktopSidebar}
@@ -820,8 +831,8 @@ function Workspace({ user, onLoggedOut }) {
           <span className="topbar-brand">余白</span>
         </header>
         {(error || (showsWelcome ? "" : shelfError)) && (
-          <div className="error-banner" role="alert">
-            <span>{error || shelfError}</span>
+          <div className="error-banner">
+            <ErrorNotice error={error || shelfError} />
             <button
               className="icon-button"
               aria-label="关闭错误提示"
@@ -897,45 +908,30 @@ function Workspace({ user, onLoggedOut }) {
         ) : currentReadingDocument ? (
           <div className={`reader-workspace ${readingReady && panel === "chat" ? "has-chat" : ""}`}>
             <div className="reader-main-column" ref={readerMain}>
-              {bookNavigation || (currentReadingDocument?.bookId ? (
-                <div className="book-promotion">
-                  <button className="text-button" onClick={() => openBook(document.bookId)}>打开所属书籍</button>
-                  <span role="status">{detailLoading ? "正在加载目录…" : "目录暂未加载，正文已保存，可重新打开书籍。"}</span>
-                </div>
-              ) : null)}
-              {document.sourceWorkflow ? <PagedReader
+              {!document.sourceWorkflow && <ReadingBar {...readingBar} />}
+              {document.sourceWorkflow ? <PagedReader bar={readingBar} nextArticle={nextArticle}
                 key={document.id} document={document} active={!panel || panel === "chat"}
                 session={readingSessionFor(document.id)}
                 resumePosition={readingResume.current?.documentId === document.id ? readingResume.current : null}
                 onPageChange={readingPageChanged}
                 onEditSources={editSources} onDelete={() => remove(document)}
-                onDiscuss={() => {setChatRequest(null);setPanel(panel === "chat" ? null : "chat");}}
                 onAsk={(request) => {if(answering)return;setChatRequest({...request,key:crypto.randomUUID()});setPanel("chat");}}
                 onGroup={(ids) => {setChatNavigation({key:crypto.randomUUID(),documentId:document.id,groupIds:ids});setPanel("chat");}}
-                answering={answering} chatOpen={panel === "chat"} showRuby={showRuby} setShowRuby={setShowRuby}
-                fontSize={fontSize} setFontSize={setFontSize}
+                answering={answering} showRuby={showRuby} fontSize={fontSize}
                 onPromoteBook={!document.bookId ? () => {
                   if (!mayLeave()) return;
                   openPanel("newBook");
                   setPromotion(document);
                 } : null}
-                onAppendImage={() => {openUnifiedImport();setAppendTargetId(document.id);setImportBookId(document.bookId || null);}}
               /> : readingReady ? <Reader
                 document={document}
-                onEdit={beginEdit}
                 onDelete={() => remove(document)}
-                onDiscuss={() => {
-                  if (panel === "chat") closePanel();
-                  else { setChatRequest(null); openPanel("chat"); }
-                }}
                 onAsk={(request) => { if (answering) return; if (panel !== "chat") rememberReadingPosition(); setChatRequest({...request,key:crypto.randomUUID()}); setPanel("chat"); }}
                 answering={answering}
                 onGroup={(ids) => { if (panel !== "chat") rememberReadingPosition(); setChatNavigation({key:crypto.randomUUID(),documentId:document.id,groupIds:ids}); setChatRequest(null); setPanel("chat"); }}
-                onAppendImage={() => { openUnifiedImport(); setAppendTargetId(document.id); setImportBookId(document.bookId || null); }}
                 onSegment={() => segmentDocument(document, true)}
                 segmentationBusy={segmentation.id === document.id && segmentation.busy}
                 segmentationError={segmentation.id === document.id ? segmentation.error : ""}
-                chatOpen={panel === "chat"}
                 onPromoteBook={
                   !document.bookId
                     ? () => {
@@ -946,15 +942,10 @@ function Workspace({ user, onLoggedOut }) {
                     : null
                 }
                 showRuby={showRuby}
-                setShowRuby={setShowRuby}
                 fontSize={fontSize}
-                setFontSize={setFontSize}
               /> : <ReadingPreparation
-                document={currentReadingDocument}
                 error={segmentation.id === currentReadingDocument?.id ? segmentation.error : ""}
                 onRetry={() => segmentDocument(currentReadingDocument, false)}
-                onEdit={beginEdit}
-                onBack={() => openDocument("")}
               />}
             </div>
             {readingReady && (
@@ -963,7 +954,7 @@ function Workspace({ user, onLoggedOut }) {
                 document={document}
                 open={panel === "chat"} session={chatSessionFor(document.id)}
                 request={chatRequest} navigation={chatNavigation}
-                onBusyChange={setAnswering}
+                onBusyChange={setAnswering} onGroupCount={setChatCount}
                 onOpen={() => { rememberReadingPosition(); setPanel("chat"); }}
                 onDocumentChanged={refreshCurrentDocument}
                 onRequestHandled={() => setChatRequest(null)}
@@ -989,7 +980,6 @@ function Workspace({ user, onLoggedOut }) {
             busy={bookBusy}
           />
         ) : activeId ? (<>
-          {bookNavigation}
           <div className="loading-page">
             {/* The fetch starts in an effect, so the first render after a
                 route change still carries the previous route's state; only a

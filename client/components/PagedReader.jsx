@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import api from "../api.mjs";
 import { htmlToBlocks, bodyText } from "../../shared/article-html.mjs";
-import { pageSelection, readingPageLabel, readingPreparation } from "../source-presentation.mjs";
+import { pageSelection, readingPagePosition, readingPreparation } from "../source-presentation.mjs";
 import Reader from "./Reader.jsx";
+import ReadingBar from "./ReadingBar.jsx";
+import ErrorNotice from "./ErrorNotice.mjs";
 import "../sources.css";
 
-export default function PagedReader({ document, session, active = true, resumePosition = null, onEditSources, onPageChange, ...readerProps }) {
+export default function PagedReader({ document, session, active = true, resumePosition = null, onEditSources, onPageChange, bar = null, nextArticle = null, ...readerProps }) {
   const [resume] = useState(resumePosition);
   const [pageIndex, setPageIndex] = useState({ documentId:document.id, value:resume?.index ?? null });
   const [response, setResponse] = useState(null);
@@ -87,44 +89,77 @@ export default function PagedReader({ document, session, active = true, resumePo
   const percent = Number.isFinite(progress?.percent) ? Math.max(0,Math.min(100,Math.floor(progress.percent))) : null;
   const diagnostics = matchesIndex ? snapshot?.diagnostics : null;
   const preparation = readingPreparation({progress,current:diagnostics?.current,error:error || (matchesIndex ? snapshot?.error : null)});
-  const paused = preparation.paused;
+  const failed = preparation.state === "failed" || (preparation.state === "paused" && !!preparation.errorMessage);
+  // A review request carries a short reason ("正文出现较大改动…") worth showing.
+  const notice = failed || (preparation.state === "requires_review" && !!preparation.errorMessage);
+  const statusText = preparation.state === "requires_review" ? "需要核对" : preparation.state === "editing" ? "正在人工编辑"
+    : preview?.text ? "注音还在准备" : "正在准备";
   const taskId=matchesIndex ? snapshot?.taskId || progress?.taskId : null;
   const diagnosticSourceId = diagnostics?.current?.source?.id;
   const preparationSourceIds = diagnosticSourceId ? [diagnosticSourceId,...(page?.sourceIds || []).filter((id) => id !== diagnosticSourceId)] : page?.sourceIds || [];
   const change = (next) => {setPageIndex({documentId:document.id,value:Math.max(0,next)});setError("");window.scrollTo({top:0,behavior:"instant"});};
+  const canPrevious = !!snapshot && currentIndex > 0;
+  const canNext = !!hasNext && !!page;
+  const navigation = useRef(null);
+  navigation.current = {canPrevious,canNext,change,currentIndex};
+  useEffect(() => {
+    if (!active) return;
+    const key = (event) => {
+      if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("input, textarea, select, [contenteditable='true'], .document-chat, .selection-questions, [role='dialog']")) return;
+      const nav = navigation.current;
+      if (event.key === "ArrowLeft" && nav.canPrevious) { event.preventDefault(); nav.change(nav.currentIndex - 1); }
+      if (event.key === "ArrowRight" && nav.canNext) { event.preventDefault(); nav.change(nav.currentIndex + 1); }
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [active]);
+  const position = readingPagePosition({index:currentIndex,complete:snapshot?.complete,totalPages:snapshot?.totalPages});
+  const lastPage = !!snapshot?.complete && !hasNext && !!page?.ready;
+  const editCurrent = () => onEditSources(page?.ready ? page.sourceIds || [] : preparationSourceIds, currentIndex);
+  const readerShown = !!page?.ready && !!bodyText(page.bodyHtml).trim();
+  const pagination = !emptyComplete && snapshot ? <>
+    {!(snapshot.complete && snapshot.totalPages <= 1) && <nav className="reading-pagination" aria-label="阅读分页">
+      <button type="button" className="text-button" disabled={!canPrevious} onClick={() => change(currentIndex - 1)}><span aria-hidden="true">← </span>上一页</button>
+      <span aria-live="polite">{position}</span>
+      <button type="button" className="text-button" disabled={!canNext} onClick={() => change(currentIndex + 1)}>下一页<span aria-hidden="true"> →</span></button>
+    </nav>}
+    {lastPage && nextArticle && <p className="reading-next-article">
+      <button type="button" className="text-button" onClick={() => bar?.onOpenArticle?.(nextArticle.id)}>下一篇：{nextArticle.title}<span aria-hidden="true"> →</span></button>
+    </p>}
+  </> : null;
   return <div className="paged-reader">
-    <nav className="reading-pagination" aria-label="阅读分页">
-      <button className="button secondary" disabled={!snapshot || currentIndex === 0} onClick={() => change(currentIndex - 1)}>上一页</button>
-      <span aria-live="polite">{emptyComplete ? "暂无正文" : readingPageLabel({index:currentIndex,complete:snapshot?.complete,totalPages:snapshot?.totalPages})}</span>
-      <button className="button secondary" disabled={!hasNext || !page} onClick={() => change(currentIndex + 1)}>下一页</button>
-      {!!snapshot?.pages?.length && <details className="reading-page-menu"><summary>文章目录</summary><div>{snapshot.pages.map((item) => <button key={item.id} className="text-button" aria-current={item.index === currentIndex ? "page" : undefined} onClick={() => change(item.index)}>第 {item.index + 1} 页{!item.ready ? " · 准备中" : ""}</button>)}{!snapshot.complete && <p>后续阅读页随正文准备后显示</p>}</div></details>}
-    </nav>
-    {page?.ready && !bodyText(page.bodyHtml).trim() ? <section className="reading-preparation" aria-label="阅读页正文已清空"><h1>{document.title}</h1><h2>本页正文已清空</h2><p>阅读页位置已保留，可继续翻页，或在校对正文中补充内容。</p><button className="button secondary" onClick={() => onEditSources(page.sourceIds || [],currentIndex)}>校对正文</button></section> : page?.ready ? <Reader {...readerProps}
+    {bar && <ReadingBar {...bar} onEdit={editCurrent} onGoToPage={change} onDiscuss={readerShown ? bar.onDiscuss : null}
+      pages={snapshot ? {index:currentIndex,complete:snapshot.complete,totalPages:snapshot.totalPages,list:snapshot.pages || []} : null} />}
+    {page?.ready && !bodyText(page.bodyHtml).trim() ? <section className="reading-preparation" aria-label="阅读页正文已清空">
+      <h2>本页正文已清空</h2>
+    </section> : page?.ready ? <Reader {...readerProps}
       document={{...document,bodyHtml:page.bodyHtml,bodyHash:snapshot?.bodyHash || document.bodyHash,blocks:htmlToBlocks(page.bodyHtml)}}
-      headingSourceIds={page.headingSourceIds}
-      onEdit={() => onEditSources(page.sourceIds,currentIndex)} onSegment={null}
+      headingSourceIds={page.headingSourceIds} onSegment={null} afterBody={pagination}
       onAsk={(request) => readerProps.onAsk?.({...request,selection:pageSelection(request.selection,page)})} />
-      : <><section className="reading-preparation" aria-label="准备当前阅读页" aria-busy={!emptyComplete && preparation.busy}>
-        <span className="eyebrow">准备阅读</span><h1>{document.title}</h1>
-        <h2>{emptyComplete ? "当前文章没有正文" : preparation.state === "failed" ? "当前阅读页准备失败" : paused ? "当前阅读页尚未完成" : "正在准备当前阅读页"}</h2>
-        {!emptyComplete && <div className={`reading-page-progress${paused ? " is-paused" : ""}`}>
-          <div className="reading-page-progress-caption"><span role="status">{preparation.stageLabel}</span><strong>{percent === null ? preparation.statusLabel : `${percent}%${preparation.animate ? "" : ` · ${preparation.statusLabel}`}`}</strong></div>
-          <div className={`reading-page-progress-track${percent === null && preparation.animate ? " is-indeterminate" : ""}`} role="progressbar" aria-label="当前阅读页准备进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent ?? undefined} aria-valuetext={`${preparation.stageLabel}，${preparation.statusLabel}${percent === null ? "" : `，${percent}%`}`}>
+      : emptyComplete ? <section className="reading-preparation" aria-label="当前文章没有正文">
+        <h2>当前文章没有正文</h2>
+      </section> : <>
+        <section className={`reading-status${notice ? " is-failed" : ""}`} aria-label="准备当前阅读页" aria-busy={preparation.busy}>
+          {notice ? <ErrorNotice error={preparation.errorMessage || "准备失败"} message={failed ? "准备失败" : "需要核对"} /> : <span role="status">{statusText}</span>}
+          {!notice && <div className={`reading-status-track${percent === null && preparation.animate ? " is-indeterminate" : ""}`} role="progressbar"
+            aria-label="当前阅读页准备进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent ?? undefined}
+            aria-valuetext={percent === null ? statusText : `${statusText}，${percent}%`}>
             <span style={percent === null ? preparation.animate ? undefined : {width:0} : {width:`${percent}%`}} />
-          </div>
-          {progress?.stage === "annotate" && progress.total > 0 && <small>已注音 {progress.completed} / {progress.total} 字符</small>}
-          {(preparation.sourceLabel || preparation.elapsedLabel) && <div className="reading-current-step">{preparation.sourceLabel && <span>{preparation.sourceLabel}</span>}{preparation.elapsedLabel && <span>{preparation.elapsedLabel}</span>}</div>}
-        </div>}
-        <p role={preparation.errorMessage ? "alert" : undefined}>{emptyComplete ? "可在校对正文中补充内容。" : preparation.errorMessage || (preparation.state === "requires_review" ? "请进入校对正文查看差异并确认。" : preparation.state === "editing" ? "当前来源正在人工编辑，保存后继续准备。" : "离开页面也会继续准备，完成后自动显示正文。")}</p>
-        <div className="source-actions">{!emptyComplete && !preparation.busy && <button className="button secondary" onClick={() => {retryPending.current = true;setRetry((value) => value + 1);}}>重试准备</button>}
-          {taskId && <a className="button subtle" href={`#tasks/${encodeURIComponent(taskId)}`}>查看后台任务</a>}
-          <button className="button subtle" onClick={() => onEditSources(preparationSourceIds,currentIndex)}>校对正文</button></div>
-      </section>
-      {!emptyComplete && preview?.text && <section className="reading-preparation reading-provisional" aria-label="已提取正文预览">
-        <h2>已提取正文预览</h2>
-        <p>{preview.source?.label && `${preview.source.label} · `}文字可能在校对后更新，准备完成后会自动显示正式阅读页。</p>
-        <div className="reading-provisional-text" lang="ja">{preview.text}{preview.truncated && "…"}</div>
-      </section>}</>}
-    {page?.ready && <nav className="reading-pagination" aria-label="页末阅读分页"><button className="button secondary" disabled={currentIndex === 0} onClick={() => change(currentIndex - 1)}>上一页</button><span>{readingPageLabel({index:currentIndex,complete:snapshot?.complete,totalPages:snapshot?.totalPages})}</span><button className="button primary" disabled={!hasNext || !page} onClick={() => change(currentIndex + 1)}>下一页</button></nav>}
+          </div>}
+          <span className="reading-status-actions">
+            {!preparation.busy && <button type="button" className="text-button" onClick={() => {retryPending.current = true;setRetry((value) => value + 1);}}>重试</button>}
+            {taskId && <a className="text-button" href={`#tasks/${encodeURIComponent(taskId)}`}>查看任务</a>}
+          </span>
+        </section>
+        {preview?.text && <section className="reader-page reading-provisional" aria-label="已提取正文预览">
+          <article className="reading-sheet article" lang="ja">
+            <div className="reading-provisional-text" style={{fontSize:readerProps.fontSize}}>{preview.text}{preview.truncated && "…"}</div>
+          </article>
+        </section>}
+      </>}
+    {!(page?.ready && readerShown) && pagination}
   </div>;
 }

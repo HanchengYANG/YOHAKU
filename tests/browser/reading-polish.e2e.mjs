@@ -64,6 +64,7 @@ test("同句跨来源和注音整体悬停，高亮完整包注音，重复词�
       await mark.focus(); await mark.press("Enter");
       await expect(chat.locator(".chat-message.user")).toContainText("第一个背中");
       await chat.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();
+      await page.getByRole("button",{name:"字号",exact:true}).click();
       await page.getByRole("slider",{name:"阅读字号"}).fill("34");
       await expect(article.locator(".article-body")).toHaveCSS("font-size","34px");
       await page.emulateMedia({reducedMotion:"reduce"});
@@ -75,10 +76,13 @@ test("同句跨来源和注音整体悬停，高亮完整包注音，重复词�
       return {top:scrollY,width:element.querySelector('.article-body').clientWidth,anchor:anchor.dataset.sentenceId,anchorTop:anchor.getBoundingClientRect().top};
     });
     if(info.project.name === "phone") await page.getByRole("button",{name:"上划恢复对话",exact:true}).click();
-    else await page.getByRole("button",{name:"对话记录",exact:true}).evaluate(button=>button.click());
+    else await page.getByRole("button",{name:/^对话/}).evaluate(button=>button.click());
     await expect(chat).toBeVisible();
     if(info.project.name === "desktop") {
-      expect(await article.locator('.article-body').evaluate(element=>element.clientWidth)).toBeLessThan(before.width);
+      // Wide enough for both: the fixed column keeps its width and the panel sits beside it.
+      expect(await article.locator('.article-body').evaluate(element=>element.clientWidth)).toBe(before.width);
+      const [articleBox,chatBox]=[await article.boundingBox(),await chat.boundingBox()];
+      expect(articleBox.x+articleBox.width).toBeLessThanOrEqual(chatBox.x);
       expect(Math.abs((await article.locator(`[data-sentence-id="${before.anchor}"]`).first().boundingBox()).y-before.anchorTop)).toBeLessThan(2);
     } else {
       expect(await article.locator(".article-body").evaluate(element=>element.clientWidth)).toBe(before.width);

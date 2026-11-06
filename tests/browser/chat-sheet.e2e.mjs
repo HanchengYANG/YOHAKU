@@ -135,7 +135,7 @@ test("三个入口与失败草稿保留，重试后建立新组，刷新清除�
     await page.route(freshRoute,failCreate);
     await selectArticleText(page,"木々");
     const popup=page.getByRole("dialog",{name:"划词提问",exact:true});
-    await popup.getByRole("button",{name:"自定义问题",exact:true}).click();
+    await popup.getByRole("button",{name:"提问…",exact:true}).click();
     await popup.getByRole("textbox",{name:"选区自定义问题"}).fill("木々在这里是什么意思？");
     await popup.getByRole("button",{name:"发送",exact:true}).click();
     await expect(chat.getByRole("alert")).toContainText("新问题暂未发送成功");

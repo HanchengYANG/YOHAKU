@@ -1,30 +1,37 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { blocksToHtml, bodyRanges, hasCompleteSentenceBoundaries } from "../../shared/article-html.mjs";
 import ArticleBody from "./ArticleBody.jsx";
-import { stats } from "../../shared/document.mjs";
-import { kinds } from "../constants.mjs";
 import Icon from "./Icon.jsx";
+import ErrorNotice from "./ErrorNotice.mjs";
 
+// The article body with selection questions and the footer. The title and
+// reading tools live in ReadingBar.
 export default function Reader({
   document,
-  onEdit,
   onDelete,
   showRuby,
-  setShowRuby,
   fontSize,
-  setFontSize,
-  onDiscuss,
-  chatOpen = false,
   answering = false,
   onPromoteBook = null,
-  onAsk, onGroup, onAppendImage, onSegment, segmentationBusy, segmentationError, headingSourceIds,
+  onAsk, onGroup, onSegment, segmentationBusy, segmentationError, headingSourceIds,
+  afterBody = null,
 }) {
-  const counts = stats(document.blocks);
   const [selection, setSelection] = useState(null);
   const [customQuestion, setCustomQuestion] = useState("");
   const [custom, setCustom] = useState(false);
+  const popover = useRef(null);
+  const [placement, setPlacement] = useState(null);
   const html = document.bodyHtml || blocksToHtml(document.blocks);
   useEffect(() => { setSelection(null); setCustom(false); }, [document.id, document.bodyHtml]);
+  // Prefer the space above the selection so the popover does not cover the
+  // sentence being asked about.
+  useLayoutEffect(() => {
+    if (!selection) { setPlacement(null); return; }
+    const height = popover.current?.offsetHeight || 90, width = popover.current?.offsetWidth || 340;
+    const above = selection.rect.top - height - 8;
+    const top = above >= 12 ? above : Math.max(12, Math.min(selection.rect.bottom + 8, window.innerHeight - height - 12));
+    setPlacement({ top, left: Math.max(12, Math.min(selection.rect.left, window.innerWidth - width - 12)) });
+  }, [selection, custom]);
   if (!hasCompleteSentenceBoundaries(html)) return null;
   const ask = (operation) => {
     if (!selection || answering) return;
@@ -36,64 +43,11 @@ export default function Reader({
   };
   return (
     <section className="reader-page">
-      <div className="document-meta">
-        <span className="kind-label">{kinds[document.kind]}</span>
-        <span>{counts.charCount} 字</span>
-        <span>{counts.rubyCount} 处注音</span>
-        <span className="saved-state">
-          <Icon name="check" size={14} />
-          已保存
-        </span>
-      </div>
-      <div className="reader-title-row">
-        <h1>{document.title}</h1>
-      </div>
-      <div className="reader-toolbar">
-        <div className="reader-toolbar-main">
-          <button
-            className={`button subtle ruby-toggle ${showRuby ? "selected" : ""}`}
-            onClick={() => setShowRuby(!showRuby)}
-            aria-pressed={showRuby}
-          >
-            <Icon name="type" size={16} />
-            {showRuby ? "隐藏注音" : "显示注音"}
-          </button>
-          <label className="font-control">
-            字号
-            <input
-              aria-label="阅读字号"
-              type="range"
-              min="18"
-              max="34"
-              step="2"
-              value={fontSize}
-              onChange={(e) => setFontSize(Number(e.target.value))}
-            />
-            <span>{fontSize}</span>
-          </label>
-        </div>
-        <div className="reader-toolbar-actions">
-          <button className="button subtle edit-action" onClick={onEdit}>
-            <Icon name="edit" size={16} />
-            校对正文
-          </button>
-          {onDiscuss && (
-            <button
-              className={`button ${chatOpen ? "primary" : "secondary"} reader-ai-action`}
-              aria-pressed={chatOpen}
-              onClick={onDiscuss}
-            >
-              <Icon name="arrow" size={15} />对话记录
-            </button>
-          )}
-        </div>
-      </div>
       {onSegment && <div className="sentence-actions">
         <button type="button" className="text-button" disabled={segmentationBusy} onClick={onSegment}>
           {segmentationBusy ? "正在分句…" : bodyRanges(html).sentences.length ? "重新分句" : "初始化分句"}
         </button>
-        {onAppendImage && <button type="button" className="text-button" onClick={onAppendImage}>继续导入资料</button>}
-        {segmentationError && <span role="alert">{segmentationError}</span>}
+        {segmentationError && <ErrorNotice error={segmentationError} />}
       </div>}
       <article
         className={`reading-sheet ${document.kind}`}
@@ -102,13 +56,14 @@ export default function Reader({
         <ArticleBody html={html} headingSourceIds={headingSourceIds} showRuby={showRuby} fontSize={fontSize}
           onSelection={setSelection} onGroup={onGroup} />
       </article>
-      {selection && <div className="selection-questions" role="dialog" aria-label="划词提问"
-        style={{ left: Math.max(12, Math.min(selection.rect.left, window.innerWidth - 310)), top: Math.max(12, Math.min(selection.rect.bottom + 8, window.innerHeight - (custom ? 190 : 100))) }}>
+      {afterBody}
+      {selection && <div ref={popover} className="selection-questions" role="dialog" aria-label="划词提问"
+        style={placement || { top: 0, left: 0, visibility: "hidden" }}>
         <strong lang={answering ? undefined : "ja"}>{answering ? "正在回答上一问…" : selection.text.length > 36 ? `${selection.text.slice(0, 36)}…` : selection.text}</strong>
         <div className="selection-actions">
-          <button className="button subtle" type="button" disabled={answering} onMouseDown={(e) => e.preventDefault()} onClick={() => ask("translation")}>翻译</button>
-          <button className="button subtle" type="button" disabled={answering} onMouseDown={(e) => e.preventDefault()} onClick={() => ask("grammar")}>解释语法</button>
-          <button className="button subtle" type="button" disabled={answering} onClick={() => setCustom(true)}>自定义问题</button>
+          <button className="selection-pill" type="button" disabled={answering} onMouseDown={(e) => e.preventDefault()} onClick={() => ask("translation")}>翻译</button>
+          <button className="selection-pill" type="button" disabled={answering} onMouseDown={(e) => e.preventDefault()} onClick={() => ask("grammar")}>讲解语法</button>
+          <button className="selection-pill" type="button" disabled={answering} aria-pressed={custom} onClick={() => setCustom(true)}>提问…</button>
           <button className="icon-button" type="button" aria-label="关闭划词提问" onClick={() => setSelection(null)}>×</button>
         </div>
         {custom && <form onSubmit={(e) => { e.preventDefault(); if(customQuestion.trim()) ask("custom"); }}>

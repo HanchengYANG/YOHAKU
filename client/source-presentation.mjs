@@ -6,8 +6,9 @@ export function pageSelection(selection, page) {
     ...(page.sourceVersions ? {sourceVersions:page.sourceVersions} : {}) };
 }
 
-export function readingPageLabel({ index = 0, complete, totalPages }) {
-  return complete && totalPages ? `第 ${index + 1} / ${totalPages} 页` : `第 ${index + 1} 页`;
+// "2 / 5" once the page count is final, otherwise "第 2 页".
+export function readingPagePosition({ index = 0, complete, totalPages }) {
+  return complete && totalPages ? `${index + 1} / ${totalPages}` : `第 ${index + 1} 页`;
 }
 
 const preparationNames = {extract:"正文提取",correct:"正文校正",segment:"分句",annotate:"注音",annotate_local:"本地注音"};

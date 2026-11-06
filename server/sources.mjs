@@ -1295,6 +1295,8 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
   }
   // Reading pages published so far per article; summaries show 第 N / M 页.
   function pageCounts(userId){return new Map(database.prepare('SELECT document_id,COUNT(*) AS count FROM reading_pages WHERE user_id=? GROUP BY document_id').all(userId).map(row=>[row.document_id,row.count]));}
+  // Articles whose every source finished preparation (step 4), so their page count is final.
+  function preparedDocuments(userId){return new Set(database.prepare('SELECT document_id FROM article_sources WHERE user_id=? GROUP BY document_id HAVING MIN(next_step)>=4').all(userId).map(row=>row.document_id));}
   function attachRoutes(app) {
     const base='/api/documents/:id';
     app.get(`${base}/sources`,(req,res)=>{adoptDocument(req.user.id,req.params.id);res.json({sources:listSources(req.user.id,req.params.id)});});
@@ -1313,5 +1315,5 @@ export function createSourceService({database,ai={},requireDocument,fromRow,now=
   function close(){if(closed)return;stop();closed=true;}
   const taskAdapter=createSourceTaskAdapter({database,scopes,readHtml,body,sourceIdentity,working,latestRequest,ensureRequest,schedule,stamp,retryFailedSteps,requestTargets:request=>requestTargets(request,true),targetsReady,hasRunnableDemand:(userId,documentId)=>!!demand({userId,documentId}),withReadScope});
   schedule();
-  return {taskAdapter,retryFailedSteps,attachRoutes,adoptDocument,createArticleSources,hydrateDocument,readArticle,hasDocument,listSources,getSource,saveSource,markChecked,beginEdit,endEdit,prepareSource,readingPages,heartbeat,reorderSources,validateSelection,persistDocumentMarks,deleteDocument,pageCounts,stop,close,drain};
+  return {preparedDocuments,taskAdapter,retryFailedSteps,attachRoutes,adoptDocument,createArticleSources,hydrateDocument,readArticle,hasDocument,listSources,getSource,saveSource,markChecked,beginEdit,endEdit,prepareSource,readingPages,heartbeat,reorderSources,validateSelection,persistDocumentMarks,deleteDocument,pageCounts,stop,close,drain};
 }

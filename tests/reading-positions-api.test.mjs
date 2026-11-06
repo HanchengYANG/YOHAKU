@@ -111,7 +111,7 @@ test("未分页文章用 PUT 记录打开，参数无效时拒绝", async (t) =>
   assert.equal((await f.request("/api/documents")).data.documents.find((item) => item.id === id).readingPosition, null);
   const saved = await f.request(`/api/documents/${id}/reading-position`, "PUT", { pageIndex: 0 });
   assert.equal(saved.status, 200);
-  assert.deepEqual(saved.data, { pageIndex: 0, pageCount: 0, updatedAt: saved.data.updatedAt });
+  assert.deepEqual(saved.data, { pageIndex: 0, pageCount: 0, pagesFinal: false, updatedAt: saved.data.updatedAt });
   assert.match(saved.data.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
   const listed = (await f.request("/api/documents")).data.documents.find((item) => item.id === id);
   assert.deepEqual(listed.readingPosition, saved.data);

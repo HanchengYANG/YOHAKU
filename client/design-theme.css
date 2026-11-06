@@ -192,7 +192,6 @@ summary:focus-visible {
 .eyebrow {
   color: var(--rust-dark);
 }
-.reader-title-row h1,
 .editor-heading h1,
 .stage2-heading h1,
 .document-chat-heading h2 {
@@ -268,7 +267,6 @@ summary:focus-visible {
 .stage2-field select,
 .stage2-field textarea,
 .book-rename input,
-.book-jump select,
 .book-target input,
 .book-target select,
 .account-form-field input,
@@ -313,20 +311,9 @@ summary:focus-visible {
   color: #85623c;
   background: #eee4ce;
 }
-.document-meta,
 .reader-footer,
-.saved-state,
-.font-control,
 .export-actions .text-button {
   color: var(--muted);
-}
-.kind-label,
-.ruby-toggle.selected {
-  color: #365c47;
-  background: #e7ecdf;
-}
-.font-control input {
-  accent-color: var(--rust);
 }
 .reader-recognition-details,
 .ocr-review-overview {
@@ -339,7 +326,6 @@ summary:focus-visible {
 .reader-recognition-details summary {
   color: #51674d;
 }
-.book-navigation,
 .book-empty {
   background: #eeeadf;
   border-color: #d8d1bf;

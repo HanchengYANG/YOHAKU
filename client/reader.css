@@ -1,0 +1,358 @@
+/* Reading page (§3): one thin bar, a fixed centred column, page turns at the
+   end of the body. Loaded after styles.css so reading mode wins over the
+   sidebar-collapsed layout. */
+.reader-workspace {
+  --reading-column: 800px;
+}
+
+.reading-bar {
+  position: sticky;
+  top: 0;
+  z-index: 17;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 6px 16px;
+  background: #f5f1e8f2;
+  border-bottom: 1px solid var(--line);
+}
+.reading-bar-start,
+.reading-bar-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.reading-bar-shelf {
+  display: none;
+}
+.reading-mode .reading-bar-shelf {
+  display: flex;
+}
+.reading-bar-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.reading-bar-back span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reading-bar-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.reading-bar-title h1 {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+.reading-bar-pages {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.reading-bar-pages:hover {
+  color: var(--ink);
+}
+.reading-bar-tool {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.reading-bar-tool:hover {
+  background: #ebe5d8;
+}
+.reading-bar-tool.selected {
+  background: var(--ink);
+  color: var(--paper);
+}
+.reading-bar-count {
+  margin-left: 5px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--rust);
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+}
+.reading-bar-popover-anchor {
+  position: relative;
+  min-width: 0;
+}
+.reading-bar-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  z-index: 30;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  box-shadow: 0 10px 30px #203b3920;
+}
+.reading-toc {
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(340px, calc(100vw - 32px));
+  max-height: min(60vh, 480px);
+  overflow: auto;
+}
+.reading-toc h2 {
+  margin: 2px 4px 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.reading-toc ol {
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+.reading-toc li .text-button {
+  display: block;
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: 6px;
+  text-align: left;
+  color: var(--ink);
+}
+.reading-toc .text-button[aria-current="page"] {
+  background: #efe7d7;
+  font-weight: 600;
+}
+.reading-toc p {
+  margin: 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.reading-font {
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 220px;
+}
+.reading-font input {
+  flex: 1;
+}
+
+.reader-workspace .reader-page,
+.reader-workspace .reading-preparation {
+  width: min(var(--reading-column), calc(100% - 32px));
+  margin-left: auto;
+  margin-right: auto;
+}
+.reader-workspace .reader-page {
+  margin-top: 28px;
+  margin-bottom: 20px;
+}
+.paged-reader .reading-pagination {
+  gap: 16px;
+  padding: 8px 16px 4px;
+  font-size: 14px;
+  color: var(--muted);
+}
+.paged-reader .reading-pagination .text-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.reading-next-article {
+  margin: 6px 0 36px;
+  text-align: center;
+}
+.reading-next-article .text-button {
+  font-size: 15px;
+  color: var(--rust-dark);
+}
+
+@media (min-width: 761px) {
+  .reading-mode > .main-panel {
+    margin-left: 0;
+  }
+  .reading-mode > .sidebar {
+    display: none;
+  }
+  .reading-mode > .sidebar.is-open {
+    display: flex;
+    z-index: 40;
+    box-shadow: 8px 0 30px #203b3926;
+  }
+  .reading-mode > .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 39;
+    border: 0;
+    background: #25362430;
+  }
+  .reading-mode .desktop-sidebar-collapse,
+  .reading-mode .topbar {
+    display: none;
+  }
+}
+/* Below 1024px the chat is a bottom sheet with its own reopen handle. */
+@media (max-width: 1023px) {
+  .reading-bar .reader-ai-action {
+    display: none;
+  }
+}
+/* Side by side only when the column keeps its width next to the panel;
+   otherwise the panel covers the text instead of squeezing it. */
+@media (min-width: 1024px) and (max-width: 1199px) {
+  .reader-workspace.has-chat {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 760px) {
+  .reading-mode .topbar {
+    display: none;
+  }
+  .reading-bar {
+    flex-wrap: wrap;
+    gap: 2px 8px;
+    padding: 6px 10px 8px;
+  }
+  .reading-bar-title {
+    order: 3;
+    flex-basis: 100%;
+    justify-content: flex-start;
+  }
+  .reading-bar-start {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .reading-bar-back {
+    min-width: 0;
+    max-width: none;
+  }
+  .reading-bar-tool {
+    padding: 0 8px;
+  }
+  .reading-toc {
+    left: 0;
+    transform: none;
+  }
+  .reader-workspace .reader-page {
+    width: calc(100% - 24px);
+    margin-top: 16px;
+  }
+}
+
+/* Selection questions (§3.4): clear pill buttons. */
+.selection-actions .selection-pill {
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.selection-actions .selection-pill:hover:not(:disabled) {
+  border-color: var(--ink);
+}
+.selection-actions .selection-pill[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--paper);
+}
+.selection-actions .selection-pill:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.selection-actions .icon-button {
+  margin-left: auto;
+}
+
+/* Preparation (§3.5): one status line; the extracted text stays readable. */
+.reading-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  width: min(var(--reading-column), calc(100% - 32px));
+  margin: 20px auto 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  font-size: 13px;
+  color: var(--muted);
+}
+.reading-status.is-failed {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+.reading-status-track {
+  flex: 1;
+  min-width: 120px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: #e9e3d6;
+}
+.reading-status-track span {
+  display: block;
+  height: 100%;
+  background: var(--rust);
+  transition: width 300ms ease-out;
+}
+.reading-status-track.is-indeterminate span {
+  width: 30%;
+  animation: reading-status-slide 1.4s ease-in-out infinite;
+}
+@keyframes reading-status-slide {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(340%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .reading-status-track.is-indeterminate span {
+    width: 100%;
+    opacity: 0.4;
+    animation: none;
+  }
+}
+.reading-status-actions {
+  display: flex;
+  gap: 12px;
+  margin-left: auto;
+}
+.reading-provisional .reading-provisional-text {
+  white-space: pre-wrap;
+  line-height: 2.2;
+}

@@ -67,45 +67,34 @@ async function bookNavigationFixture(page,{failUnknown=false,delayChapter=false}
   return {releaseKnown,releaseUnknown,releaseChapter,knownReturned};
 }
 
-test("chapter navigation keeps the known table of contents during refresh and rejects a late response from another book",async({page})=>{
+test("book navigation uses the known table of contents during refresh and rejects a late response from another book",async({page})=>{
   const gates=await bookNavigationFixture(page,{delayChapter:true});
   try{
     await page.goto("/#a1");
-    const selector=page.getByLabel("书籍文章",{exact:true});
-    await expect(selector.locator("option")).toHaveCount(2);
-    await selector.selectOption("a2");
-    await expect(selector).toHaveValue("a2");
-    await expect(selector.locator("option")).toHaveCount(2);
+    await expect(page.getByRole("heading",{name:"同书第一章",exact:true})).toBeVisible();
+    const contents=page.getByRole("button",{name:"目录",exact:true}),toc=page.getByRole("dialog",{name:"目录",exact:true});
+    await contents.click();
+    await expect(toc.getByRole("button")).toHaveCount(2);
+    await toc.getByRole("button",{name:"同书第二章",exact:true}).click();
     gates.releaseChapter();
     await expect(page.getByRole("heading",{name:"同书第二章",exact:true})).toBeVisible();
-    await expect(selector).toHaveValue("a2");
-    await expect(selector.locator("option")).toHaveCount(2);
-    await expect(page.getByText(/目录暂未加载/)).toHaveCount(0);
+    // The book is re-read in the background; the bar keeps the known contents meanwhile.
+    await contents.click();
+    await expect(toc.getByRole("button",{name:"同书第二章",exact:true})).toHaveAttribute("aria-current","page");
+    await page.keyboard.press("Escape");
+    await expect(toc).toHaveCount(0);
     await page.evaluate(()=>location.hash="b1");
     await expect(page.getByRole("heading",{name:"另一书第一章",exact:true})).toBeVisible();
-    await expect(page.getByText("正在加载目录…",{exact:true})).toBeVisible();
-    await expect(selector).toHaveCount(0);
+    await expect(page.getByRole("button",{name:"返回书籍",exact:true})).toBeVisible();
     gates.releaseUnknown();
-    await expect(selector.locator("option")).toHaveCount(1);
     await expect(page.getByRole("button",{name:"返回书籍：另一本书",exact:true})).toBeVisible();
+    await expect(contents).toHaveCount(0);
     gates.releaseKnown();
     await gates.knownReturned;
     await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
-    await expect(selector).toHaveValue("b1");
+    await expect(page.getByRole("button",{name:"返回书籍：另一本书",exact:true})).toBeVisible();
     await expect(page.getByRole("button",{name:"返回书籍：原来的书",exact:true})).toHaveCount(0);
   }finally{gates.releaseKnown();gates.releaseUnknown();gates.releaseChapter();}
-});
-
-test("an unknown book directory reports failure only after its request fails",async({page})=>{
-  const gates=await bookNavigationFixture(page,{failUnknown:true});
-  try{
-    await page.goto("/#b1");
-    await expect(page.getByText("正在加载目录…",{exact:true})).toBeVisible();
-    await expect(page.getByText(/目录暂未加载/)).toHaveCount(0);
-    gates.releaseUnknown();
-    await expect(page.getByText(/目录暂未加载/)).toBeVisible();
-    await expect(page.getByText("正在加载目录…",{exact:true})).toHaveCount(0);
-  }finally{gates.releaseKnown();gates.releaseUnknown();}
 });
 
 test("unified task entry stays visible with zero active tasks and filters task types", { tag: "@phone" },async({page},info)=>{

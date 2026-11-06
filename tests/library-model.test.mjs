@@ -12,6 +12,8 @@ test("阅读页进度：第 N / M 页，未分页的文章没有进度", () => {
   assert.deepEqual(pageProgress(position(2, 5, 0)), { page: 3, total: 5, label: "第 3 / 5 页", percent: 60 });
   assert.deepEqual(pageProgress(position(9, 5, 0)), { page: 5, total: 5, label: "第 5 / 5 页", percent: 100 });
   assert.equal(pageProgress(position(0, 0, 0)), null);
+  // Until preparation is final the page count is only what is ready so far.
+  assert.deepEqual(pageProgress({ ...position(1, 2, 0), pagesFinal: false }), { page: 2, total: null, label: "第 2 页", percent: null });
   assert.equal(pageProgress(null), null);
 });
 

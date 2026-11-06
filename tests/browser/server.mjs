@@ -1,12 +1,16 @@
 import { rm } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolve } from "node:path";
 import { createApp } from "../../server/app.mjs";
 import { SENTENCE_SCHEMA } from "../../shared/sentences.mjs";
 import { ANNOTATION_SCHEMA } from "../../shared/ocr-correction.mjs";
 import { HYBRID_ANNOTATION_SCHEMA } from "../../server/ai/hybrid-annotation.mjs";
 
 // Reset the dedicated test store before SQLite opens it, never the user's data/.
-const dataDir = new URL("../../artifacts/e2e-data/", import.meta.url);
+// DATA_DIR lets a local preview run beside the test suite (see .claude/launch.json).
+const dataDir = process.env.DATA_DIR && process.env.DATA_DIR !== "artifacts/e2e-data"
+  ? pathToFileURL(`${resolve(process.env.DATA_DIR)}/`) : new URL("../../artifacts/e2e-data/", import.meta.url);
+if (!fileURLToPath(dataDir).includes("/artifacts/")) throw new Error("The browser fixture only resets folders under artifacts/.");
 await rm(dataDir, { recursive: true, force: true });
 
 // Base/PWA tests exercise real accounts, SQLite, HTTP and static assets. The

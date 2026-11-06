@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pageSelection, readingPageLabel, sourceLabel, splitChapter, moveChapter, mergeChapter } from "../client/source-presentation.mjs";
+import { pageSelection, readingPagePosition, sourceLabel, splitChapter, moveChapter, mergeChapter } from "../client/source-presentation.mjs";
 import * as presentation from "../client/source-presentation.mjs";
 
 test("reading selection keeps article offsets and adds page/source scope", () => {
@@ -8,8 +8,8 @@ test("reading selection keeps article offsets and adds page/source scope", () =>
   assert.deepEqual(result, {start:102,end:104,text:"本文",readingPageId:"page-2",sourceIds:["s1","s2"],pageLocalStart:2,pageLocalEnd:4});
 });
 test("unknown total is never rendered as a guessed reading count", () => {
-  assert.equal(readingPageLabel({index:2,complete:false,totalPages:99}), "第 3 页");
-  assert.equal(readingPageLabel({index:2,complete:true,totalPages:4}), "第 3 / 4 页");
+  assert.equal(readingPagePosition({index:2,complete:false,totalPages:99}), "第 3 页");
+  assert.equal(readingPagePosition({index:2,complete:true,totalPages:4}), "3 / 4");
 });
 test("chapter edits keep PDF physical page ranges and selected order", () => {
   const original = [{id:"a",title:"一",startPage:2,endPage:8},{id:"b",title:"二",startPage:9,endPage:10}];
