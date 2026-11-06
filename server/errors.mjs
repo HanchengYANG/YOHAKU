@@ -117,3 +117,43 @@ export function createErrorLog(database, { now = () => Date.now(), generateCode 
 
   return { record, capture, get, list, prune };
 }
+
+// Codes the client already relies on (session expiry, task and edit conflicts).
+const PUBLIC_CODES = new Set(["WEBSITE_AUTH_REQUIRED", "TASK_VERSION_CONFLICT", "TASK_RESULT_STALE", "TASK_UNAVAILABLE", "SOURCE_EDIT_REVISION_CONFLICT"]);
+const UNAVAILABLE = "服务暂时遇到问题，请稍后再试。";
+
+export function publicErrorBody(error, { errorLog, userId = null, scope = "http", location = null, log = console.error } = {}) {
+  const status = Number.isInteger(error?.status) ? error.status : 500;
+  const publicCode = PUBLIC_CODES.has(error?.code) ? { code: error.code } : {};
+  const { record, action } = classifyError(error);
+  let errorCode = isErrorCode(error?.errorCode) ? error.errorCode : null;
+  if (!record && !errorCode) return { status, body: { ...publicCode, error: String(error?.message || UNAVAILABLE) } };
+  if (!errorCode) {
+    try { errorCode = errorLog.record(error, { userId, scope, location }); }
+    catch (cause) { log("错误记录写入失败：", cause?.message); }
+  }
+  const finalAction = error?.errorAction ?? action;
+  return {
+    status,
+    body: {
+      ...publicCode,
+      error: errorCode ? failureText(errorCode, finalAction) : UNAVAILABLE,
+      ...(errorCode ? { errorCode } : {}),
+      ...(errorCode && finalAction ? { action: finalAction } : {}),
+    },
+  };
+}
+
+export function errorResponder({ errorLog, log = console.error } = {}) {
+  return (error, req, res, _next) => {
+    if (error.code === "LIMIT_FILE_SIZE") return res.status(413).json({ error: "图片最大 12 MB，请换一张较小的图片。" });
+    if (error.name === "MulterError") return res.status(400).json({ error: "请一次上传一张 PNG、JPEG 或 WebP 图片。" });
+    if (error.type === "entity.too.large") return res.status(413).json({ error: "提交内容过大，请减少正文长度。" });
+    if (error.type === "entity.parse.failed") return res.status(400).json({ error: "请求格式有误，请重新提交。" });
+    const { status, body } = publicErrorBody(error, {
+      errorLog, log, userId: req.user?.id ?? null, scope: "http",
+      location: `${req.method} ${req.originalUrl.split("?")[0]}`,
+    });
+    res.status(status).json(body);
+  };
+}
