@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import express from "express";
 import { once } from "node:events";
 import { DatabaseSync } from "node:sqlite";
-import { createErrorLog, errorResponder } from "../server/errors.mjs";
+import { createErrorLog, errorResponder, publicErrorBody } from "../server/errors.mjs";
 import { AI_SETTINGS_ACTION, failureText, isErrorCode } from "../shared/error-codes.mjs";
 
 const fail = (status, message, extra = {}) => Object.assign(new Error(message), { status, expose: true, ...extra });
@@ -64,4 +64,16 @@ test("已经记录过的错误沿用原代码", async (t) => {
 test("上传与请求体错误保持原有白话", async (t) => {
   const { body } = await serve(t, () => Object.assign(new Error("too large"), { type: "entity.too.large", status: 413 }));
   assert.deepEqual(body, { error: "提交内容过大，请减少正文长度。" });
+});
+
+test("记录写入失败时日志带上隐藏后的原始信息", () => {
+  const calls = [];
+  const errorLog = { record() { throw new Error("database is locked"); } };
+  const { status, body } = publicErrorBody(new Error("上游失败 token=abc123"), { errorLog, log: (...args) => calls.push(args.join(" ")) });
+  assert.equal(status, 500);
+  assert.deepEqual(body, { error: "服务暂时遇到问题，请稍后再试。" });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /上游失败 token=\[已隐藏\]/);
+  assert.match(calls[0], /database is locked/);
+  assert.doesNotMatch(calls[0], /abc123/);
 });

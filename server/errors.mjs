@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { AI_SETTINGS_ACTION, ERROR_CODE_ALPHABET, failureText, isErrorCode } from "../shared/error-codes.mjs";
+import { AI_SETTINGS_ACTION, ERROR_CODE_ALPHABET, GENERIC_FAILURE, failureText, isErrorCode, parseFailure } from "../shared/error-codes.mjs";
 import { sanitizeDiagnostic } from "./ai/diagnostics.mjs";
 
 export function newErrorCode(bytes = randomBytes(6)) {
@@ -10,28 +10,48 @@ export function newErrorCode(bytes = randomBytes(6)) {
 // SDK errors can carry credentials; hide the common shapes before storing.
 export function redact(text) {
   return String(text ?? "")
-    .replace(/(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;"']+/gi, "$1[已隐藏]")
+    .replace(/(\b(?:set-)?cookie["']?\s*[:=]\s*)[^\r\n]*/gi, "$1[已隐藏]")
+    .replace(/(authorization["']?\s*[:=]\s*["']?)(?:(?:bearer|basic|token)\s+)?[^\s,;"']+/gi, "$1[已隐藏]")
     .replace(/\bbearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, "Bearer [已隐藏]")
+    .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[已隐藏]")
     .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/g, "[已隐藏]")
     .replace(/((?:api[_-]?key|token|secret|password)["']?\s*[:=]\s*["']?)[^\s,;"'}]+/gi, "$1[已隐藏]");
 }
 
-const userFixableAICodes = new Set(["AI_BUSY"]);
+const SECRET_KEY = /api[_-]?key|token|secret|password|authorization|cookie/i;
+
+// Redact field by field so the stored context stays valid JSON. Numbers are
+// kept: counters such as inputTokens cannot hold credentials.
+const redactJson = (value) => JSON.stringify(value, (key, item) =>
+  key && SECRET_KEY.test(key) && (typeof item === "string" || (item && typeof item === "object")) ? "[已隐藏]"
+    : typeof item === "string" ? redact(item) : item);
+
+const parseContext = (text) => {
+  try { const value = JSON.parse(text); return value && typeof value === "object" ? value : {}; }
+  catch { return {}; }
+};
+
+// Cancelling an AI request is the user's own choice, so it is not recorded.
+const userFixableAICodes = new Set(["AI_BUSY", "AI_CANCELLED"]);
 
 export function classifyError(error) {
   const status = Number.isInteger(error?.status) ? error.status : 500;
   const code = typeof error?.code === "string" ? error.code : null;
-  const fromAI = Boolean(error?.diagnostic) || Boolean(code?.startsWith("AI_"));
+  const kind = code || (typeof error?.diagnostic?.code === "string" ? error.diagnostic.code : null);
+  // Provider errors raised inside a role carry execution details but may lack a diagnostic.
+  const fromAI = Boolean(error?.diagnostic) || Boolean(error?.execution?.providerId) || Boolean(code?.startsWith("AI_"));
   if (code === "AI_AUTH_REQUIRED" || (fromAI && [401, 403].includes(status)))
     return { record: true, kind: "AI_AUTH_REQUIRED", action: AI_SETTINGS_ACTION };
-  if (status < 500 && (!fromAI || userFixableAICodes.has(code)))
-    return { record: false, kind: code, action: null };
-  return { record: true, kind: code || error?.diagnostic?.code || null, action: null };
+  if (status < 500 && (!fromAI || userFixableAICodes.has(kind)))
+    return { record: false, kind, action: null };
+  return { record: true, kind, action: null };
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-export function createErrorLog(database, { now = () => Date.now(), generateCode = newErrorCode, retentionMs = 90 * DAY_MS } = {}) {
+export function createErrorLog(database, {
+  now = () => Date.now(), generateCode = newErrorCode, retentionMs = 90 * DAY_MS, log = console.error,
+} = {}) {
   database.exec(`
     CREATE TABLE IF NOT EXISTS error_log (
       code TEXT PRIMARY KEY,
@@ -47,8 +67,9 @@ export function createErrorLog(database, { now = () => Date.now(), generateCode 
     );
     CREATE INDEX IF NOT EXISTS error_log_created ON error_log(created_at);
   `);
-  const insert = database.prepare(`INSERT OR IGNORE INTO error_log
-    (code,created_at,user_id,scope,location,kind,status,message,stack,context_json) VALUES(?,?,?,?,?,?,?,?,?,?)`);
+  const insert = database.prepare(`INSERT INTO error_log
+    (code,created_at,user_id,scope,location,kind,status,message,stack,context_json) VALUES(?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(code) DO NOTHING`);
   const hasUsers = () => Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'").get());
   const select = (where) => hasUsers()
     ? `SELECT e.*, u.username FROM error_log e LEFT JOIN users u ON u.id=e.user_id${where}`
@@ -67,18 +88,25 @@ export function createErrorLog(database, { now = () => Date.now(), generateCode 
     const createdAt = new Date(now()).toISOString();
     for (let attempt = 0; attempt < 5; attempt++) {
       const code = generateCode();
-      if (insert.run(code, createdAt, userId, scope, location, kind, status, message, stack, redact(JSON.stringify(details))).changes) return code;
+      if (insert.run(code, createdAt, userId, scope, location, kind, status, message, stack, redactJson(details)).changes) return code;
     }
     throw new Error("无法生成唯一的错误代码。");
   }
 
   // Background failures: record once per error object and return the text
-  // that is stored in the existing error fields.
+  // that is stored in the existing error fields. Never throws: callers are
+  // already handling a failure, so a broken log falls back to the plain text.
   function capture(error, meta) {
     const target = error && typeof error === "object" ? error : new Error(String(error));
     if (!isErrorCode(target.errorCode)) {
-      target.errorAction = classifyError(target).action;
-      target.errorCode = record(target, meta);
+      try {
+        const { action } = classifyError(target);
+        target.errorCode = record(target, meta);
+        target.errorAction = action;
+      } catch (cause) {
+        try { log("错误记录写入失败：", redact(target.message || target), redact(cause?.message)); } catch {}
+        return GENERIC_FAILURE;
+      }
     }
     return failureText(target.errorCode, target.errorAction);
   }
@@ -86,7 +114,7 @@ export function createErrorLog(database, { now = () => Date.now(), generateCode 
   const present = (row) => row ? {
     code: row.code, createdAt: row.created_at, userId: row.user_id, username: row.username ?? null,
     scope: row.scope, location: row.location, kind: row.kind, status: row.status,
-    message: row.message, stack: row.stack, context: row.context_json ? JSON.parse(row.context_json) : {},
+    message: row.message, stack: row.stack, context: parseContext(row.context_json),
   } : null;
 
   function get(code) {
@@ -96,9 +124,14 @@ export function createErrorLog(database, { now = () => Date.now(), generateCode 
   function list({ query = "", before = null, limit = 50 } = {}) {
     const size = Math.min(Math.max(Number.parseInt(limit, 10) || 50, 1), 200);
     const where = [], params = [];
-    const code = normalize(query);
+    // Admins may paste the whole failure sentence instead of the bare code.
+    const code = parseFailure(String(query ?? "").trim())?.code ?? normalize(query);
     if (code) { where.push("e.code=?"); params.push(code); }
-    if (before) { where.push("e.created_at<?"); params.push(String(before)); }
+    // The cursor is "createdAt|code", because several rows can share a timestamp.
+    if (before) {
+      const [at, last = ""] = String(before).split("|", 2);
+      where.push("(e.created_at<? OR (e.created_at=? AND e.code<?))"); params.push(at, at, normalize(last));
+    }
     const rows = database.prepare(`${select(where.length ? ` WHERE ${where.join(" AND ")}` : "")} ORDER BY e.created_at DESC, e.code DESC LIMIT ?`)
       .all(...params, size + 1);
     return {
@@ -107,7 +140,7 @@ export function createErrorLog(database, { now = () => Date.now(), generateCode 
         scope: row.scope, location: row.location, kind: row.kind,
         summary: row.message.split("\n", 1)[0].slice(0, 120),
       })),
-      nextBefore: rows.length > size ? rows[size - 1].created_at : null,
+      nextBefore: rows.length > size ? `${rows[size - 1].created_at}|${rows[size - 1].code}` : null,
     };
   }
 
@@ -130,7 +163,7 @@ export function publicErrorBody(error, { errorLog, userId = null, scope = "http"
   if (!record && !errorCode) return { status, body: { ...publicCode, error: String(error?.message || UNAVAILABLE) } };
   if (!errorCode) {
     try { errorCode = errorLog.record(error, { userId, scope, location }); }
-    catch (cause) { log("错误记录写入失败：", cause?.message); }
+    catch (cause) { log("错误记录写入失败：", redact(error?.message || error), redact(cause?.message)); }
   }
   const finalAction = error?.errorAction ?? action;
   return {

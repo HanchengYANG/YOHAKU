@@ -17,10 +17,25 @@ test("隐藏密钥、令牌与授权头", () => {
   assert.equal(redact("普通错误"), "普通错误");
 });
 
+test("隐藏 Basic 授权、JWT 与 Cookie", () => {
+  assert.equal(redact("Authorization: Basic dXNlcjpwYXNz rejected"), "Authorization: [已隐藏] rejected");
+  assert.equal(redact("got eyJhbGciOi.eyJzdWIiOiIx.c2lnbmF0dXJl back"), "got [已隐藏] back");
+  assert.equal(redact("Cookie: sid=abc; theme=dark\nnext line"), "Cookie: [已隐藏]\nnext line");
+  assert.equal(redact("set-cookie: sid=abc; Path=/"), "set-cookie: [已隐藏]");
+});
+
 test("用户能自己解决的错误不记录", () => {
   assert.deepEqual(classifyError(fail(400, "书名需要填写")), { record: false, kind: null, action: null });
   assert.equal(classifyError(Object.assign(new Error("找不到这篇材料"), { status: 404 })).record, false);
   assert.deepEqual(classifyError(fail(409, "AI 正在处理请求", { code: "AI_BUSY" })), { record: false, kind: "AI_BUSY", action: null });
+  assert.deepEqual(classifyError(fail(409, "API 请求已取消或超时，请重试。", {
+    diagnostic: { code: "AI_CANCELLED", category: "cancelled" }, execution: { providerId: "api_base" },
+  })), { record: false, kind: "AI_CANCELLED", action: null });
+});
+
+test("带 AI 执行信息的 4xx 视为 AI 错误并记录", () => {
+  assert.deepEqual(classifyError(fail(400, "所选模型不支持图片输入，尚未发起推理。", { execution: { providerId: "openai", role: "ocr" } })),
+    { record: true, kind: null, action: null });
 });
 
 test("服务端、AI 与上游错误都记录", () => {

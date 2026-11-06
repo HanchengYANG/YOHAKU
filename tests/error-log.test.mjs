@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { createErrorLog } from "../server/errors.mjs";
-import { AI_SETTINGS_ACTION, failureText } from "../shared/error-codes.mjs";
+import { AI_SETTINGS_ACTION, GENERIC_FAILURE, failureText } from "../shared/error-codes.mjs";
 
 const fail = (status, message, extra = {}) => Object.assign(new Error(message), { status, expose: true, ...extra });
 const at = (iso) => () => Date.parse(iso);
@@ -66,10 +66,59 @@ test("列表倒序、可按代码过滤、可分页，并能关联网站账号",
   const page = log.list({ limit: 2 });
   assert.deepEqual(page.items.map((item) => item.code), ["CCCCCC", "BBBBBB"]);
   assert.equal(page.items[0].username, "test");
-  assert.equal(page.nextBefore, "2026-11-06T10:00:01.000Z");
+  assert.equal(page.nextBefore, "2026-11-06T10:00:01.000Z|BBBBBB");
   assert.deepEqual(log.list({ before: page.nextBefore }).items.map((item) => item.code), ["AAAAAA"]);
   assert.equal(log.list({ before: page.nextBefore }).items[0].summary, "第一行");
   assert.deepEqual(log.list({ query: " bbbbbb " }).items.map((item) => item.code), ["BBBBBB"]);
+  assert.deepEqual(log.list({ query: ` ${failureText("BBBBBB")} ` }).items.map((item) => item.code), ["BBBBBB"]);
+});
+
+test("同一时刻的多条记录分页不丢失", () => {
+  const { log } = fixture({ codes: ["AAAAAA", "BBBBBB", "CCCCCC"] });
+  for (const message of ["一", "二", "三"]) log.record(new Error(message));
+  const first = log.list({ limit: 2 });
+  assert.deepEqual(first.items.map((item) => item.code), ["CCCCCC", "BBBBBB"]);
+  assert.equal(first.nextBefore, "2026-11-06T10:00:00.000Z|BBBBBB");
+  const second = log.list({ before: first.nextBefore, limit: 2 });
+  assert.deepEqual(second.items.map((item) => item.code), ["AAAAAA"]);
+  assert.equal(second.nextBefore, null);
+});
+
+test("上下文按字段隐藏敏感信息，计数保留", () => {
+  const { log } = fixture({ codes: ["AAAAAA"] });
+  const error = fail(502, "失败", { execution: { providerId: "api_base", usage: { inputTokens: 12 }, maxOutputTokens: 4096 } });
+  log.record(error, { context: {
+    headers: { Authorization: "Bearer abcdefgh1234", cookie: "sid=1" },
+    apiKey: "xyz", note: "cookie: sid=abc\n下一行", url: "https://x/?token=abc123",
+  } });
+  const { context } = log.get("AAAAAA");
+  assert.deepEqual(context.headers, { Authorization: "[已隐藏]", cookie: "[已隐藏]" });
+  assert.equal(context.apiKey, "[已隐藏]");
+  assert.equal(context.note, "cookie: [已隐藏]\n下一行");
+  assert.equal(context.url, "https://x/?token=[已隐藏]");
+  assert.deepEqual(context.execution.usage, { inputTokens: 12 });
+  assert.equal(context.execution.maxOutputTokens, 4096);
+});
+
+test("上下文损坏时返回空对象", () => {
+  const { database, log } = fixture({ codes: ["AAAAAA"] });
+  log.record(new Error("一"));
+  database.prepare("UPDATE error_log SET context_json='{broken' WHERE code='AAAAAA'").run();
+  assert.deepEqual(log.get("AAAAAA").context, {});
+});
+
+test("记录写入失败时 capture 不抛错，返回不带代码的文案", () => {
+  const calls = [];
+  const log = createErrorLog(new DatabaseSync(":memory:"), {
+    now: at("2026-11-06T10:00:00.000Z"), generateCode: () => "AAAAAA", log: (...args) => calls.push(args.join(" ")),
+  });
+  log.record(new Error("一"));
+  const error = fail(500, "上游失败 token=abc123");
+  assert.equal(log.capture(error), GENERIC_FAILURE);
+  assert.equal(error.errorCode, undefined);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /上游失败 token=\[已隐藏\]/);
+  assert.doesNotMatch(calls[0], /abc123/);
 });
 
 test("清理 90 天前的记录", () => {
