@@ -366,5 +366,5 @@ export function attachAccountRoutes({ app, database, onFirstUser = () => {} }) {
         .map(safeUser),
     }),
   );
-  return { middleware, requireUser };
+  return { middleware, requireUser, requireAdmin };
 }

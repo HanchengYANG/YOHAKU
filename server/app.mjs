@@ -12,6 +12,9 @@ import { createSourceService } from "./sources.mjs";
 import { attachImportRoutes } from "./imports.mjs";
 import { attachTaskRoutes } from "./tasks.mjs";
 import { createNdlOcr } from './ocr/ndl.mjs';
+import { createErrorLog, errorResponder } from "./errors.mjs";
+import { migrateLegacyFailures } from "./legacy-failures.mjs";
+import { attachErrorRoutes } from "./error-routes.mjs";
 import {
   parseText,
   serializeBlocks,
@@ -234,6 +237,7 @@ export function createApp({
   for (const [name, definition] of [["body_html", "TEXT"], ["body_hash", "TEXT"], ["source_images_json", "TEXT"]]) {
     if (!columns.includes(name)) database.exec(`ALTER TABLE documents ADD COLUMN ${name} ${definition}`);
   }
+  const errorLog = createErrorLog(database);
   const requireDocument = (userId, id) => {
     const row = database
       .prepare("SELECT * FROM documents WHERE id=? AND owner_id=?")
@@ -242,6 +246,7 @@ export function createApp({
     return row;
   };
   const app = express();
+  app.locals.errorLog = errorLog;
   app.disable("x-powered-by");
   if (sites.length) app.set("trust proxy", "loopback");
   app.use((req, _res, next) => {
@@ -316,6 +321,7 @@ export function createApp({
     mangaOcr,
     ndlOcr:sharedNdlOcr,
     localRuby,
+    errorLog,
   });
   const books = attachBookRoutes({ app, database, summary, requireDocument,
     beforeDeleteDocument: (userId, id) => {imports.invalidateTarget(userId,{documentId:id});sources.deleteDocument(userId,id);},
@@ -487,12 +493,12 @@ export function createApp({
     return writeArticle(userId, next, images, old);
   }
 
-  const imageTasks = attachImageTaskRoutes({ app, database, ai,
+  const imageTasks = attachImageTaskRoutes({ app, database, ai, errorLog,
     applyResult: applyTaskResult, validateDestination: validateTaskDestination,
     getAppliedDocument: (userId, id) => fromRow(requireDocument(userId, id)), ...imageTaskOptions });
   ai.setImageMutationGuard(imageTasks.assertImageMutable);
 
-  const sources = createSourceService({ database, ai, requireDocument, fromRow });
+  const sources = createSourceService({ database, ai, requireDocument, fromRow, errorLog });
   sources.attachRoutes(app);
   ai.setSourceScopeValidator?.((userId, documentId, selection) => sources.validateSelection?.(userId, documentId, selection) || {});
   ai.setSourceMarksWriter?.((userId, documentId, html) => sources.persistDocumentMarks(userId, documentId, html));
@@ -508,8 +514,16 @@ export function createApp({
       .run(id, input.title, input.kind, JSON.stringify(parseText("")), now, now, userId, value.bookId || null, position, html, hashBody(html));
     return fromRow(read.get(id));
   }
-  const imports = attachImportRoutes({ app, database, storageDir, ai, sources, books, createImportedArticle, requireDocument,localOcr:sharedNdlOcr });
+  const imports = attachImportRoutes({ app, database, storageDir, ai, sources, books, createImportedArticle, requireDocument,errorLog,localOcr:sharedNdlOcr });
   const tasks = attachTaskRoutes({app,database,adapters:[imageTasks.taskAdapter,imports.taskAdapter,sources.taskAdapter]});
+  migrateLegacyFailures(database);
+  attachErrorRoutes({ app, errorLog, requireAdmin: accounts.requireAdmin });
+  errorLog.prune();
+  // A throw inside a timer is uncaught and would stop the server.
+  const pruneTimer = setInterval(() => {
+    try { errorLog.prune(); } catch (error) { console.error("错误记录清理失败：", error.message); }
+  }, 24 * 60 * 60 * 1000);
+  pruneTimer.unref();
 
   app.get("/api/health", async (req, res) => {
     const authorization = await ai.statusForUser(req.user?.id);
@@ -652,35 +666,13 @@ export function createApp({
     } else next();
   });
   app.use((_req, res) => res.status(404).json({ error: "页面不存在。" }));
-  app.use((error, _req, res, _next) => {
-    if (error.code === "LIMIT_FILE_SIZE")
-      return res
-        .status(413)
-        .json({ error: "图片最大 12 MB，请换一张较小的图片。" });
-    if (error.name === "MulterError")
-      return res
-        .status(400)
-        .json({ error: "请一次上传一张 PNG、JPEG 或 WebP 图片。" });
-    if (error.type === "entity.too.large")
-      return res.status(413).json({ error: "提交内容过大，请减少正文长度。" });
-    if (error.type === "entity.parse.failed")
-      return res.status(400).json({ error: "请求格式有误，请重新提交。" });
-    const status = error.status || 500;
-    if (status >= 500 && !error.expose)
-      console.error("数据库或服务错误：", error.message);
-    res.status(status).json({
-      ...(["WEBSITE_AUTH_REQUIRED", "TASK_VERSION_CONFLICT", "TASK_RESULT_STALE", "TASK_UNAVAILABLE", "SOURCE_EDIT_REVISION_CONFLICT"].includes(error.code) ? { code: error.code } : {}),
-      error:
-        status >= 500 && !error.expose
-          ? "服务暂时遇到问题，请稍后再试。"
-          : error.message,
-    });
-  });
+  app.use(errorResponder({ errorLog }));
 
   let closed = false;
   function close() {
     if (closed) return;
     closed = true;
+    clearInterval(pruneTimer);
     imageTasks.close();
     sources.close();
     imports.close();
@@ -706,6 +698,7 @@ export function createApp({
     imports,
     tasks,
     sources,
+    errorLog,
     close,
     shutdown,
   };
