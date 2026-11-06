@@ -59,19 +59,20 @@
 ### 1.4 返回给前端的形状
 
 - HTTP 错误：`{ error: "<一句白话>", errorCode?: "7K2QD9", action?: "ai-settings" }`。第二类错误的 `error` 统一为通用句，不带原始信息。
-- 后台任务、来源步骤、导入草稿、对话的 `lastError` 一类字段改为只给 `errorCode`（加可选 `action`），原始信息只进 `error_log`。
-- 本次改版前已保存的失败记录没有代码，界面显示「处理失败」。
-- 执行详情（提供方、模型、推理强度、token）不再随普通响应下发到界面。数据库里保留，失败时写进 `error_log.context_json`。
+- 后台任务、来源步骤、导入草稿、对话的 `lastError` 一类字段改存带代码的失败文案（「出错了，请重试 · 错误代码 7K2QD9」或「AI 暂时不可用 · 错误代码 7K2QD9」），前端用 `parseFailure()` 读出代码和操作。原始信息只进 `error_log`。
+- 本次改版前已保存的失败记录没有代码，启动时一次性改为「处理失败」。
+- 执行详情（提供方、模型、推理强度、token）不再在界面展示。数据库与接口数据保留，失败时写进 `error_log.context_json`。
+- 写入 `error_log` 前隐藏授权头、API key、token 等常见密钥形态，避免把凭据存进数据库。
 
 ### 1.5 前端
 
-- 新组件 `ErrorNotice`：一句话 + 可复制的代码 + 可选操作按钮，替换现在直接显示原始错误的 15 处以上的位置（`ImageTasks.jsx`、`PagedReader.jsx`、`DocumentChat.jsx`、`Editor.jsx`、`UnifiedImport.jsx`、`SourceCorrection.jsx`、`ReadingPreparation.jsx`、`Reader.jsx`、`BookView.jsx`、`ImageImport.jsx`、`App.jsx`、AI 设置与角色配置页等）。
+- 新组件 `ErrorNotice`：一句话 + 可复制的代码 + 可选操作按钮。现在直接显示错误文字的 15 处以上位置（`ImageTasks.jsx`、`PagedReader.jsx`、`DocumentChat.jsx`、`Editor.jsx`、`UnifiedImport.jsx`、`SourceCorrection.jsx`、`ReadingPreparation.jsx`、`Reader.jsx`、`BookView.jsx`、`ImageImport.jsx`、`App.jsx`、AI 设置与角色配置页等）在第 1 步先靠带代码的失败文案显示代码，第 2–5 步重做各页面时改用 `ErrorNotice`。
 - `client/api.mjs` 统一处理网络失败，抛出带白话信息的错误，不再让「Failed to fetch」出现在界面。
 - 删除 `ExecutionDetails.mjs` 与 `PagedReader.jsx` 中 `DiagnosticFacts` 的界面展示。
 
 ### 1.6 管理员「错误记录」页
 
-- 入口在账号菜单，仅管理员可见。
+- 入口在账号菜单，仅管理员可见。第 1 步先放在侧栏底部管理员按钮行，第 2 步整理侧栏时移进账号菜单。
 - 列表倒序：时间、代码、账号、位置、一行摘要。顶部搜索框粘贴代码可直接定位。
 - 点开展开完整信息、堆栈和上下文。
 
