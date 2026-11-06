@@ -8,6 +8,7 @@ import { mkdtemp,rm,readFile,stat,utimes } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { attachImportRoutes } from '../server/imports.mjs';
+import { parseFailure } from '../shared/error-codes.mjs';
 import { renderImportedSource,inspectImportFile } from '../server/import-parsers.mjs';
 import { attachTaskRoutes } from '../server/tasks.mjs';
 import { execFileSync } from 'node:child_process';
@@ -161,7 +162,7 @@ for(const phase of ['extraction','proposal'])test(`failed chapter ${phase} stays
   const confirmation={type:'scan_pdf',title:'人工核对章节',asBook:true,chapters:[{title:'正文',startPage:1,endPage:1,needsReview:true}]};
   assert.equal((await f.request(path+'/confirm','POST',confirmation)).status,409);
   assert.equal((await f.request(path+'/chapters','POST',{type:'scan_pdf'})).status,202);
-  const restored=await f.waitChapters(path);assert.equal(restored.data.chapterProcessing.status,'failed');assert.equal(restored.data.chapterAttempted,true);assert.match(restored.data.chapterError,/手动调整章节/);assert.deepEqual(restored.data.chapters,[]);
+  const restored=await f.waitChapters(path);assert.equal(restored.data.chapterProcessing.status,'failed');assert.equal(restored.data.chapterAttempted,true);assert.ok(parseFailure(restored.data.chapterError),restored.data.chapterError);assert.deepEqual(restored.data.chapters,[]);
   const saved=await f.request(path+'/confirm','POST',confirmation);assert.equal(saved.status,201);assert.equal(saved.data.documents.length,1);
   const task=(await f.request(`/api/tasks/${stage.data.id}`)).data;
   assert.equal(task.archived,true);assert.equal(task.status,'completed');assert.equal(task.error,null);
@@ -171,7 +172,7 @@ for(const phase of ['extraction','proposal'])test(`failed chapter ${phase} stays
   assert.equal(extraction.progress.completed,phase==='extraction'?0:1);
   const chapters=task.steps.find(step=>step.step==='chapters');
   assert.equal(chapters.status,'completed');assert.equal(chapters.error,null);
-  assert.match(chapters.message,/章节已手动确认/);assert.match(chapters.message,/手动调整章节/);
+  assert.match(chapters.message,/章节已手动确认/);assert.ok(chapters.message.includes(restored.data.chapterError),chapters.message);
 });
 
 test('rejects mixed uploads and type mismatch before creating articles or starting AI',async(t)=>{

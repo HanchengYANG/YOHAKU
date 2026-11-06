@@ -160,13 +160,16 @@ PDF 分批处理时，尚有后续来源的自动分句末尾先保留，下一�
 ```bash
 npm run check             # Node 测试与前端构建
 npm run test:browser      # 阅读与校对浏览器回归
+npm run test:browser:sources  # 统一来源浏览器回归（接口替身，静态 dist）
+npm run test:browser:tasks    # 统一任务浏览器回归（接口替身，静态 dist）
 npm run test:browser:ai   # 账号、图片、书籍、划词问答与多图文章浏览器回归
+npm run test:all          # 全套回归：Node 测试 + 上面四组浏览器测试
 npm run verify:stage3 -- --image=/绝对路径/测试原图.png  # 可选真实识图、分句和联网验证
 npm run verify:image-tasks -- --image=/绝对路径/测试原图.png  # 可选真实任务、跨会话及重启恢复验证
 npm run verify:api-base   # 配置 API key 后验证真实流式、分句、识图和注音；默认使用合成日语图片
 ```
 
-浏览器测试默认使用 `/usr/bin/google-chrome`，可通过 `CHROME_PATH=/path/to/chrome` 指定路径。测试数据分别写入 `artifacts/e2e-data/` 和 `artifacts/ai-e2e-data/`。AI 浏览器回归使用明确的模型与 OAuth 替身，真实模型质量需另行实测。 `npm run test:browser:ai` 先运行桌面项目，再为手机项目重新启动独立测试服务和数据库，避免两种设备的正常登录累计触发共享 IP 登录限流；生产权限与限流保持不变。结果分别写入 `artifacts/ai-browser-desktop/` 和 `artifacts/ai-browser-phone/`。
+浏览器测试默认使用 `/usr/bin/google-chrome`，可通过 `CHROME_PATH=/path/to/chrome` 指定路径。测试数据分别写入 `artifacts/e2e-data/` 和 `artifacts/ai-e2e-data/`。AI 浏览器回归使用明确的模型与 OAuth 替身，真实模型质量需另行实测。 两个浏览器测试服务器（`tests/browser/server.mjs`、`tests/browser/ai-server.mjs`）以 `accountRateLimit: false` 启动，关闭登录限速，因为每个用例都会从 127.0.0.1 登录；生产环境的限速不变。
 
 | 目录 | 用途 |
 | --- | --- |

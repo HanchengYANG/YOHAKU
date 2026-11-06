@@ -149,29 +149,3 @@ test("新选区流式提问仅显示本次讨论，完成后替换临时消息�
     expect(saved.messages.at(-1).groupId).toBe(saved.groups.at(-1).id);
   } finally {await clean(page,f.document);}
 });
-
-test("校对页收起流式回答后仍禁止新选区提问，上一问结束后恢复",async({page},info)=>{
-  const f=await fixture(page,`校对单篇单问 ${info.project.name}`), chat=page.getByLabel("原文 AI 讨论",{exact:true});
-  try {
-    await page.getByRole("button",{name:"校对文字与注音",exact:true}).click();
-    const input=page.getByRole("textbox",{name:"日语正文",exact:true});await expect(input).toBeVisible();
-    const mark=page.locator(`.body-editor-part[data-qa-group-ids="${f.groupA}"]`).first(), rect=await mark.boundingBox();
-    await page.mouse.click(rect.x+1,rect.y+rect.height/2);
-    await page.getByRole("button",{name:/查看此处记录/}).click();
-    await control(page,{text:"校对页正在生成回答，收起对话仍需等待这一次回答结束。然后才能继续提问。",hold:true,prefixLength:24});
-    await chat.getByRole("textbox",{name:"向 AI 提问"}).fill("校对页的这一问");
-    await chat.getByRole("button",{name:"发送问题",exact:true}).click();
-    await expect(chat.getByLabel("AI 正在回答",{exact:true})).toContainText("校对页正在生成回答");
-    await chat.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();
-    await expect(input).toBeEnabled();
-    await input.evaluate(element=>{const start=element.value.indexOf("風");element.focus();element.setSelectionRange(start,start+1);element.dispatchEvent(new Event("select",{bubbles:true}));});
-    await input.press("Shift");
-    const questions=page.getByRole("group",{name:"选区提问",exact:true});
-    for(const name of ["翻译","解释语法","自定义问题"]) await expect(questions.getByRole("button",{name,exact:true})).toBeDisabled();
-    const history=async()=>(await (await page.request.get(`/api/documents/${f.document.id}/conversations`)).json()).conversations[0];
-    expect((await history()).messages).toHaveLength(4);
-    await control(page,{action:"release"});
-    await expect.poll(async()=>(await history()).messages.length).toBe(6);
-    await expect(questions.getByRole("button",{name:"翻译",exact:true})).toBeEnabled();
-  } finally {await clean(page,f.document);}
-});

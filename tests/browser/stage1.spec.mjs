@@ -29,7 +29,7 @@ async function selectWord(page, from, to) {
     .press("Shift");
 }
 
-test("导入、选区注音、校对、保存重开、导出及手机布局", async ({
+test("导入、选区注音、校对、保存重开、导出及手机布局", { tag: "@phone" }, async ({
   page,
 }, info) => {
   const errors = [];

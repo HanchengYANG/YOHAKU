@@ -108,7 +108,7 @@ test("an unknown book directory reports failure only after its request fails",as
   }finally{gates.releaseKnown();gates.releaseUnknown();}
 });
 
-test("unified task entry stays visible with zero active tasks and filters task types",async({page},info)=>{
+test("unified task entry stays visible with zero active tasks and filters task types", { tag: "@phone" },async({page},info)=>{
   const state=await fixture(page);await page.goto("/#tasks");
   await expect(page.getByRole("heading",{name:"任务与导入草稿",exact:true})).toBeVisible();
   await openShelf(page);

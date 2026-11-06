@@ -21,7 +21,11 @@ export default defineConfig({
   projects: [
     { name: "desktop", use: { viewport: { width: 1440, height: 1000 } } },
     {
+      // Phones are for photo import and quick reading. Only tests tagged
+      // { tag: "@phone" } have phone-specific layout or touch behavior; the
+      // rest exercise the same code paths as desktop and run there only.
       name: "phone",
+      grep: /@phone/,
       use: {
         viewport: { width: 390, height: 844 },
         isMobile: true,

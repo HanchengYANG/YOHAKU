@@ -4,7 +4,7 @@ import { bodyRanges, bodyText } from "../../shared/article-html.mjs";
 import { ensureOwnerSession } from "./session.mjs";
 import { selectArticleText } from "./article-selection.mjs";
 
-test("同句跨来源和注音整体悬停，高亮完整包注音，重复词位置与正文滚动保持正确", async ({page}, info) => {
+test("同句跨来源和注音整体悬停，高亮完整包注音，重复词位置与正文滚动保持正确", { tag: "@phone" }, async ({page}, info) => {
   await ensureOwnerSession(page.request);
   expect((await page.request.post("/api/ai/login",{data:{}})).ok()).toBe(true);
   expect((await page.request.get("/auth/callback?state=ui-test-state&code=ui-test-code")).ok()).toBe(true);

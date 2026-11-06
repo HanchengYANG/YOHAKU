@@ -285,6 +285,8 @@ const { app, close } = createApp({
         fetch(`http://127.0.0.1:4319/__test/api-base${new URL(url).pathname}`, init) },
     }),
   imageTaskOptions: { runnerOptions: { pollIntervalMs: 20, retryDelayMs: 20, blockedRetryMs: 100 } },
+  // Every test case logs in from 127.0.0.1; the production limit (30 per 15 min) would 429 the suite.
+  accountRateLimit: false,
 });
 const harness=express();
 harness.get("/__test/api-base/v1/models", (_req, res) => res.json({ data: [

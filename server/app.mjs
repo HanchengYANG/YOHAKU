@@ -190,6 +190,7 @@ export function createApp({
   ndlOcr,
   localRuby,
   imageTaskOptions = {},
+  accountRateLimit = true,
 } = {}) {
   const sites = [publicOrigin, ...publicOrigins.split(",")]
     .filter((value) => value?.trim())
@@ -293,6 +294,7 @@ export function createApp({
   const accounts = attachAccountRoutes({
     app,
     database,
+    rateLimit: accountRateLimit,
     onFirstUser: (id) => {
       database
         .prepare("UPDATE documents SET owner_id=? WHERE owner_id IS NULL")

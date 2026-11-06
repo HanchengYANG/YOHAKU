@@ -51,7 +51,8 @@ const localRuby = {
   annotate: async () => ({ annotations: [], engine: "BASE-LOCAL-RUBY-TEST-DOUBLE", elapsedMs: 0 }),
   close() {},
 };
-const { app, close, shutdown } = createApp({ dataDir: fileURLToPath(dataDir), aiServices: { auth, runtime }, localRuby });
+// Every test case logs in from 127.0.0.1; the production limit (30 per 15 min) would 429 a growing suite.
+const { app, close, shutdown } = createApp({ dataDir: fileURLToPath(dataDir), aiServices: { auth, runtime }, localRuby, accountRateLimit: false });
 const server = app.listen(port, "127.0.0.1", () => console.log(`基础浏览器测试：http://127.0.0.1:${port}（分句为明确测试替身）`));
 server.on("error", (error) => { console.error(error.message); close(); process.exitCode = 1; });
 let stopping = false;

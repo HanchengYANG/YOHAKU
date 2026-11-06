@@ -25,6 +25,7 @@ async function fixture(t, options = {}) {
       app,
       database,
       onFirstUser: (id) => options.onFirstUser?.(id, database),
+      rateLimit: options.rateLimit,
     });
     app.get("/api/protected", requireUser, (req, res) =>
       res.json({ user: req.user }),
@@ -465,4 +466,29 @@ test("用户名和密码边界校验，连续错误登录会限速", async (t) =
   });
   assert.equal(limited.status, 429);
   assert.match(limited.data.error, /15 分钟/);
+});
+
+test("测试服务器可关闭登录限速：错误与成功登录都不会变成429", async (t) => {
+  const f = await fixture(t, { rateLimit: false });
+  assert.equal((await f.setup()).status, 201);
+  for (let i = 0; i < 9; i++)
+    assert.equal(
+      (
+        await f.request("/api/session/login", {
+          method: "POST",
+          body: { username: "ReaderAdmin", password: "incorrect-password" },
+        })
+      ).status,
+      401,
+    );
+  for (let i = 0; i < 31; i++)
+    assert.equal(
+      (
+        await f.request("/api/session/login", {
+          method: "POST",
+          body: { username: "ReaderAdmin", password },
+        })
+      ).status,
+      200,
+    );
 });

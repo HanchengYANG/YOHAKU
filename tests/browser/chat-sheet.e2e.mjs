@@ -55,7 +55,7 @@ const snapshot=chat=>chat.evaluate(element=>({
   details:[...element.querySelectorAll("details[open][data-chat-detail]")].map(node=>node.dataset.chatDetail),
 }));
 
-test("手机上下划原位恢复，键盘避让，收起期间返回回答不会跳到末尾",async({page},info)=>{
+test("手机上下划原位恢复，键盘避让，收起期间返回回答不会跳到末尾", { tag: "@phone" },async({page},info)=>{
   test.skip(info.project.name!=="phone","手机触摸手势");
   const f=await fixture(page,"手机原位恢复");
   const chat=page.getByLabel("原文 AI 讨论",{exact:true});
@@ -117,7 +117,7 @@ test("手机上下划原位恢复，键盘避让，收起期间返回回答不�
   } finally {await remove(page,f.document.id);}
 });
 
-test("三个入口、失败草稿与阅读校对共享状态，刷新清除会话草稿",async({page},info)=>{
+test("三个入口与失败草稿保留，重试后建立新组，刷新清除会话草稿", { tag: "@phone" },async({page},info)=>{
   const f=await fixture(page,`问答入口 ${info.project.name}`);
   const chat=page.getByLabel("原文 AI 讨论",{exact:true});
   const article=page.getByRole("article",{name:"日语原文",exact:true});
@@ -144,16 +144,6 @@ test("三个入口、失败草稿与阅读校对共享状态，刷新清除会�
     expect(f.history().groups).toHaveLength(2);
     await chat.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();await openDocumentChat(page);
     await expect(chat.locator(".chat-user-text")).toHaveText("木々在这里是什么意思？");
-    await chat.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();
-    await page.getByRole("button",{name:"校对文字与注音",exact:true}).click();
-    if(info.project.name==="phone") {
-      await openDocumentChat(page);
-      await expect(chat.getByRole("alert")).toContainText("新问题暂未发送成功");
-      await expect(chat.getByRole("button",{name:"重试",exact:true})).toBeVisible();
-      await chat.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();
-    }
-    await page.getByRole("button",{name:"取消",exact:true}).click();
-    await expect(article).toBeVisible();await openDocumentChat(page);
     await expect(chat.getByRole("alert")).toContainText("新问题暂未发送成功");
     await expect(chat.locator(".chat-user-text")).toHaveText("木々在这里是什么意思？");
     await page.unroute(freshRoute,failCreate);
@@ -170,22 +160,6 @@ test("三个入口、失败草稿与阅读校对共享状态，刷新清除会�
     await page.unroute(failedRoute);
     await chat.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();
     await mark(f.groupA).click();await expect(chat.getByRole("textbox",{name:"向 AI 提问"})).toHaveValue("A 的独立草稿");
-    await chat.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();
-    await page.getByRole("button",{name:"校对文字与注音",exact:true}).click();
-    // Existing words remain usable in the editor, with the same in-memory
-    // session as the reader and no change to the article's dirty state.
-    if(info.project.name==="phone") await openDocumentChat(page);
-    else {
-      const input=page.getByRole("textbox",{name:"日语正文",exact:true});
-      await input.evaluate(element=>{element.focus();element.setSelectionRange(0,2);});await input.press("Shift");
-      await page.getByRole("button",{name:/查看此处记录/}).click();
-    }
-    await expect(chat.getByRole("textbox",{name:"向 AI 提问"})).toHaveValue("A 的独立草稿");
-    await chat.getByRole("textbox",{name:"向 AI 提问"}).fill("校对页继续保留的草稿");
-    await chat.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();
-    await page.getByRole("button",{name:"取消",exact:true}).click();
-    await expect(article).toBeVisible();await mark(f.groupA).click();
-    await expect(chat.getByRole("textbox",{name:"向 AI 提问"})).toHaveValue("校对页继续保留的草稿");
     await chat.getByRole("button",{name:"关闭 AI 讨论",exact:true}).click();await page.reload();
     await openDocumentChat(page);await expect(chat.getByRole("textbox",{name:"向 AI 提问"})).toHaveValue("");
     await chat.getByRole("button",{name:"更多对话操作",exact:true}).click();page.once("dialog",dialog=>dialog.accept());

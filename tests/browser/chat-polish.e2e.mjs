@@ -27,7 +27,7 @@ const longValue = "${"long-code-".repeat(28)}";
 
 <img src="https://example.invalid/tracker" onerror="window.chatMarkdownExecuted=true">`;
 
-test("关联历史保留A/B/A顺序，筛选与追问独立，旧新Markdown安全且只滚动消息区", async ({ page }, info) => {
+test("关联历史保留A/B/A顺序，筛选与追问独立，旧新Markdown安全且只滚动消息区", { tag: "@phone" }, async ({ page }, info) => {
   await ensureOwnerSession(page.request);
   expect((await page.request.post("/api/ai/login", { data: {} })).ok()).toBe(true);
   expect((await page.request.get("/auth/callback?state=ui-test-state&code=ui-test-code")).ok()).toBe(true);

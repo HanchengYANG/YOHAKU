@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { ensureOwnerSession } from "./session.mjs";
 
-test("阅读区回收空白，桌面书架可收起并记忆，手机抽屉独立", async ({ page }, info) => {
+test("阅读区回收空白，桌面书架可收起并记忆，手机抽屉独立", { tag: "@phone" }, async ({ page }, info) => {
   await ensureOwnerSession(page.request);
   const response = await page.request.post("/api/documents", { data: {
     title: `阅读布局 ${info.project.name}`, kind: "article", orientation: "horizontal",

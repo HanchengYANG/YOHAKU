@@ -101,7 +101,9 @@ function sessionCookie(req, res, token) {
   res.append("Set-Cookie", attributes.join("; "));
 }
 
-export function attachAccountRoutes({ app, database, onFirstUser = () => {} }) {
+// rateLimit: false is only for isolated browser-test servers, which log in
+// once per test case from the same loopback address.
+export function attachAccountRoutes({ app, database, onFirstUser = () => {}, rateLimit = true }) {
   database.exec(`
     PRAGMA foreign_keys = ON;
     CREATE TABLE IF NOT EXISTS users (
@@ -162,6 +164,7 @@ export function attachAccountRoutes({ app, database, onFirstUser = () => {} }) {
     }
   }
   function limit(req, prefix, name = "", maximum = 8) {
+    if (!rateLimit) return null;
     const now = Date.now();
     if (attempts.size > 1000)
       for (const [key, value] of attempts)
