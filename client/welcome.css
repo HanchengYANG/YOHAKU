@@ -1,378 +1,222 @@
-.welcome.home-dashboard {
-  width: min(1120px, calc(100% - 80px));
-  margin: 32px auto 40px;
-  color: var(--ink);
-}
-
-.home-header-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 16px 28px;
-}
-
-.home-library-strip {
-  width: 100%;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  align-items: center;
-  gap: 16px 24px;
-  padding: 16px 24px;
-  border: 1px solid #e4dccd;
-  border-radius: 10px;
-  background: #faf6ec;
-}
-
-.home-stat-cell {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.home-stat-cell + .home-stat-cell {
-  padding-left: 18px;
-  border-left: 1px solid #e2dac9;
-}
-
-.home-stat-mark {
-  color: #a97855;
-  font: 500 15px "Noto Serif CJK JP", "Noto Serif CJK SC", serif;
-}
-
-.home-stat-cell strong {
-  color: var(--ink);
-  font: 600 22px/1.15 "Noto Serif CJK SC", Georgia, serif;
-  font-variant-numeric: tabular-nums;
-}
-
-.home-stat-cell strong.stat-accent {
-  color: var(--rust);
-}
-
-/* 双栏核心区：左「当前阅读」+ 右「快速导入」 */
-.home-desk-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
-  gap: 24px;
-  margin-top: 28px;
-  align-items: stretch;
-}
-
-.home-focus-card {
+/* Home (UI step 2): continue reading first, then imports that need the reader,
+   then recent reading. Phones start with the photo action. */
+.welcome.home {
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  padding: 26px 28px 22px;
-  border: 1px solid #dfd9c8;
+  gap: 26px;
+  width: min(1040px, calc(100% - 80px));
+  /* Padding, not margin: a top margin would collapse through .main-panel and
+     scroll the page by that much. */
+  margin: 0 auto;
+  padding: 40px 0;
+  color: var(--ink);
+}
+.home > .error-notice {
+  margin: 0;
+}
+.home-photo-action {
+  display: none;
+}
+
+/* The article being read, drawn as a closed book: a green spine on the left
+   and a rust ribbon marking the place. */
+.home-continue {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 22px 40px;
+  padding: 34px 40px 32px 52px;
+  overflow: hidden;
+  border: 1px solid #e1dccc;
   border-radius: 12px;
   background: var(--paper);
-  box-shadow:
-    inset 4px 0 0 var(--ink),
-    0 8px 26px rgba(32, 59, 57, 0.045);
+  box-shadow: 0 18px 40px #203b3912;
+}
+.home-continue::before,
+.home-continue::after {
+  position: absolute;
+  content: "";
+  pointer-events: none;
+}
+.home-continue::before {
+  inset: 0 auto 0 0;
+  width: 12px;
+  border-right: 3px solid #ffffff26;
+  background: var(--ink);
+}
+.home-continue::after {
+  top: 0;
+  right: 48px;
+  width: 16px;
+  height: 46px;
+  background: var(--rust);
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 78%, 0 100%);
+}
+.home-continue-copy {
   min-width: 0;
 }
-
-.home-focus-top {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+.home-continue .eyebrow {
+  color: var(--rust-dark);
   font-size: 12px;
-  color: var(--muted);
+  letter-spacing: 0.12em;
 }
-
-.home-focus-badge {
-  display: inline-block;
-  padding: 3px 9px;
-  border-radius: 5px;
-  background: #e7ece3;
-  color: #294c41;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.home-focus-meta {
-  color: #88795f;
-  font-size: 11px;
-  letter-spacing: 0.8px;
-}
-
-.home-focus-card h2 {
-  margin: 14px 0 14px;
-  font: 500 23px/1.45 "Noto Serif CJK SC", "Noto Serif CJK JP", serif;
+.home-continue h2 {
+  margin: 10px 0 6px;
   color: var(--ink);
+  font: 500 30px/1.4 "Noto Serif CJK SC", serif;
+  letter-spacing: 0.02em;
   overflow-wrap: anywhere;
+  text-wrap: pretty;
 }
-
-.home-focus-excerpt {
-  padding: 18px 22px;
-  border: 1px solid #e8e2d4;
-  border-radius: 8px;
-  background: #faf7ef;
-  cursor: pointer;
-  transition: border-color 0.15s;
-}
-
-.home-focus-excerpt:hover {
-  border-color: #c8bfa8;
-}
-
-.home-focus-excerpt > p {
-  margin: 0;
-  font: 400 19px/2.2 "Noto Serif CJK JP", "Yu Mincho", serif;
-  color: #263830;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.home-focus-empty {
+.home-continue-book {
   margin: 0;
   color: var(--muted);
   font-size: 13px;
-  line-height: 1.8;
 }
-
-.home-focus-footer {
+.home-continue-progress {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 22px;
-  padding-top: 16px;
-  border-top: 1px solid #eae4d6;
-  font-size: 12px;
+  gap: 14px;
+  margin-top: 20px;
   color: var(--muted);
-}
-
-.home-focus-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-}
-
-.home-import-dock {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  padding: 22px;
-  border: 1px solid #ded8ca;
-  border-radius: 12px;
-  background: #efece1;
-  min-width: 0;
-}
-
-.home-dock-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 12px;
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
-
-.home-dock-header strong {
-  color: var(--ink);
-  font-weight: 600;
-  letter-spacing: 0.5px;
+.home-progress-track {
+  display: block;
+  flex: 1;
+  max-width: 320px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8e2d4;
 }
-
-.home-dock-header span {
-  color: var(--rust);
-  font-size: 11px;
-  font-weight: 500;
-}
-
-.home-dropzone-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  padding: 22px 18px;
-  border: 2px dashed #b7beaa;
-  border-radius: 10px;
-  background: var(--paper);
-}
-
-.home-dropzone-icon {
-  display: grid;
-  place-items: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 50%;
-  background: #efece1;
-  color: #355844;
-  margin-bottom: 10px;
-}
-
-.home-dropzone-card > strong {
-  font: 500 16px/1.4 "Noto Serif CJK SC", serif;
-  color: var(--ink);
-}
-
-.home-dropzone-card > p {
-  margin: 6px 0 14px;
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--muted);
-  max-width: 290px;
-}
-
-.home-dropzone-card > .button.primary {
+.home-progress-track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
   background: var(--rust);
-  border-color: var(--rust);
-  color: #fff;
-  width: 100%;
-  max-width: 220px;
+}
+.home-continue > .button {
+  gap: 8px;
+  min-height: 46px;
+  padding: 10px 24px;
 }
 
-.home-dropzone-card > .button.primary:hover:not(:disabled) {
-  background: var(--rust-dark);
-  border-color: var(--rust-dark);
-}
-
-.home-dock-secondary {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  margin-top: 12px;
-}
-
-.home-dock-secondary .button {
-  width: 100%;
-  min-height: 42px;
-  padding: 9px 12px;
-  font-size: 12px;
-  background: var(--paper);
-  border-color: #d6cfbf;
-  color: var(--ink);
-}
-
-.home-dock-secondary .button:hover:not(:disabled) {
-  background: #fff;
-  border-color: #b8c3ac;
-}
-
-/* 最近阅读列表 */
-.home-recent {
-  margin-top: 32px;
-}
-
-.home-eyebrow {
-  color: #7d6857;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 2px;
-}
-
-.home-section-heading {
+.home-task-card {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 16px;
-}
-
-.home-section-heading h2 {
-  margin: 4px 0 0;
-  font: 500 21px/1.45 "Noto Serif CJK SC", serif;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 18px;
+  border: 1px solid #e7c9b7;
+  border-radius: 8px;
+  background: #fbefe6;
   color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+.home-task-card:hover {
+  border-color: var(--rust);
+}
+.home-task-link {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  color: var(--rust-dark);
+  font-size: 13px;
 }
 
+.home-section-title {
+  margin: 0 0 14px;
+  color: var(--ink);
+  font: 500 19px/1.45 "Noto Serif CJK SC", serif;
+}
 .home-recent-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
 }
-
 .home-reading-card {
   display: flex;
-  text-align: left;
-  padding: 0;
   min-width: 0;
+  padding: 0;
+  overflow: hidden;
   border: 1px solid #e1dccc;
   border-radius: 9px;
   background: #fffdf6;
-  overflow: hidden;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
   transition:
-    transform 0.18s,
+    border-color 0.18s,
     box-shadow 0.18s;
 }
-
 .home-reading-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 8px 20px #3d442314;
   border-color: #b8c3ac;
+  box-shadow: 0 8px 20px #3d442314;
 }
-
 .home-reading-spine {
   display: flex;
+  flex-shrink: 0;
   align-items: flex-start;
   justify-content: center;
-  flex-shrink: 0;
   width: 40px;
   padding-top: 18px;
+  border-right: 4px solid #ffffff15;
   background: #3a5b4b;
   color: #ece6cd;
-  border-right: 4px solid #ffffff15;
 }
-
 .home-reading-spine > span {
-  font: 400 17px "Noto Serif CJK JP", serif;
   padding-top: 5px;
   border-top: 1px solid #c1b992;
+  font: 400 17px "Noto Serif CJK JP", serif;
 }
-
 .home-reading-card-1 .home-reading-spine {
   background: #a06e50;
 }
-
 .home-reading-card-2 .home-reading-spine {
   background: #68747b;
 }
-
 .home-reading-content {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: 8px;
   min-width: 0;
   padding: 16px 15px 13px;
-  flex: 1;
 }
-
 .home-reading-content > small {
   color: #88795f;
   font-size: 11px;
 }
-
 .home-reading-content > strong {
+  display: -webkit-box;
+  overflow: hidden;
   color: #2b4036;
   font-size: 14px;
   font-weight: 500;
   line-height: 1.55;
   overflow-wrap: anywhere;
-  display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
-  overflow: hidden;
 }
-
 .home-reading-content > [lang="ja"] {
   display: block;
-  font-size: 12px;
-  color: #788072;
+  min-height: 1.5em;
   overflow: hidden;
+  color: #788072;
+  font-size: 12px;
+  line-height: 1.5;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
 .home-reading-bottom {
   display: flex;
   align-items: center;
@@ -390,127 +234,106 @@
   gap: 18px;
   padding: 22px 24px;
   border: 1px dashed #c8ccb7;
-  background: #ebeede;
   border-radius: 10px;
+  background: #ebeede;
 }
-
 .home-empty-mark {
   display: grid;
-  place-items: center;
   flex-shrink: 0;
+  place-items: center;
   width: 46px;
   height: 58px;
-  background: #3a5b4b;
   border-right: 4px solid #b5bea1;
+  border-radius: 3px;
+  background: #3a5b4b;
   color: #f7f0d6;
   font: 22px "Noto Serif CJK JP", serif;
-  border-radius: 3px;
 }
-
 .home-library-empty h3 {
   margin: 0 0 6px;
   font-size: 14px;
   font-weight: 500;
 }
-
 .home-library-empty p {
   margin: 0;
-  font-size: 12px;
   color: #68735e;
+  font-size: 12px;
   line-height: 1.75;
 }
 
 @media (max-width: 1100px) {
-  .welcome.home-dashboard {
+  .welcome.home {
     width: calc(100% - 48px);
   }
-  .home-desk-grid {
+  .home-continue {
     grid-template-columns: 1fr;
+    align-items: start;
+  }
+  /* Keep the title clear of the ribbon once the button moves below it. */
+  .home-continue-copy {
+    padding-right: 40px;
+  }
+  .home-continue > .button {
+    justify-self: start;
   }
   .home-recent-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 760px) {
-  .welcome.home-dashboard {
+  .welcome.home {
+    gap: 18px;
     width: calc(100% - 32px);
-    margin: 20px auto 28px;
+    padding: 20px 0 28px;
   }
-  .home-header-row {
-    gap: 14px;
-    padding-bottom: 18px;
+  .home > .error-notice {
+    order: -3;
   }
-  .home-dashboard .home-header-copy h1 {
-    font-size: 24px;
-    margin: 8px 0 6px;
-  }
-  .home-subtitle {
-    font-size: 12px;
-  }
-  .home-library-strip {
-    width: 100%;
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 6px;
-    padding: 10px 8px;
-    text-align: center;
-  }
-  .home-stat-cell {
-    flex-direction: column;
+  .home-photo-action {
+    display: flex;
+    order: -2;
     align-items: center;
-    gap: 2px;
-    font-size: 11px;
-  }
-  .home-stat-cell + .home-stat-cell {
-    padding-left: 6px;
-  }
-  .home-stat-mark {
-    display: none;
-  }
-  .home-stat-cell strong {
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 64px;
+    border: 0;
+    border-radius: 12px;
+    background: var(--ink);
+    color: #fbf4e6;
+    font: inherit;
     font-size: 18px;
+    font-weight: 500;
+    letter-spacing: 1px;
+    box-shadow: 0 10px 24px #203b3929;
+    cursor: pointer;
   }
-  .home-desk-grid {
-    gap: 16px;
-    margin-top: 18px;
+  .home-photo-action > span {
+    font-size: 22px;
   }
-  .home-focus-card {
-    padding: 18px 16px 16px;
+  .home-task-card {
+    order: -1;
   }
-  .home-focus-card h2 {
-    font-size: 19px;
-    margin: 10px 0;
+  .home-continue {
+    padding: 24px 20px 20px 34px;
   }
-  .home-focus-excerpt {
-    padding: 14px 15px;
+  .home-continue::after {
+    right: 22px;
+    height: 38px;
   }
-  .home-focus-excerpt > p {
-    font-size: 16px;
+  .home-continue-copy {
+    padding-right: 28px;
   }
-  .home-focus-excerpt .japanese-text {
-    font-size: 20px !important;
+  .home-continue h2 {
+    font-size: 22px;
   }
-  .home-import-dock {
-    padding: 16px;
-  }
-  .home-dropzone-card {
-    padding: 16px 14px;
-  }
-  .home-dock-secondary {
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
-  }
-  .home-dock-secondary .button {
-    padding: 8px 10px;
-    font-size: 12px;
-  }
-  .home-recent {
-    margin-top: 22px;
+  .home-recent-grid {
+    grid-template-columns: 1fr;
   }
   .home-library-empty {
-    padding: 16px;
     gap: 12px;
+    padding: 16px;
   }
 }
 
@@ -518,15 +341,4 @@
   .home-reading-card {
     transition: none;
   }
-  .home-reading-card:hover {
-    transform: none;
-  }
 }
-
-.home-task-card { display:flex; align-items:center; gap:16px; width:100%; margin:24px 0 0; padding:20px; border:1px solid var(--line); border-radius:8px; background:var(--paper); color:var(--ink); text-align:left; cursor:pointer; font:inherit; }
-.home-task-card > span { flex:1; min-width:0; }
-.home-task-card strong { display:block; font-size:16px; font-weight:500; }
-.home-task-card small { display:block; margin-top:7px; color:var(--muted); font-size:12px; line-height:1.7; }
-.home-task-card .count { display:inline-block; margin-left:5px; font-size:12px; }
-.home-task-card:hover { border-color:var(--ink); }
-@media(max-width:760px) { .home-task-card { padding:16px; gap:12px; } .home-task-card strong { font-size:14px; } }

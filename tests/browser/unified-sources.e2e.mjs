@@ -289,7 +289,7 @@ test("prepared source pages refresh authoritative shelf totals once per content 
   await expect(shelfItem).toContainText("351 字");
   await expect(page.locator(".document-meta")).toContainText("271 字");
   await page.locator(".brand").click();
-  await expect(page.getByRole("region",{name:"我的阅读资料",exact:true})).toContainText("351");
+  await expect(page.getByRole("region",{name:"最近阅读",exact:true})).toContainText("351 字");
   await expect(page.getByRole("button",{name:"继续阅读：分页阅读资料",exact:true})).toContainText("351 字");
 });
 

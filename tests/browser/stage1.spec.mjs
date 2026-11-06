@@ -369,7 +369,7 @@ test("假名锚点只让汉字显示注音，前后缀与多汉字整词保存�
   await deleteDocument(page, initial.id);
 });
 
-test("首页书案概览、当前阅读与最近阅读使用已保存书籍和材料并能正确打开", async ({ page }, info) => {
+test("首页继续阅读与最近阅读使用已保存书籍和材料并能正确打开", async ({ page }, info) => {
   const suffix = info.project.name;
   let documentId;
   let bookId;
@@ -393,7 +393,13 @@ test("首页书案概览、当前阅读与最近阅读使用已保存书籍和�
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto("/");
     await expect(page.getByRole("region", { name: "阅读首页", exact: true })).toBeVisible();
-    await expect(page.getByRole("region", { name: "我的阅读资料", exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "继续阅读", exact: true })).toBeVisible();
+    const photo = page.getByRole("button", { name: "拍照添加", exact: true });
+    if (suffix === "phone") {
+      await photo.click();
+      await expect(page.getByRole("tab", { name: "上传或粘贴文件", exact: true })).toHaveAttribute("aria-selected", "true");
+      await page.goto("/");
+    } else await expect(photo).toBeHidden();
     const recent = page.getByRole("region", { name: "最近阅读", exact: true });
     await expect(recent).toBeVisible();
     await expect(recent.getByRole("button", { name: `打开书籍：${book.title}`, exact: true })).toBeVisible();
@@ -409,12 +415,18 @@ test("首页书案概览、当前阅读与最近阅读使用已保存书籍和�
     expect(await page.evaluate(() => location.hash)).toBe(`#book/${bookId}`);
     await expect(page.getByLabel("书籍文章列表", { exact: true }).getByRole("listitem")).toHaveCount(1);
     await page.goto("/");
+    const opened = page.waitForResponse((response) => response.request().method() === "PUT"
+      && response.url().endsWith(`/api/documents/${documentId}/reading-position`));
     await recent.getByRole("button", { name: `继续阅读：${document.title}`, exact: true }).click();
     await expect(page.getByRole("heading", { name: document.title, exact: true })).toBeVisible();
+    expect((await opened).ok()).toBe(true);
     expect(await page.evaluate(() => location.hash)).toBe(`#${documentId}`);
     await expect(page.getByRole("article", { name: "日语原文", exact: true }).locator("rt")).toHaveText(["ほん", "よ"]);
     await expect(page.getByRole("navigation", { name: "文章导航", exact: true })).toHaveCount(0);
     await page.goto("/");
+    const continuing = page.getByRole("region", { name: "继续阅读", exact: true });
+    await expect(continuing.getByRole("heading", { name: document.title, exact: true })).toBeVisible();
+    await expect(continuing.getByRole("button", { name: "继续阅读", exact: true })).toBeVisible();
     if (await page.getByRole("button", { name: "打开书架", exact: true }).isVisible()) {
       await page.getByRole("button", { name: "打开书架", exact: true }).click();
     }

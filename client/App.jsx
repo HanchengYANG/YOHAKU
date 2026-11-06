@@ -143,7 +143,6 @@ function Workspace({ user, onLoggedOut }) {
   const [saveFailure, setSaveFailure] = useState(null);
   const [notice, setNotice] = useState("");
   const [taskCounts, setTaskCounts] = useState({});
-  const [activeTaskCount, setActiveTaskCount] = useState(0);
   const [importDraftId,setImportDraftId]=useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
@@ -183,6 +182,8 @@ function Workspace({ user, onLoggedOut }) {
   const focusSidebarToggle = useRef(false);
   const currentReadingDocument = document?.id === activeId ? document : null;
   const readingReady = !!currentReadingDocument && (currentReadingDocument.sourceWorkflow || hasCompleteSentenceBoundaries(currentReadingDocument.bodyHtml || blocksToHtml(currentReadingDocument.blocks)));
+  // Welcome shows shelf load failures itself; the banner would repeat them there.
+  const homeVisible = !activeId && !panel && !draft;
   const rememberReadingPosition = () => {
     if (!window.matchMedia("(min-width: 761px)").matches) return;
     const anchor = Array.from(readerMain.current?.querySelectorAll(".article-body [data-sentence-id]") || [])
@@ -226,7 +227,7 @@ function Workspace({ user, onLoggedOut }) {
       controller?.abort(); controller = new AbortController();
       try {
         const result = await api("/tasks?scope=active&limit=1", { signal:controller.signal });
-        if (!stopped && current === sequence) { setTaskCounts(result.counts || {}); setActiveTaskCount(result.counts?.active ?? result.activeCount ?? result.total ?? 0); }
+        if (!stopped && current === sequence) setTaskCounts(result.counts || {});
       } catch { /* Task views display connection errors without interrupting reading. */ }
       finally { if (!stopped && current === sequence) timer = setTimeout(poll, 5000); }
     };
@@ -273,6 +274,20 @@ function Workspace({ user, onLoggedOut }) {
       controller.abort();
     };
   }, [query, refresh]);
+  const previousActiveId = useRef(activeId);
+  useEffect(() => {
+    // Reading moves the saved page, so reload the summaries when the reader returns home.
+    if (!activeId && previousActiveId.current) setRefresh((n) => n + 1);
+    previousActiveId.current = activeId;
+  }, [activeId]);
+  useEffect(() => {
+    if (!currentReadingDocument || currentReadingDocument.sourceWorkflow || !readingReady) return;
+    // Paged articles save their page through the reading-session heartbeat;
+    // single-page articles only record that they were opened.
+    api(`/documents/${encodeURIComponent(currentReadingDocument.id)}/reading-position`, {
+      method: "PUT", body: JSON.stringify({ pageIndex: 0 }),
+    }).catch(() => { /* Progress is a convenience; reading continues without it. */ });
+  }, [currentReadingDocument?.id, currentReadingDocument?.sourceWorkflow, readingReady]);
 
   useEffect(() => {
     if (!activeId || activeId === "tasks" || activeId.startsWith("tasks/")) {
@@ -801,7 +816,7 @@ function Workspace({ user, onLoggedOut }) {
           </button>
           <span className="topbar-brand">余白</span>
         </header>
-        {(error || shelfError) && (
+        {(error || (homeVisible ? "" : shelfError)) && (
           <div className="error-banner" role="alert">
             <span>{error || shelfError}</span>
             <button
@@ -995,14 +1010,16 @@ function Workspace({ user, onLoggedOut }) {
           </div>
         </>) : (
           <Welcome
-            onOpenBook={openBook}
-            onOpenDocument={openDocument}
             books={books}
             documents={libraryDocuments}
+            articles={articleTargets}
             loading={loading}
-            activeTaskCount={activeTaskCount}
-            taskCounts={taskCounts}
+            error={shelfError}
+            attentionCount={taskCounts.attention ?? 0}
+            onOpenBook={openBook}
+            onOpenDocument={openDocument}
             onOpenTasks={() => openDocument("tasks")}
+            onAddPhoto={() => openUnifiedImport()}
           />
         )}
       </main>
