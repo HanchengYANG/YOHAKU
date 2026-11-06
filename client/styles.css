@@ -351,27 +351,6 @@ textarea::placeholder {
   flex-direction: column;
   gap: 0;
 }
-.sidebar-admin-row {
-  border-top: 1px solid #dedfd4;
-  padding: 11px 4px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.sidebar-settings-button {
-  font-size: 11px;
-  padding: 3px 0;
-}
-.ai-dot {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #899a8d;
-}
-.ai-dot.connected {
-  background: #77b28c;
-}
 .main-panel {
   margin-left: 256px;
   min-height: 100dvh;

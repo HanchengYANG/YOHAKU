@@ -139,54 +139,6 @@
   font-size: 12px;
   padding: 25px 0;
 }
-.account-user-menu {
-  border-top: 1px solid #dce3d2;
-  margin: 0 3px;
-  padding: 16px 3px 2px;
-  min-width: 0;
-}
-.user-menu-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-}
-.user-menu-header > div {
-  min-width: 0;
-}
-.user-menu-header small {
-  display: block;
-  font-size: 9px;
-  color: #a0ac92;
-  margin-bottom: 5px;
-}
-.user-menu-header strong {
-  display: block;
-  font-size: 12px;
-  font-weight: 500;
-  color: #738863;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.user-menu-header > button {
-  font-size: 10px;
-  color: #899d79;
-  flex-shrink: 0;
-}
-.user-menu-error {
-  font-size: 10px;
-  color: #a88560;
-  line-height: 1.8;
-  margin: 10px 0 0;
-  overflow-wrap: anywhere;
-}
-.user-menu-admin {
-  margin-top: 10px;
-}
-.user-menu-admin > button {
-  font-size: 10px;
-}
 .user-menu-invitation {
   background: #f6f8ee;
   border: 1px solid #dee7d0;

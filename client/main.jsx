@@ -10,6 +10,7 @@ import "./welcome.css";
 import "./pwa.css";
 import "./article.css";
 import "./document-chat.css";
+import "./sidebar.css";
 
 createRoot(document.getElementById("root")).render(
   <>

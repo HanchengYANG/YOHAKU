@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { ensureOwnerSession } from "./session.mjs";
+import { openAccountMenu } from "./navigation.mjs";
 
 test.beforeEach(async ({ page }) => {
   await ensureOwnerSession(page.request);
@@ -438,4 +439,16 @@ test("首页书案概览、当前阅读与最近阅读使用已保存书籍和�
       }
     }
   }
+});
+
+test("账号菜单收纳管理员入口，错误记录从菜单打开", async ({ page }) => {
+  await page.goto("/");
+  await openAccountMenu(page);
+  const menu = page.getByRole("region", { name: "当前网站账号", exact: true });
+  for (const name of ["AI 设置", "角色配置", "错误记录", "邀请朋友", "退出"])
+    await expect(menu.getByRole("button", { name, exact: true })).toBeVisible();
+  await page.screenshot({ path: `artifacts/step2-account-menu-${test.info().project.name}.png`, animations: "disabled" });
+  await menu.getByRole("button", { name: "错误记录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "错误记录", exact: true })).toBeVisible();
+  await expect(menu.getByRole("button", { name: "退出", exact: true })).toHaveCount(0);
 });

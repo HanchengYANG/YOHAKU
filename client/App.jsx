@@ -896,38 +896,8 @@ function Workspace({ user, onLoggedOut }) {
           ))}
         </nav>
         <div className="sidebar-footer">
-          {user.isAdmin && (
-            <div className="sidebar-admin-row">
-              <button
-                className={`text-button sidebar-settings-button ${panel === "settings" ? "active" : ""}`}
-                type="button"
-                disabled={saving}
-                onClick={() => openPanel("settings")}
-              >
-                <span className="ai-dot" aria-hidden="true" />
-                AI 设置
-              </button>
-              <button
-                className={`text-button sidebar-settings-button ${panel === "roles" ? "active" : ""}`}
-                type="button" disabled={saving} onClick={() => openPanel("roles")}
-              >
-                <span className="ai-dot" aria-hidden="true" />
-                角色配置
-              </button>
-              <button
-                className={`text-button sidebar-settings-button ${panel === "errors" ? "active" : ""}`}
-                type="button" disabled={saving} onClick={() => openPanel("errors")}
-              >
-                <span className="ai-dot" aria-hidden="true" />
-                错误记录
-              </button>
-            </div>
-          )}
-          <UserMenu
-            user={user}
-            onBeforeLogout={mayLeave}
-            onLoggedOut={onLoggedOut}
-          />
+          <UserMenu user={user} disabled={saving} onOpenPanel={openPanel}
+            onBeforeLogout={mayLeave} onLoggedOut={onLoggedOut} />
         </div>
       </aside>
       <main className="main-panel">

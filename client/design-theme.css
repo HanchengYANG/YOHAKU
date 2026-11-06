@@ -74,8 +74,7 @@ summary:focus-visible {
   color: #fff9ef;
 }
 .sidebar .brand strong,
-.sidebar .document-link strong,
-.sidebar .user-menu-header strong {
+.sidebar .document-link strong {
   color: #fbf4e6;
 }
 .sidebar .brand-en {
@@ -176,23 +175,6 @@ summary:focus-visible {
 }
 .sidebar .kind-dot.textbook {
   background: #9bbbc2;
-}
-.sidebar .account-user-menu,
-.sidebar .sidebar-admin-row {
-  border-color: #ffffff24;
-}
-.sidebar .user-menu-header small {
-  color: #bacdbb;
-}
-.sidebar .ai-dot {
-  background: #899a8d;
-}
-.sidebar .ai-dot.connected {
-  background: #77b28c;
-  box-shadow: 0 0 6px #77b28c80;
-}
-.sidebar .user-menu-error {
-  color: #efb595;
 }
 .sidebar .user-menu-invitation {
   background: var(--green-dark);

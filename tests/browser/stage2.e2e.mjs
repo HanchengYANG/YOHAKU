@@ -9,6 +9,7 @@ import sharp from "sharp";
 import { ensureOwnerSession, testOwner } from "./session.mjs";
 import { discardFixtureTasks } from "./image-task-fixture.mjs";
 import { selectArticleText, selectionFor } from "./article-selection.mjs";
+import { openAccountMenu } from "./navigation.mjs";
 import { bodyText, hasCompleteSentenceBoundaries } from "../../shared/article-html.mjs";
 
 const accountFlowTitle = "网站账号登录、退出与邀请码注册使用真实会话和资料隔离";
@@ -163,13 +164,7 @@ async function openSettings(page) {
       .isVisible()
   )
     return;
-  if (
-    await page
-      .getByRole("button", { name: "打开书架", exact: true })
-      .isVisible()
-  ) {
-    await page.getByRole("button", { name: "打开书架", exact: true }).click();
-  }
+  await openAccountMenu(page);
   await page.getByRole("button", { name: "AI 设置", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "AI 设置", exact: true }),
@@ -1591,9 +1586,8 @@ test(accountFlowTitle, async ({ page, playwright, baseURL }, info) => {
     await expect(
       menu.getByText(testOwner.username, { exact: true }),
     ).toBeVisible();
-    await menu
-      .getByRole("button", { name: "生成朋友的邀请码", exact: true })
-      .click();
+    await openAccountMenu(page);
+    await menu.getByRole("button", { name: "邀请朋友", exact: true }).click();
     const invitation = menu.getByRole("textbox", {
       name: "新生成的邀请码",
       exact: true,
@@ -1636,9 +1630,8 @@ test(accountFlowTitle, async ({ page, playwright, baseURL }, info) => {
       await page.getByRole("button", { name: "打开书架", exact: true }).click();
     }
     await expect(menu.getByText(username, { exact: true })).toBeVisible();
-    await expect(
-      menu.getByRole("button", { name: "生成朋友的邀请码", exact: true }),
-    ).toHaveCount(0);
+    await openAccountMenu(page);
+    await expect(menu.getByRole("button", { name: "邀请朋友", exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "AI 设置", exact: true })).toHaveCount(0);
     expect((await page.request.post("/api/ai/login", { data: {} })).status()).toBe(403);
     const aiStatus = await page.request.get("/api/ai/status");

@@ -1,45 +1,58 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import api from "../api.mjs";
 import Icon from "./Icon.jsx";
+import ErrorNotice from "./ErrorNotice.mjs";
+import { accountMenuItems, isAdminUser } from "../account-menu.mjs";
 
-export default function UserMenu({ user, onLoggedOut, onBeforeLogout }) {
+// The account row at the bottom of the sidebar. Admin pages, invitations and
+// logout open from a menu that unfolds upward over the shelf. The panel comes
+// after the button in the DOM so Tab moves from the button into the menu.
+export default function UserMenu({ user, onLoggedOut, onBeforeLogout, onOpenPanel, disabled = false }) {
+  const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState(null);
   const [invitation, setInvitation] = useState(null);
   const [copied, setCopied] = useState(false);
   const pending = useRef(false);
   const tokenInput = useRef(null);
-  const admin = user?.role === "admin" || user?.isAdmin === true;
+  const root = useRef(null);
+  const trigger = useRef(null);
+  const admin = isAdminUser(user);
   useEffect(() => {
+    setOpen(false);
     setInvitation(null);
     setCopied(false);
-    setError("");
+    setError(null);
   }, [user?.id, user?.username]);
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event) => {
+      if (!root.current?.contains(event.target)) setOpen(false);
+    };
+    window.document.addEventListener("pointerdown", outside);
+    return () => window.document.removeEventListener("pointerdown", outside);
+  }, [open]);
 
   const perform = async (action, operation) => {
     if (pending.current) return;
     pending.current = true;
     setBusy(action);
-    setError("");
+    setError(null);
     try {
       await operation();
     } catch (cause) {
-      setError(
-        cause.network
-          ? "无法连接本机服务，请稍后重试。"
-          : cause.message,
-      );
+      setError(cause);
     } finally {
       pending.current = false;
       setBusy("");
     }
   };
-
   const logout = () =>
     perform("logout", async () => {
       if (onBeforeLogout && (await onBeforeLogout()) === false) return;
       await api("/session/logout", { method: "POST", body: "{}" });
       setInvitation(null);
+      setOpen(false);
       onLoggedOut();
     });
   const invite = () =>
@@ -52,7 +65,7 @@ export default function UserMenu({ user, onLoggedOut, onBeforeLogout }) {
     });
   const copy = async () => {
     if (!invitation || busy) return;
-    setError("");
+    setError(null);
     setCopied(false);
     if (!navigator.clipboard?.writeText) {
       tokenInput.current?.focus();
@@ -69,6 +82,12 @@ export default function UserMenu({ user, onLoggedOut, onBeforeLogout }) {
       setError("未能复制，请选中邀请码手动复制。");
     }
   };
+  const choose = (item) => {
+    if (item.id === "invite") return invite();
+    if (item.id === "logout") return logout();
+    setOpen(false);
+    onOpenPanel?.(item.panel);
+  };
   const expiryValue =
     typeof invitation?.expiresAt === "number" && invitation.expiresAt < 1e12
       ? invitation.expiresAt * 1000
@@ -77,72 +96,53 @@ export default function UserMenu({ user, onLoggedOut, onBeforeLogout }) {
 
   if (!user) return null;
   return (
-    <section className="account-user-menu" aria-label="当前网站账号">
-      <div className="user-menu-header">
-        <div>
-          <small>网站账号{admin ? " · 管理员" : ""}</small>
+    <section className="account-user-menu" aria-label="当前网站账号" ref={root}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || !open) return;
+        event.stopPropagation();
+        setOpen(false);
+        trigger.current?.focus();
+      }}>
+      <button ref={trigger} type="button" className="account-trigger"
+        aria-label={`账号菜单（${user.username}）`} aria-haspopup="true" aria-expanded={open}
+        aria-controls={open ? "account-menu" : undefined}
+        onClick={() => setOpen((value) => !value)}>
+        <span className="account-avatar" aria-hidden="true">{user.username.slice(0, 1).toUpperCase()}</span>
+        <span className="account-name">
           <strong title={user.username}>{user.username}</strong>
-        </div>
-        <button
-          className="text-button"
-          type="button"
-          onClick={logout}
-          disabled={!!busy}
-        >
-          {busy === "logout" ? "正在退出…" : "退出"}
-        </button>
-      </div>
-      {error && (
-        <p className="user-menu-error" role="alert">
-          {error}
-        </p>
-      )}
-      {admin && (
-        <div className="user-menu-admin">
-          <button
-            className="text-button"
-            type="button"
-            disabled={!!busy}
-            onClick={invite}
-          >
-            <Icon name="plus" size={13} />
-            {busy === "invite"
-              ? "正在生成…"
-              : invitation
-                ? "再生成一个邀请码"
-                : "生成朋友的邀请码"}
-          </button>
-          {invitation && (
-            <div className="user-menu-invitation">
-              <label>
-                邀请码
-                <input
-                  aria-label="新生成的邀请码"
-                  ref={tokenInput}
-                  value={invitation.token}
-                  readOnly
-                  spellCheck={false}
-                  onFocus={(e) => e.target.select()}
-                />
-              </label>
-              <div className="invite-copy-row">
-                <small>
-                  {expiry && !Number.isNaN(expiry.getTime())
-                    ? `有效至 ${expiry.toLocaleString("zh-CN", { dateStyle: "short", timeStyle: "short" })}`
-                    : "仅向你想邀请的人提供"}
-                </small>
-                <button
-                  className="text-button"
-                  type="button"
-                  disabled={!!busy}
-                  onClick={copy}
-                >
-                  {copied ? "已复制" : "复制"}
-                </button>
-              </div>
-              <p>朋友注册后，保存自己的资料，并使用网站共享的 AI。</p>
-            </div>
-          )}
+          {admin && <small>管理员</small>}
+        </span>
+        <Icon name="more" size={16} />
+      </button>
+      {open && (
+        <div className="account-menu-panel" id="account-menu">
+          {accountMenuItems(user).map((item) => (
+            <Fragment key={item.id}>
+              <button type="button" className={`account-menu-item${item.id === "logout" ? " is-logout" : ""}`}
+                disabled={!!busy || (disabled && !!item.panel)} onClick={() => choose(item)}>
+                {item.id === "invite" && busy === "invite" ? "正在生成…"
+                  : item.id === "logout" && busy === "logout" ? "正在退出…" : item.label}
+              </button>
+              {item.id === "invite" && invitation && (
+                <div className="user-menu-invitation">
+                  <label>
+                    邀请码
+                    <input aria-label="新生成的邀请码" ref={tokenInput} value={invitation.token} readOnly
+                      spellCheck={false} onFocus={(event) => event.target.select()} />
+                  </label>
+                  <div className="invite-copy-row">
+                    {expiry && !Number.isNaN(expiry.getTime()) && (
+                      <small>有效至 {expiry.toLocaleString("zh-CN", { dateStyle: "short", timeStyle: "short" })}</small>
+                    )}
+                    <button className="text-button" type="button" disabled={!!busy} onClick={copy}>
+                      {copied ? "已复制" : "复制"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </Fragment>
+          ))}
+          {error && <ErrorNotice error={error} />}
         </div>
       )}
     </section>

@@ -3,6 +3,7 @@ import { test, expect } from "@playwright/test";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { ensureOwnerSession } from "./session.mjs";
+import { openAccountMenu } from "./navigation.mjs";
 
 test("角色页紧凑配置，保存时自动测试且仅显示失败角色与能力", async ({ page }, info) => {
   await ensureOwnerSession(page.request);
@@ -28,8 +29,7 @@ test("角色页紧凑配置，保存时自动测试且仅显示失败角色与�
     if (url.pathname === "/api/ai/roles" && request.method() === "PUT") saves.push(request.postDataJSON());
   });
   const open = async (name) => {
-    const drawer = page.getByRole("button", { name: "打开书架", exact: true });
-    if (await drawer.isVisible()) await drawer.click();
+    await openAccountMenu(page);
     await page.getByRole("button", { name, exact: true }).click();
   };
   const save = page.getByRole("button", { name: "保存角色配置", exact: true });
@@ -169,8 +169,7 @@ test("角色推理设置按模型提供，保存测试使用相同参数且不�
   });
   const row = (name) => page.getByRole("region", { name: `${name}角色`, exact: true });
   const openRoles = async () => {
-    const drawer = page.getByRole("button", { name: "打开书架", exact: true });
-    if (await drawer.isVisible()) await drawer.click();
+    await openAccountMenu(page);
     await page.getByRole("button", { name: "角色配置", exact: true }).click();
   };
   const advanced = (name) => row(name).locator("details");

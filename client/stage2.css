@@ -833,7 +833,6 @@
 .ai-role-save { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; padding: 18px 0; }
 .ai-role-save p { color: #839175; font-size: 12px; line-height: 1.8; margin: 0; }
 .ai-role-settings .stage2-error .text-button { margin-left: 12px; }
-.sidebar-admin-row { flex-wrap: wrap; }
 @media (max-width: 600px) {
   .ai-role-row { grid-template-columns: minmax(0, 1fr) auto; padding: 10px 12px; gap: 6px 10px; }
   .ai-role-row h2 { margin: 0; font-size: 15px; }
