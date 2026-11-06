@@ -40,7 +40,9 @@ export function classifyError(error) {
   const kind = code || (typeof error?.diagnostic?.code === "string" ? error.diagnostic.code : null);
   // Providers mark their own errors with aiProvider; `execution` is not a signal,
   // because withRole attaches it to every error thrown inside a role, user errors included.
-  const fromAI = Boolean(error?.diagnostic) || Boolean(code?.startsWith("AI_")) || error?.aiProvider === true;
+  // The same goes for AI_UNKNOWN_ERROR: withSourceRole stamps that fallback diagnostic on any error.
+  const diagnosed = Boolean(error?.diagnostic) && error.diagnostic.code !== "AI_UNKNOWN_ERROR";
+  const fromAI = diagnosed || Boolean(code?.startsWith("AI_")) || error?.aiProvider === true;
   if (code === "AI_AUTH_REQUIRED" || (fromAI && [401, 403].includes(status)))
     return { record: true, kind: "AI_AUTH_REQUIRED", action: AI_SETTINGS_ACTION };
   if (status < 500 && (!fromAI || userFixableAICodes.has(kind)))

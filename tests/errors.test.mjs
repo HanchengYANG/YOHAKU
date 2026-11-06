@@ -38,6 +38,12 @@ test("角色内的用户错误只带执行信息时不记录", () => {
     { record: false, kind: null, action: null });
 });
 
+test("角色外层补上的兜底诊断不把用户错误当作 AI 错误", () => {
+  const fallback = { diagnostic: { code: "AI_UNKNOWN_ERROR", category: "unknown" } };
+  assert.equal(classifyError(fail(409, "方向已变化", fallback)).record, false);
+  assert.equal(classifyError(fail(502, "方向已变化", fallback)).record, true);
+});
+
 test("提供方自己抛出的 4xx 视为 AI 错误并记录", () => {
   assert.deepEqual(classifyError(fail(400, "所选模型不支持图片输入，尚未发起推理。", { aiProvider: true })),
     { record: true, kind: null, action: null });
