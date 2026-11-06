@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { respondToChat } from "../server/ai/chat-stream.mjs";
 import { createErrorLog } from "../server/errors.mjs";
 import { readEventStream } from "../shared/event-stream.mjs";
-import { failureText, isErrorCode } from "../shared/error-codes.mjs";
+import { codedText, failureText, isErrorCode } from "../shared/error-codes.mjs";
 
 test("流式对话失败只下发带代码的文案", async (t) => {
   const errorLog = createErrorLog(new DatabaseSync(":memory:"));
@@ -55,4 +55,25 @@ test("对话中用户可处理的失败经 capture 后仍以原文下发，不�
   assert.equal(error.status, 409);
   assert.equal(error.errorCode, undefined);
   assert.equal(errorLog.list().items.length, 0);
+});
+
+test("管理员在流式对话失败时看到可公开的原文指引和代码", async (t) => {
+  const errorLog = createErrorLog(new DatabaseSync(":memory:"));
+  const app = express();
+  app.locals.errorLog = errorLog;
+  app.use((req, _res, next) => { req.user = { id: "owner", isAdmin: true }; next(); });
+  app.post("/chat", (req, res) => respondToChat(req, res, async () => {
+    throw Object.assign(new Error("所选模型不支持图片输入。"), {
+      status: 502, expose: true, diagnostic: { code: "AI_INVALID_RESPONSE", category: "invalid_response" },
+    });
+  }));
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/chat`, { method: "POST", headers: { Accept: "text/event-stream" } });
+  const events = [];
+  for await (const frame of readEventStream(response.body)) events.push(JSON.parse(frame.data));
+  const error = events.find((event) => event.type === "error");
+  assert.ok(isErrorCode(error.errorCode));
+  assert.equal(error.error, codedText("所选模型不支持图片输入", error.errorCode));
 });

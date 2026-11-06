@@ -4,14 +4,14 @@ import express from "express";
 import { once } from "node:events";
 import { DatabaseSync } from "node:sqlite";
 import { createErrorLog, errorResponder, publicErrorBody } from "../server/errors.mjs";
-import { AI_SETTINGS_ACTION, failureText, isErrorCode } from "../shared/error-codes.mjs";
+import { AI_SETTINGS_ACTION, codedText, failureText, isErrorCode } from "../shared/error-codes.mjs";
 
 const fail = (status, message, extra = {}) => Object.assign(new Error(message), { status, expose: true, ...extra });
 
-async function serve(t, makeError) {
+async function serve(t, makeError, { isAdmin = false } = {}) {
   const errorLog = createErrorLog(new DatabaseSync(":memory:"));
   const app = express();
-  app.use((req, _res, next) => { req.user = { id: "u1" }; next(); });
+  app.use((req, _res, next) => { req.user = { id: "u1", isAdmin }; next(); });
   app.get("/api/boom", () => { throw makeError(errorLog); });
   app.use(errorResponder({ errorLog, log: () => {} }));
   const server = app.listen(0, "127.0.0.1");
@@ -77,6 +77,27 @@ test("用户取消的请求（没有状态的 AbortError）返回 409 与白话�
   assert.equal(status, 409);
   assert.deepEqual(body, { error: "请求已取消。" });
   assert.equal(errorLog.list().items.length, 0);
+});
+
+test("管理员看到可公开的原文指引和代码，朋友只看到通用文案", async (t) => {
+  const guidance = () => fail(502, "所选模型不支持图片输入。请换一个模型 token=abc123。", { diagnostic: { code: "AI_INVALID_RESPONSE", category: "invalid_response" } });
+  const admin = await serve(t, guidance, { isAdmin: true });
+  assert.equal(admin.status, 502);
+  assert.ok(isErrorCode(admin.body.errorCode));
+  assert.deepEqual(admin.body, { error: codedText("所选模型不支持图片输入。请换一个模型 token=[已隐藏]", admin.body.errorCode), errorCode: admin.body.errorCode });
+  assert.equal(admin.errorLog.list().items.length, 1);
+  const friend = await serve(t, guidance);
+  assert.deepEqual(friend.body, { error: failureText(friend.body.errorCode), errorCode: friend.body.errorCode });
+});
+
+test("未标记可公开的服务端错误，管理员也只看到通用文案", async (t) => {
+  const { body } = await serve(t, () => new Error("SQLITE_FULL: database or disk is full"), { isAdmin: true });
+  assert.deepEqual(body, { error: failureText(body.errorCode), errorCode: body.errorCode });
+});
+
+test("AI 授权失效对管理员仍用通用文案，以便只有文字时也能带出去 AI 设置", async (t) => {
+  const { body } = await serve(t, () => fail(503, "网站 AI 尚未连接，请联系网站拥有者完成授权。", { code: "AI_AUTH_REQUIRED" }), { isAdmin: true });
+  assert.deepEqual(body, { error: failureText(body.errorCode, AI_SETTINGS_ACTION), errorCode: body.errorCode, action: AI_SETTINGS_ACTION });
 });
 
 test("上传与请求体错误保持原有白话", async (t) => {

@@ -30,6 +30,14 @@ test("用户能自己解决的白话原样显示", () => {
   assert.deepEqual(errorNoticeModel(new Error("书名需要填写")), { message: "书名需要填写", code: null, action: null, actionLabel: null });
 });
 
+test("管理员看到原文指引和代码", () => {
+  const guidance = Object.assign(new Error("所选模型不支持图片输入 · 错误代码 7K2QD9"), { errorCode: "7K2QD9" });
+  assert.deepEqual(errorNoticeModel(guidance, { isAdmin: true }), { message: "所选模型不支持图片输入", code: "7K2QD9", action: null, actionLabel: null });
+  const html = renderToStaticMarkup(h(UserContext.Provider, { value: { isAdmin: true } }, h(ErrorNotice, { error: "所选模型不支持图片输入 · 错误代码 7K2QD9" })));
+  assert.match(html, /所选模型不支持图片输入</);
+  assert.match(html, /aria-label="复制错误代码 7K2QD9"/);
+});
+
 test("没有错误时不渲染", () => {
   assert.equal(renderToStaticMarkup(h(ErrorNotice, { error: null })), "");
 });

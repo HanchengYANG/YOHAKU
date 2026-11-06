@@ -28,7 +28,7 @@ export async function respondToChat(req, res, work) {
     await emit({type:"done",conversation:result.conversation});
   } catch (cause) {
     const { status, body } = publicErrorBody(cause, {
-      errorLog: req.app.locals.errorLog, userId: req.user?.id ?? null, scope: "chat",
+      errorLog: req.app.locals.errorLog, userId: req.user?.id ?? null, isAdmin: Boolean(req.user?.isAdmin), scope: "chat",
       location: `${req.method} ${req.originalUrl.split("?")[0]}`,
     });
     await emit({ type: "error", status, code: cause?.code, ...body });

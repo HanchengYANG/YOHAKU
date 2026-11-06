@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { AI_SETTINGS_ACTION, ERROR_CODE_ALPHABET, GENERIC_FAILURE, failureText, isErrorCode, parseFailure } from "../shared/error-codes.mjs";
+import { AI_SETTINGS_ACTION, ERROR_CODE_ALPHABET, GENERIC_FAILURE, codedText, failureText, isErrorCode, parseFailure, splitCodedText } from "../shared/error-codes.mjs";
 import { sanitizeDiagnostic } from "./ai/diagnostics.mjs";
 
 export function newErrorCode(bytes = randomBytes(6)) {
@@ -138,7 +138,8 @@ export function createErrorLog(database, {
     const size = Math.min(Math.max(Number.parseInt(limit, 10) || 50, 1), 200);
     const where = [], params = [];
     // Admins may paste the whole failure sentence instead of the bare code.
-    const code = parseFailure(String(query ?? "").trim())?.code ?? normalize(query);
+    const text = String(query ?? "").trim();
+    const code = (parseFailure(text) ?? splitCodedText(text))?.code ?? normalize(query);
     if (code) { where.push("e.code=?"); params.push(code); }
     // The cursor is "createdAt|code", because several rows can share a timestamp.
     if (before) {
@@ -169,7 +170,7 @@ const PUBLIC_CODES = new Set(["WEBSITE_AUTH_REQUIRED", "TASK_VERSION_CONFLICT", 
 const UNAVAILABLE = "服务暂时遇到问题，请稍后再试。";
 const CANCELLED = "请求已取消。";
 
-export function publicErrorBody(error, { errorLog, userId = null, scope = "http", location = null, log = console.error } = {}) {
+export function publicErrorBody(error, { errorLog, userId = null, isAdmin = false, scope = "http", location = null, log = console.error } = {}) {
   const status = Number.isInteger(error?.status) ? error.status : 500;
   const publicCode = PUBLIC_CODES.has(error?.code) ? { code: error.code } : {};
   const { record, action } = classifyError(error);
@@ -187,11 +188,16 @@ export function publicErrorBody(error, { errorLog, userId = null, scope = "http"
     }
   }
   const finalAction = error?.errorAction ?? action;
+  // Admins also get the human-written guidance of exposed errors. Errors with an
+  // action keep the generic sentence, which carries the action when only text survives.
+  const message = String(error?.message ?? "").trim();
+  const guidance = errorCode && isAdmin && error?.expose === true && !finalAction && message
+    ? codedText(redact(message).slice(0, 500), errorCode) : null;
   return {
     status,
     body: {
       ...publicCode,
-      error: errorCode ? failureText(errorCode, finalAction) : UNAVAILABLE,
+      error: guidance ?? (errorCode ? failureText(errorCode, finalAction) : UNAVAILABLE),
       ...(errorCode ? { errorCode } : {}),
       ...(errorCode && finalAction ? { action: finalAction } : {}),
     },
@@ -205,7 +211,7 @@ export function errorResponder({ errorLog, log = console.error } = {}) {
     if (error.type === "entity.too.large") return res.status(413).json({ error: "提交内容过大，请减少正文长度。" });
     if (error.type === "entity.parse.failed") return res.status(400).json({ error: "请求格式有误，请重新提交。" });
     const { status, body } = publicErrorBody(error, {
-      errorLog, log, userId: req.user?.id ?? null, scope: "http",
+      errorLog, log, userId: req.user?.id ?? null, isAdmin: Boolean(req.user?.isAdmin), scope: "http",
       location: `${req.method} ${req.originalUrl.split("?")[0]}`,
     });
     res.status(status).json(body);

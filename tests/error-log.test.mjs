@@ -86,6 +86,7 @@ test("列表倒序、可按代码过滤、可分页，并能关联网站账号",
   assert.equal(log.list({ before: page.nextBefore }).items[0].summary, "第一行");
   assert.deepEqual(log.list({ query: " bbbbbb " }).items.map((item) => item.code), ["BBBBBB"]);
   assert.deepEqual(log.list({ query: ` ${failureText("BBBBBB")} ` }).items.map((item) => item.code), ["BBBBBB"]);
+  assert.deepEqual(log.list({ query: "请先保存 API key · 错误代码 BBBBBB" }).items.map((item) => item.code), ["BBBBBB"]);
 });
 
 test("同一时刻的多条记录分页不丢失", () => {

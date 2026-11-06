@@ -8,6 +8,7 @@ export const LEGACY_FAILURE = "处理失败";
 
 const codePattern = /^[0-9A-HJKMNP-TV-Z]{6}$/;
 const failurePattern = /^(出错了，请重试|AI 暂时不可用) · 错误代码 ([0-9A-HJKMNP-TV-Z]{6})$/;
+const codedPattern = /^(\S[\s\S]*?) · 错误代码 ([0-9A-HJKMNP-TV-Z]{6})$/;
 
 export function isErrorCode(value) {
   return typeof value === "string" && codePattern.test(value);
@@ -20,4 +21,15 @@ export function failureText(code, action = null) {
 export function parseFailure(text) {
   const match = typeof text === "string" ? failurePattern.exec(text) : null;
   return match ? { code: match[2], action: match[1] === AI_UNAVAILABLE ? AI_SETTINGS_ACTION : null } : null;
+}
+
+// Admins see the original guidance in front of the code instead of the generic sentence.
+export function codedText(message, code) {
+  return `${String(message ?? "").trim().replace(/。+$/, "")} · 错误代码 ${code}`;
+}
+
+// Any text ending in " · 错误代码 XXXXXX", generic sentences included.
+export function splitCodedText(text) {
+  const match = typeof text === "string" ? codedPattern.exec(text) : null;
+  return match ? { message: match[1], code: match[2] } : null;
 }
