@@ -1757,3 +1757,30 @@ test("source-scoped editing preserves batch readings and undo",async({page})=>{
   await page.getByRole("button",{name:"保存正文",exact:true}).click();await expect.poll(()=>state.saves.length).toBe(1);
   expect(bodyText(state.saves[0].bodyHtml)).toBe(text);expect(state.saves[0].bodyHtml.match(/<ruby/g)).toHaveLength(1);
 });
+
+test("home shows the saved page of a paged article and resumes there",async({page})=>{
+  await fixture(page);
+  const firstText="最初のページ。",secondText="続きのページ。",requested=[];
+  const pages=[{id:"p0",index:0,ready:true,bodyHtml:html(firstText),sourceIds:["s1"],start:0,end:firstText.length},
+    {id:"p1",index:1,ready:true,bodyHtml:html(secondText),sourceIds:["s2"],start:firstText.length,end:firstText.length+secondText.length}];
+  await page.route(/\/api\/documents(?:\?.*)?$/,route=>route.fulfill({json:{documents:[{id:"doc",title:"分页阅读资料",kind:"article",
+    charCount:14,rubyCount:0,preview:firstText,updatedAt:"2026-11-05T00:00:00Z",
+    readingPosition:{pageIndex:1,pageCount:2,updatedAt:"2026-11-06T00:00:00Z"}}]}}));
+  // The server resumes at the saved page when the reader asks without an index.
+  await page.route("**/api/documents/doc/reading-*",route=>{
+    const request=route.request(),url=new URL(request.url());
+    if(request.method()==="POST")return route.fulfill({json:{sessionId:"test"}});
+    requested.push(url.searchParams.get("index"));
+    const index=Number(url.searchParams.get("index")??1);
+    return route.fulfill({json:{pages,currentPage:pages[index],index,position:index,complete:true,totalPages:2,hasNext:index===0}});
+  });
+  await page.goto("/");
+  const current=page.getByRole("region",{name:"继续阅读",exact:true});
+  await expect(current.getByRole("heading",{name:"分页阅读资料",exact:true})).toBeVisible();
+  await expect(current).toContainText("第 2 / 2 页");
+  await current.getByRole("button",{name:"继续阅读",exact:true}).click();
+  await expect(page).toHaveURL(/#doc$/);
+  await expect(page.getByLabel("日语原文",{exact:true})).toContainText(secondText);
+  await expect(page.getByRole("navigation",{name:"阅读分页",exact:true})).toContainText("第 2 / 2 页");
+  expect(requested[0]).toBeNull();
+});

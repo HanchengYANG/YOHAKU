@@ -991,15 +991,14 @@ function Workspace({ user, onLoggedOut }) {
         ) : activeId ? (<>
           {bookNavigation}
           <div className="loading-page">
-            {detailLoading ? (
-              "正在打开材料…"
+            {/* The fetch starts in an effect, so the first render after a
+                route change has neither loading nor failed set; treat that
+                as loading rather than flashing a failure. */}
+            {!detailFailed ? (
+              "正在打开…"
             ) : (
               <>
-                <p>
-                  {detailFailed
-                    ? "暂时无法打开这篇材料。"
-                    : "这篇材料尚未加载。"}
-                </p>
+                <p>暂时无法打开。</p>
                 <button
                   className="text-button"
                   onClick={() => {
