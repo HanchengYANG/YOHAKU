@@ -462,6 +462,11 @@ test("账号菜单收纳管理员入口，错误记录从菜单打开", async ({
   for (const name of ["AI 设置", "角色配置", "错误记录", "邀请朋友", "退出"])
     await expect(menu.getByRole("button", { name, exact: true })).toBeVisible();
   await page.screenshot({ path: `artifacts/step2-account-menu-${test.info().project.name}.png`, animations: "disabled" });
+  // Focus leaving the menu and its button closes it.
+  await page.getByRole("button", { name: /^账号菜单/ }).focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(menu.getByRole("button", { name: "退出", exact: true })).toHaveCount(0);
+  await openAccountMenu(page);
   await menu.getByRole("button", { name: "错误记录", exact: true }).click();
   await expect(page.getByRole("heading", { name: "错误记录", exact: true })).toBeVisible();
   await expect(menu.getByRole("button", { name: "退出", exact: true })).toHaveCount(0);
@@ -486,6 +491,12 @@ test("书籍页可继续阅读最近打开的文章，并从「书籍操作」�
     await page.goto(`/#${second.id}`);
     await expect(page.getByRole("article", { name: "日语原文", exact: true })).toBeVisible();
     expect((await recorded).status()).toBe(200);
+    // Back home in the app: the hero names the article and the book it belongs to.
+    await openShelf(page);
+    await page.locator(".brand").click();
+    const hero = page.getByRole("region", { name: "继续阅读", exact: true });
+    await expect(hero.getByRole("heading", { name: second.title, exact: true })).toBeVisible();
+    await expect(hero).toContainText(book.title);
 
     await page.goto(`/#book/${bookId}`);
     await expect(page.locator(".book-facts")).toHaveText(/^2 篇 · /);
@@ -505,12 +516,30 @@ test("书籍页可继续阅读最近打开的文章，并从「书籍操作」�
     // An outside press closes it too (the panel covers the middle of the facts line on phones).
     await page.locator(".book-facts").click({ position: { x: 1, y: 1 } });
     await expect(rename).toHaveCount(0);
+    // Tabbing past the last item closes it as well.
+    await actions.click();
+    await page.getByRole("button", { name: "删除书籍", exact: true }).focus();
+    await page.keyboard.press("Tab");
+    await expect(rename).toHaveCount(0);
+    await expect(page.getByRole("button", { name: `继续阅读 · ${second.title}`, exact: true })).toBeFocused();
 
+    const failure = { status: 500, contentType: "application/json",
+      body: JSON.stringify({ error: "出错了，请重试 · 错误代码 7K2QD9", errorCode: "7K2QD9" }) };
+    const failWrites = (method) => (route) => (route.request().method() === method ? route.fulfill(failure) : route.fallback());
+    const bookUrl = `**/api/books/${bookId}`;
+    await page.route(bookUrl, failWrites("PUT"));
     await actions.click();
     await rename.click();
-    await page.getByRole("textbox", { name: "书名", exact: true }).fill(`改名书籍-${suffix}`);
+    const titleInput = page.getByRole("textbox", { name: "书名", exact: true });
+    await titleInput.fill(`改名书籍-${suffix}`);
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(page.getByRole("alert")).toHaveCount(1);
+    await expect(page.getByRole("alert")).toContainText("错误代码 7K2QD9");
+    await expect(titleInput).toBeFocused();
+    await page.unroute(bookUrl);
     await page.getByRole("button", { name: "保存", exact: true }).click();
     await expect(page.getByRole("heading", { name: `改名书籍-${suffix}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("alert")).toHaveCount(0);
     await expect(page.getByRole("textbox", { name: "书名", exact: true })).toHaveCount(0);
     await expect(actions).toBeFocused();
 
@@ -526,6 +555,15 @@ test("书籍页可继续阅读最近打开的文章，并从「书籍操作」�
 
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: `artifacts/step2-book-${suffix}.png`, fullPage: true, animations: "disabled" });
+
+    await page.route(bookUrl, failWrites("DELETE"));
+    await actions.click();
+    await page.getByRole("button", { name: "删除书籍", exact: true }).click();
+    await page.getByRole("dialog", { name: "删除书籍", exact: true }).getByRole("button", { name: "删除书籍", exact: true }).click();
+    await expect(page.getByRole("alert")).toHaveCount(1);
+    await expect(page.getByRole("alert")).toContainText("错误代码 7K2QD9");
+    await expect(actions).toBeFocused();
+    await page.unroute(bookUrl);
   } finally {
     if (bookId) {
       const response = await page.request.get(`/api/books/${bookId}`);

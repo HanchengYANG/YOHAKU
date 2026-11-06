@@ -53,8 +53,8 @@ export function bookFacts(book) {
 export function bookResume(book) {
   const pages = book.pages || [];
   const opened = pages.filter(openedAt).sort((a, b) => newestFirst(openedAt(a), openedAt(b)))[0];
-  if (opened) return { page: opened, label: `继续阅读 · ${opened.title}` };
-  return pages[0] ? { page: pages[0], label: "开始阅读" } : null;
+  if (opened) return { page: opened, label: `继续阅读 · ${opened.title}`, resumed: true };
+  return pages[0] ? { page: pages[0], label: "开始阅读", resumed: false } : null;
 }
 
 // documentId -> "attention" | "working"; a task that needs the reader wins.

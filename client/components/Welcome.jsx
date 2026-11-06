@@ -28,7 +28,7 @@ export default function Welcome({
         <span aria-hidden="true">📷</span>拍照添加
       </button>
       {current ? (
-        <section className="home-continue" aria-label="继续阅读">
+        <section className="home-continue closed-book" aria-label="继续阅读">
           <div className="home-continue-copy">
             <span className="eyebrow">继续阅读</span>
             <h2>{current.document.title}</h2>

@@ -56,9 +56,9 @@ test("书籍概况与主按钮", () => {
   ] };
   assert.equal(bookFacts(book), "3 篇 · 12,345 字");
   assert.equal(bookFacts({ pages: [{ charCount: 1 }, { charCount: 2 }] }), "2 篇 · 3 字");
-  assert.deepEqual(bookResume(book), { page: book.pages[1], label: "继续阅读 · 第二篇" });
+  assert.deepEqual(bookResume(book), { page: book.pages[1], label: "继续阅读 · 第二篇", resumed: true });
   const unread = { pages: book.pages.map((page) => ({ ...page, readingPosition: null })) };
-  assert.deepEqual(bookResume(unread), { page: unread.pages[0], label: "开始阅读" });
+  assert.deepEqual(bookResume(unread), { page: unread.pages[0], label: "开始阅读", resumed: false });
   assert.equal(bookResume({ pages: [] }), null);
 });
 

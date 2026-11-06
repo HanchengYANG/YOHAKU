@@ -1,6 +1,6 @@
-/* Book page (UI step 2): a cover drawn like the home hero's closed book (green
-   spine, paper, one primary action), then the article list. The rust bookmark
-   ribbon marks the article the primary action resumes. */
+/* Book page (UI step 2): a cover drawn as a closed book like the home hero
+   (.closed-book in styles.css) with one primary action, then the article list.
+   The rust bookmark ribbon marks the article the primary action resumes. */
 .book-page.stage2-page {
   width: min(880px, calc(100% - 80px));
   /* Padding, not margin: a top margin would collapse through .main-panel and
@@ -22,25 +22,14 @@
   color: var(--ink);
 }
 
+/* The ⋯ menu reaches past the cover, so it cannot clip; the spine rounds
+   its own corners to the card's inner radius instead. */
 .book-cover {
-  position: relative;
   padding: 30px 28px 28px 52px;
-  border: 1px solid #e1dccc;
-  border-radius: 12px;
-  background: var(--paper);
-  box-shadow: 0 18px 40px #203b3912;
+  overflow: visible;
 }
-/* No overflow: hidden here (the ⋯ menu must reach past the cover), so the
-   spine rounds its own corners. */
 .book-cover::before {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 12px;
-  border-right: 3px solid #ffffff26;
   border-radius: 11px 0 0 11px;
-  background: var(--ink);
-  content: "";
-  pointer-events: none;
 }
 .book-title-row {
   display: flex;
@@ -99,14 +88,17 @@
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: var(--ink);
   font: inherit;
   font-size: 13px;
   text-align: left;
   white-space: nowrap;
   cursor: pointer;
 }
-.book-menu-panel button:hover:not(:disabled) {
+/* 删除书籍 takes its colours from .book-delete in design-theme.css. */
+.book-menu-panel button:not(.book-delete) {
+  color: var(--ink);
+}
+.book-menu-panel button:not(.book-delete):hover:not(:disabled) {
   background: #f1ede2;
 }
 .book-menu-panel button:disabled {
@@ -117,11 +109,6 @@
   margin-top: 4px;
   border-top: 1px solid #ece6d8;
   border-radius: 0 0 5px 5px;
-  color: #a15b42;
-}
-.book-menu-panel .book-delete:hover:not(:disabled) {
-  background: #f4e4d9;
-  color: #813b2b;
 }
 .book-facts {
   margin: 6px 0 0;
@@ -219,7 +206,7 @@
   justify-self: center;
   width: 24px;
   padding-top: 8px;
-  color: #8d9981;
+  color: var(--muted);
   font: 400 14px/25.5px "Noto Serif CJK SC", serif;
   font-variant-numeric: tabular-nums;
   text-align: center;
@@ -228,7 +215,7 @@
 .book-page-row.is-current .book-page-number {
   margin-top: -15px;
   padding: 23px 0 8px;
-  background: var(--rust);
+  background: var(--rust-dark);
   color: #fff8ee;
   clip-path: polygon(0 0, 100% 0, 100% 100%, 50% calc(100% - 7px), 0 100%);
 }
@@ -277,7 +264,7 @@
   color: #3f6a55;
 }
 .book-page-state.is-working {
-  color: #8a7a52;
+  color: #6f6140;
 }
 .book-page-state.is-attention {
   color: var(--rust-dark);
@@ -293,13 +280,14 @@
   padding: 6px 10px;
   font-size: 12px;
 }
+/* Background and border colour come from design-theme.css. */
 .book-empty {
   margin: 34px 0 0;
   padding: 28px 26px;
-  border: 1px dashed #d6ddcf;
+  border-width: 1px;
+  border-style: dashed;
   border-radius: 8px;
-  background: #f1f3ea;
-  color: var(--muted);
+  color: #55645a;
   font-size: 13px;
   text-align: center;
 }
@@ -487,10 +475,7 @@
     margin-bottom: 10px;
   }
   .book-cover {
-    padding: 22px 16px 20px 32px;
-  }
-  .book-cover::before {
-    width: 10px;
+    padding: 22px 16px 20px 34px;
   }
   .book-title-row {
     gap: 8px;

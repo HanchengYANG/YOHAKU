@@ -712,12 +712,11 @@ function Workspace({ user, onLoggedOut }) {
   };
 
   const openBook = (id) => openDocument(`book/${id}`);
-  const beginBookPage = (imagePage) => {
+  // Opens the add page with this book preselected.
+  const beginBookPage = () => {
     if (!book || !mayLeave()) return;
-    if (imagePage) {
-      openUnifiedImport();
-      setImportBookId(book.id);
-    } else { openUnifiedImport(true);setImportBookId(book.id); }
+    openUnifiedImport();
+    setImportBookId(book.id);
   };
   const createBook = async (title) => {
     const created = await api("/books", {
@@ -760,7 +759,7 @@ function Workspace({ user, onLoggedOut }) {
       setRefresh((n) => n + 1);
       return updated;
     } catch (cause) {
-      setError(cause.message);
+      // The book page shows the error next to the action.
       setDetailRefresh((n) => n + 1);
       throw cause;
     } finally { setBookBusy(false); }
@@ -783,14 +782,14 @@ function Workspace({ user, onLoggedOut }) {
       setRefresh((n) => n + 1);
       setNotice("书籍已删除");
     } catch (cause) {
-      setError(cause.message);
       setDetailRefresh((n) => n + 1);
+      throw cause;
     } finally { setBookBusy(false); }
   };
   const bookNavigation = book && book.pages.some((page) => page.id === activeId)
     && (!currentReadingDocument || currentReadingDocument.bookId === book.id) ? <BookNavigation
       book={book} currentPageId={activeId} onOpenBook={() => openBook(book.id)} onOpenPage={openDocument}
-      onAddImage={() => beginBookPage(true)} disabled={saving || bookBusy} /> : null;
+      onAddImage={beginBookPage} disabled={saving || bookBusy} /> : null;
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
@@ -978,11 +977,12 @@ function Workspace({ user, onLoggedOut }) {
           </div>
         ) : book && activeId.startsWith("book/") ? (
           <BookView
+            key={book.id}
             book={book}
             taskCounts={taskCounts}
             onOpenShelf={goHome}
             onOpenPage={openDocument}
-            onAddArticle={() => beginBookPage(true)}
+            onAddArticle={beginBookPage}
             onRename={(title) => updateBook({ title })}
             onReorder={(pageIds) => updateBook({ pageIds })}
             onDelete={deleteBook}

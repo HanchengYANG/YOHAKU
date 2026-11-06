@@ -112,7 +112,11 @@ export default function UserMenu({ user, onLoggedOut, onBeforeLogout, onOpenPane
 
   if (!user) return null;
   return (
-    <section className="account-user-menu" aria-label="当前网站账号" ref={root}>
+    <section className="account-user-menu" aria-label="当前网站账号" ref={root} onBlur={(event) => {
+      // Focus moving past the menu closes it. A null target means focus left
+      // the page or went nowhere (Safari on click); outside presses close it above.
+      if (open && event.relatedTarget && !root.current?.contains(event.relatedTarget)) close();
+    }}>
       <button ref={trigger} type="button" className="account-trigger"
         aria-label={`账号菜单（${user.username}）`} aria-expanded={open}
         aria-controls={open ? "account-menu" : undefined}

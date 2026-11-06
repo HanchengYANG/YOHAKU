@@ -7,6 +7,7 @@ import { articleRowState, bookFacts, bookResume, documentTaskStates } from "../l
 // Book page: a cover with the title, a ⋯ menu (rename, reorder, delete), one
 // primary action, then the article list. Each row shows a single state, and
 // the article the primary action resumes carries the bookmark ribbon.
+// App renders it with key={book.id}, so another book starts from a fresh state.
 export default function BookView({
   book,
   onOpenShelf,
@@ -25,20 +26,15 @@ export default function BookView({
   const [taskStates, setTaskStates] = useState(() => new Map());
   const menu = useRef(null);
   const menuButton = useRef(null);
+  const titleInput = useRef(null);
   const list = useRef(null);
   // Returns the element to focus once the page is no longer busy: controls are
   // disabled while a change saves, so focusing them right away would not stick.
   const focusAfter = useRef(null);
   const pages = book.pages;
   const resume = bookResume(book);
-  const resumedId = resume?.page.readingPosition?.updatedAt ? resume.page.id : null;
+  const resumedId = resume?.resumed ? resume.page.id : null;
 
-  useEffect(() => {
-    setTitle(book.title);
-    setError(null);
-    setMode(null);
-    setMenuOpen(false);
-  }, [book.id]);
   // Refetch when the polled counts change, e.g. when a preparation finishes or fails.
   useEffect(() => {
     const controller = new AbortController();
@@ -47,8 +43,8 @@ export default function BookView({
       .catch(() => { /* Without tasks the rows still show the page or length. */ });
     return () => controller.abort();
   }, [book.id, taskCounts.active, taskCounts.attention]);
-  // Same disclosure behaviour as the account menu: outside press and Escape
-  // close it, and Escape hands focus back to the ⋯ button.
+  // Same disclosure behaviour as the account menu: outside press, Escape and
+  // focus moving elsewhere close it; Escape hands focus back to the ⋯ button.
   useEffect(() => {
     if (!menuOpen) return;
     const outside = (event) => {
@@ -73,12 +69,14 @@ export default function BookView({
     target?.focus();
   });
 
-  const run = async (action) => {
+  // focusOnFailure: the control to focus once the page is usable again.
+  const run = async (action, focusOnFailure) => {
     setError(null);
     try {
       await action();
       return true;
     } catch (cause) {
+      if (focusOnFailure) focusAfter.current = focusOnFailure;
       setError(cause);
       return false;
     }
@@ -92,7 +90,7 @@ export default function BookView({
     // The confirmation dialog returns focus to the element focused when it
     // opened; the menu items disappear, so hand focus to the ⋯ button first.
     menuButton.current?.focus();
-    if (next === "delete") void run(onDelete);
+    if (next === "delete") void run(onDelete, () => menuButton.current);
     else {
       if (next === "rename") setTitle(book.title);
       setMode(next);
@@ -102,7 +100,7 @@ export default function BookView({
     event.preventDefault();
     const next = title.trim();
     if (busy || !next) return;
-    if (next === book.title || (await run(() => onRename(next)))) finish();
+    if (next === book.title || (await run(() => onRename(next), () => titleInput.current))) finish();
   };
   const movePage = (index, direction) => {
     const pageIds = pages.map((page) => page.id);
@@ -126,10 +124,14 @@ export default function BookView({
           <Icon name="back" size={14} />书架
         </button>
       </nav>
-      <div className="book-cover">
+      <div className="book-cover closed-book">
         <div className="book-title-row">
           <h1>{book.title}</h1>
-          <div className="book-menu" ref={menu}>
+          <div className="book-menu" ref={menu} onBlur={(event) => {
+            // A null target means focus left the page or went nowhere (Safari
+            // on click); outside presses are handled above.
+            if (menuOpen && event.relatedTarget && !menu.current?.contains(event.relatedTarget)) setMenuOpen(false);
+          }}>
             <button ref={menuButton} type="button" className="icon-button" aria-label="书籍操作"
               aria-expanded={menuOpen} aria-controls={menuOpen ? "book-menu" : undefined}
               disabled={busy} onClick={() => setMenuOpen((value) => !value)}>
@@ -150,7 +152,7 @@ export default function BookView({
             onKeyDown={(event) => { if (event.key === "Escape" && !busy) finish(); }}>
             <label>
               书名
-              <input value={title} onChange={(event) => setTitle(event.target.value)}
+              <input ref={titleInput} value={title} onChange={(event) => setTitle(event.target.value)}
                 maxLength={160} required autoFocus disabled={busy} />
             </label>
             <button type="submit" className="button primary" disabled={busy || !title.trim()}>保存</button>
