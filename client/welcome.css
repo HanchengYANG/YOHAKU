@@ -1,6 +1,6 @@
 /* Home (UI step 2): continue reading first, then imports that need the reader,
    then recent reading. Phones start with the photo action. */
-.welcome.home {
+.home {
   display: flex;
   flex-direction: column;
   gap: 26px;
@@ -193,7 +193,7 @@
   padding: 16px 15px 13px;
 }
 .home-reading-content > small {
-  color: #88795f;
+  color: #807259;
   font-size: 11px;
 }
 .home-reading-content > strong {
@@ -211,7 +211,7 @@
   display: block;
   min-height: 1.5em;
   overflow: hidden;
-  color: #788072;
+  color: #6e7669;
   font-size: 12px;
   line-height: 1.5;
   text-overflow: ellipsis;
@@ -256,13 +256,13 @@
 }
 .home-library-empty p {
   margin: 0;
-  color: #68735e;
+  color: #636d59;
   font-size: 12px;
   line-height: 1.75;
 }
 
 @media (max-width: 1100px) {
-  .welcome.home {
+  .home {
     width: calc(100% - 48px);
   }
   .home-continue {
@@ -282,7 +282,7 @@
 }
 
 @media (max-width: 760px) {
-  .welcome.home {
+  .home {
     gap: 18px;
     width: calc(100% - 32px);
     padding: 20px 0 28px;

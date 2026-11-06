@@ -182,8 +182,12 @@ function Workspace({ user, onLoggedOut }) {
   const focusSidebarToggle = useRef(false);
   const currentReadingDocument = document?.id === activeId ? document : null;
   const readingReady = !!currentReadingDocument && (currentReadingDocument.sourceWorkflow || hasCompleteSentenceBoundaries(currentReadingDocument.bodyHtml || blocksToHtml(currentReadingDocument.blocks)));
+  // The main view chain below falls through to Welcome exactly when this holds.
   // Welcome shows shelf load failures itself; the banner would repeat them there.
-  const homeVisible = !activeId && !panel && !draft;
+  const showsWelcome = !activeId && !draft
+    && !["newBook", "import", "image"].includes(panel)
+    && !(user.isAdmin && ["settings", "roles", "errors"].includes(panel))
+    && !(panel === "correction" && currentReadingDocument);
   const rememberReadingPosition = () => {
     if (!window.matchMedia("(min-width: 761px)").matches) return;
     const anchor = Array.from(readerMain.current?.querySelectorAll(".article-body [data-sentence-id]") || [])
@@ -816,7 +820,7 @@ function Workspace({ user, onLoggedOut }) {
           </button>
           <span className="topbar-brand">余白</span>
         </header>
-        {(error || (homeVisible ? "" : shelfError)) && (
+        {(error || (showsWelcome ? "" : shelfError)) && (
           <div className="error-banner" role="alert">
             <span>{error || shelfError}</span>
             <button
@@ -1008,7 +1012,7 @@ function Workspace({ user, onLoggedOut }) {
               </>
             )}
           </div>
-        </>) : (
+        </>) : showsWelcome && (
           <Welcome
             books={books}
             documents={libraryDocuments}

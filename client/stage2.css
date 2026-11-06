@@ -3,9 +3,6 @@
   margin: 38px auto;
 }
 
-.welcome-actions {
-  flex-wrap: wrap;
-}
 .ocr-review-overview {
   background: #f0f3e6;
   border: 1px solid #dfe7d1;

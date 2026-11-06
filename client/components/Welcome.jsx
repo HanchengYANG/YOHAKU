@@ -21,7 +21,8 @@ export default function Welcome({
   const recent = recentEntries(books, documents);
   const empty = !current && !recent.length;
   return (
-    <section className="welcome home" aria-label="阅读首页">
+    <section className="home" aria-label="阅读首页">
+      <h1 className="sr-only">首页</h1>
       {error && <ErrorNotice error={error} />}
       <button className="home-photo-action" type="button" onClick={onAddPhoto}>
         <span aria-hidden="true">📷</span>拍照添加
