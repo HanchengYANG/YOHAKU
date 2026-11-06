@@ -1,0 +1,27 @@
+✖ an excluded PDF source keeps its exact OCR and does not block the first reading page
+✖ archived PDF imports resolve the book and preserve the original file after deletion
+✖ body-like AI exclusion suggestions start unticked and stay in the confirmed text
+✖ chapter filtering preserves first local OCR and only removes confirmed lines
+✖ closing imports discards queued chapter jobs before they touch a closed database
+✖ committed book deletion aborts the same staged import proposal
+✖ committed document deletion aborts the same staged import proposal
+✖ confirmed filtering of all nonbody lines leaves a readable empty PDF source
+✖ deleting an empty book invalidates its running import proposal and preserves original bytes
+✖ deleting failed parser tasks preserves originals and explicit inspection starts a new generation
+✖ failed chapter extraction stays visible and permits manual confirmation
+✖ failed chapter proposal stays visible and permits manual confirmation
+✖ independent PDF proposals overlap and failed task deletion retains its original
+✖ initial PDF inspection failures appear as failed parse tasks and retry only failed files
+✖ interrupted local extraction retries only missing pages and duplicate requests share one job
+✖ PDF book import requires an AI proposal and preserves uncertain boundary markers after confirmation
+✖ PDF chapter extraction progress stays page-based and reports partial OCR checkpoints
+✖ PDF chapter proposals receive all locally extracted pages and reuse persisted extraction on retry
+✖ PDF extraction caches and chapter exclusions remain bound to the confirmed extraction type
+✖ PDF inspection reads metadata and a bounded sample; extraction reads only requested actual page
+✖ PDF page previews render PNG once, reuse persistent cache, and never start OCR or AI
+✖ rolled-back book deletion preserves the same staged import proposal
+✖ rolled-back document deletion preserves the same staged import proposal
+✖ saving only PDF readings through the source API preserves cross-page sentences and manual ruby
+✖ scan PDF chaptering uses its JSON-only role independently of photo OCR and older role saves
+✖ scan_pdf import progress counts parsed files and confirmation without claiming source preparation
+✖ the real Japanese EPUB book skips its image-only cover and retains every text spine and original file
