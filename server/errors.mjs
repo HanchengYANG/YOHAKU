@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { AI_SETTINGS_ACTION, ERROR_CODE_ALPHABET } from "../shared/error-codes.mjs";
+import { AI_SETTINGS_ACTION, ERROR_CODE_ALPHABET, failureText, isErrorCode } from "../shared/error-codes.mjs";
+import { sanitizeDiagnostic } from "./ai/diagnostics.mjs";
 
 export function newErrorCode(bytes = randomBytes(6)) {
   // 256 is a multiple of 32, so every character is equally likely.
@@ -26,4 +27,93 @@ export function classifyError(error) {
   if (status < 500 && (!fromAI || userFixableAICodes.has(code)))
     return { record: false, kind: code, action: null };
   return { record: true, kind: code || error?.diagnostic?.code || null, action: null };
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export function createErrorLog(database, { now = () => Date.now(), generateCode = newErrorCode, retentionMs = 90 * DAY_MS } = {}) {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS error_log (
+      code TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL,
+      user_id TEXT,
+      scope TEXT NOT NULL,
+      location TEXT,
+      kind TEXT,
+      status INTEGER,
+      message TEXT NOT NULL,
+      stack TEXT,
+      context_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS error_log_created ON error_log(created_at);
+  `);
+  const insert = database.prepare(`INSERT OR IGNORE INTO error_log
+    (code,created_at,user_id,scope,location,kind,status,message,stack,context_json) VALUES(?,?,?,?,?,?,?,?,?,?)`);
+  const hasUsers = () => Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'").get());
+  const select = (where) => hasUsers()
+    ? `SELECT e.*, u.username FROM error_log e LEFT JOIN users u ON u.id=e.user_id${where}`
+    : `SELECT e.*, NULL AS username FROM error_log e${where}`;
+  const normalize = (value) => String(value ?? "").trim().toUpperCase();
+
+  function record(error, { userId = null, scope = "http", location = null, context = {} } = {}) {
+    const { kind } = classifyError(error);
+    const details = { ...context };
+    const diagnostic = sanitizeDiagnostic(error?.diagnostic);
+    if (diagnostic) details.diagnostic = diagnostic;
+    if (error?.execution) details.execution = error.execution;
+    const message = redact(error?.message || error || "未知错误").slice(0, 4000);
+    const stack = typeof error?.stack === "string" ? redact(error.stack).slice(0, 8000) : null;
+    const status = Number.isInteger(error?.status) ? error.status : null;
+    const createdAt = new Date(now()).toISOString();
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const code = generateCode();
+      if (insert.run(code, createdAt, userId, scope, location, kind, status, message, stack, redact(JSON.stringify(details))).changes) return code;
+    }
+    throw new Error("无法生成唯一的错误代码。");
+  }
+
+  // Background failures: record once per error object and return the text
+  // that is stored in the existing error fields.
+  function capture(error, meta) {
+    const target = error && typeof error === "object" ? error : new Error(String(error));
+    if (!isErrorCode(target.errorCode)) {
+      target.errorAction = classifyError(target).action;
+      target.errorCode = record(target, meta);
+    }
+    return failureText(target.errorCode, target.errorAction);
+  }
+
+  const present = (row) => row ? {
+    code: row.code, createdAt: row.created_at, userId: row.user_id, username: row.username ?? null,
+    scope: row.scope, location: row.location, kind: row.kind, status: row.status,
+    message: row.message, stack: row.stack, context: row.context_json ? JSON.parse(row.context_json) : {},
+  } : null;
+
+  function get(code) {
+    return present(database.prepare(select(" WHERE e.code=?")).get(normalize(code)));
+  }
+
+  function list({ query = "", before = null, limit = 50 } = {}) {
+    const size = Math.min(Math.max(Number.parseInt(limit, 10) || 50, 1), 200);
+    const where = [], params = [];
+    const code = normalize(query);
+    if (code) { where.push("e.code=?"); params.push(code); }
+    if (before) { where.push("e.created_at<?"); params.push(String(before)); }
+    const rows = database.prepare(`${select(where.length ? ` WHERE ${where.join(" AND ")}` : "")} ORDER BY e.created_at DESC, e.code DESC LIMIT ?`)
+      .all(...params, size + 1);
+    return {
+      items: rows.slice(0, size).map((row) => ({
+        code: row.code, createdAt: row.created_at, username: row.username ?? null,
+        scope: row.scope, location: row.location, kind: row.kind,
+        summary: row.message.split("\n", 1)[0].slice(0, 120),
+      })),
+      nextBefore: rows.length > size ? rows[size - 1].created_at : null,
+    };
+  }
+
+  function prune() {
+    return Number(database.prepare("DELETE FROM error_log WHERE created_at<?").run(new Date(now() - retentionMs).toISOString()).changes);
+  }
+
+  return { record, capture, get, list, prune };
 }
