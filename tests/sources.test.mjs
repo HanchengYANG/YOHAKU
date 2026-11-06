@@ -6,6 +6,8 @@ import { createSourceService } from '../server/sources.mjs';
 import { createSourceProcessor } from '../server/ai/source-processing.mjs';
 import { blocksToHtml, bodyText, bodyRanges, htmlToBlocks, applySentenceBoundaries, markBodyRange, removeQaMarks } from '../shared/article-html.mjs';
 import { parseText } from '../shared/document.mjs';
+import { createErrorLog } from '../server/errors.mjs';
+import { assertLoggedFailure } from './helpers/failures.mjs';
 const html=text=>blocksToHtml(parseText(text));
 function fixture(ai={}) {
   const database=new DatabaseSync(':memory:');
@@ -13,9 +15,10 @@ function fixture(ai={}) {
   const add=(id,text='歴史。')=>database.prepare('INSERT INTO documents VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?,?,?)').run(id,'u',id,'article','horizontal',JSON.stringify(parseText(text)),text,html(text),'hash',new Date().toISOString(),new Date().toISOString(),'[]',null,null);
   add('a');add('b');
   let clock=1000;
-  const makeService=()=>createSourceService({database,ai,now:()=>clock,requireDocument:(u,id)=>{const row=database.prepare('SELECT * FROM documents WHERE id=? AND owner_id=?').get(id,u);if(!row)throw Object.assign(new Error('missing'),{status:404});return row;},fromRow:row=>({id:row.id,bodyHtml:row.body_html,blocks:JSON.parse(row.blocks_json),revision:row.revision})});
+  const errorLog=createErrorLog(database);
+  const makeService=()=>createSourceService({database,ai,errorLog,now:()=>clock,requireDocument:(u,id)=>{const row=database.prepare('SELECT * FROM documents WHERE id=? AND owner_id=?').get(id,u);if(!row)throw Object.assign(new Error('missing'),{status:404});return row;},fromRow:row=>({id:row.id,bodyHtml:row.body_html,blocks:JSON.parse(row.blocks_json),revision:row.revision})});
   let service=makeService();
-  return {database,get service(){return service;},restart:()=>{service.close();service=makeService();},advance:n=>clock+=n,close:()=>{service.close();database.close();}};
+  return {database,errorLog,get service(){return service;},restart:()=>{service.close();service=makeService();},advance:n=>clock+=n,close:()=>{service.close();database.close();}};
 }
 const ready=text=>({type:'text',text,needsCorrection:false,status:'ready',bodyHtml:applySentenceBoundaries(html(text),text.match(/[^。]*。|[^。]+$/g)||[text])});
 
@@ -163,7 +166,7 @@ test('a partially invalid local annotation batch reports the failure for its blo
     f.service.createArticleSources('u','a',[{id:'first',...ready('一。'),status:'pending'},{id:'second',...ready('二。'),status:'pending'}]);
     f.database.prepare('UPDATE article_sources SET next_step=3').run();
     f.service.heartbeat('u','a',{index:0});await f.service.drain();
-    const reading=f.service.readingPages('u','a',0);assert.equal(reading.diagnostics.current.state,'failed');assert.match(reading.diagnostics.current.step,/^annotate_local:/);assert.ok(reading.diagnostics.recentFailures.some(item=>item.source.id==='first'));assert.match(reading.error,/本地注音/);
+    const reading=f.service.readingPages('u','a',0);assert.equal(reading.diagnostics.current.state,'failed');assert.match(reading.diagnostics.current.step,/^annotate_local:/);assert.ok(reading.diagnostics.recentFailures.some(item=>item.source.id==='first'));assert.match(f.errorLog.get(assertLoggedFailure(reading.error)).message,/本地注音/);
   }finally{f.close();}
 });
 
@@ -500,6 +503,16 @@ test('failed background work pauses until explicit retry resumes stored successf
     f.service.getSource('u','a',source.id);await f.service.drain();assert.equal(calls.length,2);
     f.service.prepareSource('u','a',source.id,{retry:true});await f.service.drain();
     assert.deepEqual(calls,['extract','correct','correct']);
+  }finally{f.close();}
+});
+
+test('one failed source step writes exactly one error log row with the code shown on the source',async()=>{
+  const f=fixture({processSource:async(_u,request)=>{if(request.step==='extract')return {bodyHtml:html('原文。')};if(request.step==='correct')throw new Error('offline');return {bodyHtml:request.bodyHtml};}});try {
+    f.service.createArticleSources('u','a',[{type:'scan_pdf'}]);const source=f.service.listSources('u','a')[0];
+    f.service.heartbeat('u','a',{active:true,index:0});await f.service.drain();
+    const code=assertLoggedFailure(f.service.getSource('u','a',source.id).error);
+    const rows=f.database.prepare('SELECT code,scope,location,message FROM error_log').all().map(row=>({...row}));
+    assert.deepEqual(rows,[{code,scope:'source',location:'source:correct',message:'offline'}]);
   }finally{f.close();}
 });
 

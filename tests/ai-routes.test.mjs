@@ -24,6 +24,7 @@ import {
   ensureSession,
   sessionHeaders,
 } from "./helpers/session.mjs";
+import { assertLoggedFailure } from "./helpers/failures.mjs";
 
 const recognizedFixture = () => ({
   title: "接口测试草稿（非真实OCR）",
@@ -182,12 +183,13 @@ function services() {
 }
 
 async function start(dataDir, injected) {
-  const { app, close } = createApp({ dataDir, aiServices: injected });
+  const { app, close, errorLog } = createApp({ dataDir, aiServices: injected });
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   let stopped = false;
   const running = {
     url: `http://127.0.0.1:${server.address().port}`,
+    errorLog,
     stop: async () => {
       if (stopped) return;
       stopped = true;
@@ -221,6 +223,9 @@ async function setup(t) {
     ...injected,
     get url() {
       return running.url;
+    },
+    get errorLog() {
+      return running.errorLog;
     },
     restart: async () => {
       await running.stop();
@@ -376,7 +381,7 @@ test("流式上游失败只返回错误，已有问答与顺序保持不变", as
   assert.equal(events.some((event)=>event.type==="done"),false);
   assert.equal(events.at(-1).type,"error"); assert.equal(events.at(-1).status,502);
   const restored=(await request(app.url,`/api/documents/${document.id}/conversations`)).data.conversations[0];
-  assert.deepEqual(restored.messages,saved.messages); assert.match(restored.lastError,/上游失败/);
+  assert.deepEqual(restored.messages,saved.messages); assert.match(app.errorLog.get(assertLoggedFailure(restored.lastError)).message,/上游失败/);
 });
 
 test("对话超时只记录一次，对话保存的代码与下发的一致", async (t) => {

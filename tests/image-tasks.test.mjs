@@ -16,6 +16,7 @@ import { SENTENCE_SCHEMA } from "../shared/sentences.mjs";
 import { blocksToHtml, bodyRanges, bodyText, appendImageBodyHtml, hasCompleteSentenceBoundaries } from "../shared/article-html.mjs";
 import { parseText, serializeBlocks } from "../shared/document.mjs";
 import { cookieFromResponse, ensureSession } from "./helpers/session.mjs";
+import { assertLoggedFailure } from "./helpers/failures.mjs";
 
 function fakeServices() {
   const state = { connected: true, calls: [], onRun: null, stop: null };
@@ -1353,7 +1354,7 @@ test("最终分句自动重试预算跨重启持久，用尽后只重试分句�
   assert.equal(task.counts.completed, 2);
   assert.equal(task.counts.failed, 0);
   assert.equal(task.canDelete, true);
-  assert.match(task.lastError, /segmentation failure/);
+  assert.equal(f.app.errorLog.get(assertLoggedFailure(task.lastError)).message, "fixture segmentation failure");
   assert.equal(task.resultVersion, null);
   const checkpoints = f.inspect((db) => db.prepare("SELECT recognition_json,annotation_json,steps_json FROM image_task_items WHERE task_id=? ORDER BY position").all(task.id));
   fail = false;
@@ -1407,13 +1408,14 @@ test("分句授权出错可继续或删除，删除后的最后步骤不能重�
   assert.equal(task.segmentation.attempts, 0);
   assert.equal(task.counts.completed, 1);
   assert.equal(task.canDelete, false);
-  assert.match(task.lastError, /授权/);
+  const authCode = assertLoggedFailure(task.lastError, { action: "ai-settings" });
+  assert.match(f.app.errorLog.get(authCode).message, /授权/);
   const fixed = (await f.freeze(task)).data;
   assert.equal(fixed.state, "needs_attention");
   const partial = (await f.request(`/image-tasks/${task.id}/result`)).data;
   assert.equal(partial.initializeSentences, true);
   assert.equal(partial.segmentationCompleted, false);
-  assert.match(partial.segmentationError, /授权/);
+  assert.equal(assertLoggedFailure(partial.segmentationError, { action: "ai-settings" }), authCode);
   f.state.connected = true;
   assert.equal((await f.request(`/image-tasks/${task.id}/resume`, "POST", { version: fixed.version })).status, 202);
   task = await f.runUntil(task.id, "ready");
