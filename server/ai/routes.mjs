@@ -1102,8 +1102,11 @@ export function attachAIRoutes({
       database.prepare("UPDATE conversations SET thread_id=?,messages_json=?,last_error=NULL,document_revision=?,updated_at=?,account_id=?,provider_id=?,model=?,reasoning_json=? WHERE id=? AND user_id=?").run(result.threadId, JSON.stringify(messages), row.revision, at, expected.expectedAccountId, provider.id, route.model || result.model || null, route.reasoning ? JSON.stringify(route.reasoning) : null, record.id, req.user.id);
       return presentConversation(database.prepare("SELECT * FROM conversations WHERE id=? AND user_id=?").get(record.id, req.user.id));
     } catch (cause) {
+      // Once the signal aborts, the operation queue rejects with signal.reason, which can
+      // reach respondToChat first. Record that same object so both sides share one code.
+      const failure = route.signal?.aborted && route.signal.reason instanceof Error ? route.signal.reason : cause;
       if (!closed) database.prepare("UPDATE conversations SET last_error=?,updated_at=? WHERE id=? AND user_id=?").run(
-        errorLog.capture(cause, { userId: req.user.id, scope: "chat", location: "chat:answer", context: { documentId: row.id, conversationId: record.id } }),
+        errorLog.capture(failure, { userId: req.user.id, scope: "chat", location: "chat:answer", context: { documentId: row.id, conversationId: record.id } }),
         new Date().toISOString(), record.id, req.user.id);
       throw cause;
     }

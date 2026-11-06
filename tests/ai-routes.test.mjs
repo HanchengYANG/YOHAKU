@@ -13,6 +13,7 @@ import { DatabaseSync } from "node:sqlite";
 import sharp from "sharp";
 import { createApp } from "../server/app.mjs";
 import { readEventStream } from "../shared/event-stream.mjs";
+import { failureText, isErrorCode } from "../shared/error-codes.mjs";
 import { ANNOTATION_SCHEMA } from "../shared/ocr-correction.mjs";
 import { OCR_BODY_SCHEMA, normalizeNewOcrDraft, validateOcr } from "../shared/ocr.mjs";
 import { SENTENCE_SCHEMA } from "../shared/sentences.mjs";
@@ -376,6 +377,33 @@ test("流式上游失败只返回错误，已有问答与顺序保持不变", as
   assert.equal(events.at(-1).type,"error"); assert.equal(events.at(-1).status,502);
   const restored=(await request(app.url,`/api/documents/${document.id}/conversations`)).data.conversations[0];
   assert.deepEqual(restored.messages,saved.messages); assert.match(restored.lastError,/上游失败/);
+});
+
+test("对话超时只记录一次，对话保存的代码与下发的一致", async (t) => {
+  const previous = process.env.AI_EXECUTION_TIMEOUT_MS;
+  process.env.AI_EXECUTION_TIMEOUT_MS = "300";
+  let app;
+  try { app = await setup(t); }
+  finally { if (previous === undefined) delete process.env.AI_EXECUTION_TIMEOUT_MS; else process.env.AI_EXECUTION_TIMEOUT_MS = previous; }
+  const document = await createDocument(app.url), path = `/api/documents/${document.id}/conversations`;
+  const body = await prepareChatBody(app.url,sessionHeaders(app.url).Cookie,path,"POST",{quote:"背中",question:"会超时的问题"});
+  // Like real providers, the runtime reports the abort with its own error object.
+  app.state.onRun = async ({signal}) => {
+    await new Promise((resolve) => signal.addEventListener("abort",resolve,{once:true}));
+    throw new Error("provider request aborted");
+  };
+  const response = await fetch(app.url+path,{method:"POST",headers:{...sessionHeaders(app.url),"Content-Type":"application/json",Accept:"text/event-stream"},body:JSON.stringify(body)});
+  const error = (await Array.fromAsync(readEventStream(response.body))).map((frame)=>JSON.parse(frame.data)).at(-1);
+  assert.equal(error.type,"error"); assert.equal(error.status,504); assert.ok(isErrorCode(error.errorCode));
+  const database = new DatabaseSync(join(app.dataDir,"yohaku.sqlite"),{readOnly:true});
+  t.after(() => database.close());
+  let stored = null;
+  for (let attempt = 0; attempt < 100 && !stored; attempt++) {
+    stored = database.prepare("SELECT last_error FROM conversations WHERE document_id=?").get(document.id)?.last_error ?? null;
+    if (!stored) await new Promise((resolve) => setTimeout(resolve,20));
+  }
+  assert.equal(stored,failureText(error.errorCode));
+  assert.deepEqual(database.prepare("SELECT code FROM error_log").all().map((row)=>row.code),[error.errorCode]);
 });
 
 test("客户端断开会取消流式请求，不把迟到输出保存为完成答案", async (t) => {

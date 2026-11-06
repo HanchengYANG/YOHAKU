@@ -33,6 +33,15 @@ test("用户能自己解决的错误不记录", () => {
   })), { record: false, kind: "AI_CANCELLED", action: null });
 });
 
+test("用户中途离开（AbortError 与 AI_CANCELLED）不记录，超时仍记录", () => {
+  assert.equal(classifyError(new DOMException("请求已取消。", "AbortError")).record, false);
+  assert.equal(classifyError(Object.assign(new Error("This operation was aborted"), { name: "AbortError" })).record, false);
+  assert.equal(classifyError(Object.assign(new Error("已取消"), { diagnostic: { code: "AI_CANCELLED", category: "cancelled" } })).record, false);
+  assert.equal(classifyError(new DOMException("The operation timed out.", "TimeoutError")).record, true);
+  assert.deepEqual(classifyError(fail(504, "AI 执行超时，请重试当前步骤。", { code: "AI_TIMEOUT", diagnostic: { code: "AI_TIMEOUT", category: "timeout" } })),
+    { record: true, kind: "AI_TIMEOUT", action: null });
+});
+
 test("角色内的用户错误只带执行信息时不记录", () => {
   assert.deepEqual(classifyError(fail(409, "正文草稿已变化，请重新提交。", { execution: { providerId: "openai", role: "annotation" } })),
     { record: false, kind: null, action: null });

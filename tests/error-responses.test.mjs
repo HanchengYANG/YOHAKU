@@ -61,6 +61,16 @@ test("已经记录过的错误沿用原代码", async (t) => {
   assert.equal(errorLog.list().items[0].code, body.errorCode);
 });
 
+test("HTTP 先记录的错误对象，后台 capture 沿用同一代码", () => {
+  const database = new DatabaseSync(":memory:"), errorLog = createErrorLog(database);
+  const error = fail(504, "AI 执行超时", { code: "AI_TIMEOUT" });
+  const { body } = publicErrorBody(error, { errorLog, scope: "chat" });
+  assert.ok(isErrorCode(body.errorCode));
+  assert.equal(error.errorCode, body.errorCode);
+  assert.equal(errorLog.capture(error, { scope: "chat" }), failureText(body.errorCode));
+  assert.equal(errorLog.list().items.length, 1);
+});
+
 test("上传与请求体错误保持原有白话", async (t) => {
   const { body } = await serve(t, () => Object.assign(new Error("too large"), { type: "entity.too.large", status: 413 }));
   assert.deepEqual(body, { error: "提交内容过大，请减少正文长度。" });

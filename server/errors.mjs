@@ -45,6 +45,9 @@ export function classifyError(error) {
   const fromAI = diagnosed || Boolean(code?.startsWith("AI_")) || error?.aiProvider === true;
   if (code === "AI_AUTH_REQUIRED" || (fromAI && [401, 403].includes(status)))
     return { record: true, kind: "AI_AUTH_REQUIRED", action: AI_SETTINGS_ACTION };
+  // The user left or cancelled; a genuine timeout (TimeoutError, AI_TIMEOUT) is still recorded.
+  if (error?.name === "AbortError" || kind === "AI_CANCELLED")
+    return { record: false, kind, action: null };
   if (status < 500 && (!fromAI || userFixableAICodes.has(kind)))
     return { record: false, kind, action: null };
   return { record: true, kind, action: null };
@@ -105,7 +108,7 @@ export function createErrorLog(database, {
     if (!isErrorCode(target.errorCode)) {
       try {
         const { record: shouldRecord, action } = classifyError(target);
-        if (!shouldRecord) return String(target.message || GENERIC_FAILURE);
+        if (!shouldRecord) return String(target.message || GENERIC_FAILURE).slice(0, 1000);
         target.errorCode = record(target, meta);
         target.errorAction = action;
       } catch (cause) {
@@ -169,6 +172,10 @@ export function publicErrorBody(error, { errorLog, userId = null, scope = "http"
   if (!errorCode) {
     try { errorCode = errorLog.record(error, { userId, scope, location }); }
     catch (cause) { log("错误记录写入失败：", redact(error?.message || error), redact(cause?.message)); }
+    // A later capture() of the same error object reuses this code.
+    if (errorCode && error && typeof error === "object") {
+      try { error.errorCode = errorCode; error.errorAction = action; } catch {}
+    }
   }
   const finalAction = error?.errorAction ?? action;
   return {
