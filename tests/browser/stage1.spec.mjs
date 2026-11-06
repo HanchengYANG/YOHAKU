@@ -466,3 +466,73 @@ test("账号菜单收纳管理员入口，错误记录从菜单打开", async ({
   await expect(page.getByRole("heading", { name: "错误记录", exact: true })).toBeVisible();
   await expect(menu.getByRole("button", { name: "退出", exact: true })).toHaveCount(0);
 });
+
+test("书籍页可继续阅读最近打开的文章，并从「书籍操作」菜单重命名和调整顺序", async ({ page }, info) => {
+  const suffix = info.project.name;
+  let bookId;
+  try {
+    const book = await (await page.request.post("/api/books", { data: { title: `进度书籍-${suffix}` } })).json();
+    bookId = book.id;
+    for (const title of ["第一篇", "第二篇"]) {
+      const response = await page.request.post("/api/documents", {
+        data: { bookId, title: `${title}-${suffix}`, kind: "book", orientation: "horizontal", content: "{本|ほん}を{読|よ}む。" },
+      });
+      expect(response.status()).toBe(201);
+    }
+    const [first, second] = (await (await page.request.get(`/api/books/${bookId}`)).json()).pages;
+    // Opening an unpaged article records it as opened; the book page resumes there.
+    const recorded = page.waitForResponse((response) =>
+      response.url().endsWith(`/api/documents/${second.id}/reading-position`) && response.request().method() === "PUT");
+    await page.goto(`/#${second.id}`);
+    await expect(page.getByRole("article", { name: "日语原文", exact: true })).toBeVisible();
+    expect((await recorded).status()).toBe(200);
+
+    await page.goto(`/#book/${bookId}`);
+    await expect(page.locator(".book-facts")).toHaveText(/^2 篇 · /);
+    await expect(page.getByRole("button", { name: `继续阅读 · ${second.title}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "添加文章", exact: true })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "书名", exact: true })).toHaveCount(0);
+
+    const actions = page.getByRole("button", { name: "书籍操作", exact: true });
+    const rename = page.getByRole("button", { name: "重命名", exact: true });
+    await actions.click();
+    await expect(actions).toHaveAttribute("aria-expanded", "true");
+    await page.screenshot({ path: `artifacts/step2-book-menu-${suffix}.png`, animations: "disabled" });
+    await page.keyboard.press("Escape");
+    await expect(rename).toHaveCount(0);
+    await expect(actions).toBeFocused();
+    await actions.click();
+    // An outside press closes it too (the panel covers the middle of the facts line on phones).
+    await page.locator(".book-facts").click({ position: { x: 1, y: 1 } });
+    await expect(rename).toHaveCount(0);
+
+    await actions.click();
+    await rename.click();
+    await page.getByRole("textbox", { name: "书名", exact: true }).fill(`改名书籍-${suffix}`);
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(page.getByRole("heading", { name: `改名书籍-${suffix}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "书名", exact: true })).toHaveCount(0);
+    await expect(actions).toBeFocused();
+
+    const list = page.getByLabel("书籍文章列表", { exact: true });
+    await actions.click();
+    await page.getByRole("button", { name: "调整顺序", exact: true }).click();
+    await page.getByRole("button", { name: "下移第 1 篇", exact: true }).click();
+    await expect(list.getByRole("button", { name: `打开第 1 篇：${second.title}`, exact: true })).toBeVisible();
+    await expect(list.getByRole("button", { name: `打开第 2 篇：${first.title}`, exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "完成", exact: true }).click();
+    await expect(page.getByRole("button", { name: "下移第 1 篇", exact: true })).toHaveCount(0);
+    await expect(actions).toBeFocused();
+
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: `artifacts/step2-book-${suffix}.png`, fullPage: true, animations: "disabled" });
+  } finally {
+    if (bookId) {
+      const response = await page.request.get(`/api/books/${bookId}`);
+      if (response.ok()) {
+        const current = await response.json();
+        expect((await page.request.delete(`/api/books/${bookId}`, { data: { revision: current.revision } })).status()).toBe(204);
+      }
+    }
+  }
+});

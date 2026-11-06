@@ -1839,7 +1839,7 @@ test("既有材料原地转为书籍，保留原图注音讨论并可追加文�
     const conversations = await (await page.request.get(`/api/documents/${firstId}/conversations`)).json();
     expect(conversations.conversations).toEqual([originalDiscussion]);
 
-    await page.getByRole("button", { name: "添加文字文章", exact: true }).click();
+    await page.getByRole("button", { name: "添加文章", exact: true }).click();
     await expect(page.getByLabel("保存到书籍", { exact: true })).toHaveValue(bookId);
     await page.getByRole("textbox", { name: "材料标题", exact: true }).fill("补充文字页");
     await page.getByRole("textbox", { name: "日语正文", exact: true }).fill("これは{追加|ついか}した{本文|ほんぶん}です。");

@@ -1,28 +1,140 @@
-.book-heading > div:first-child {
-  min-width: 0;
+/* Book page (UI step 2): a cover drawn like the home hero's closed book (green
+   spine, paper, one primary action), then the article list. The rust bookmark
+   ribbon marks the article the primary action resumes. */
+.book-page.stage2-page {
+  width: min(880px, calc(100% - 80px));
+  /* Padding, not margin: a top margin would collapse through .main-panel and
+     scroll the page by that much. */
+  margin: 0 auto;
+  padding: 30px 0 56px;
 }
-.book-heading h1,
-.book-page-open strong {
-  overflow-wrap: anywhere;
-}
-.book-page-count {
-  margin: 12px 0 0;
-  color: var(--muted);
-  font-size: 12px;
-}
-.book-actions {
+.book-breadcrumb {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
+  margin-bottom: 14px;
+}
+.book-breadcrumb .text-button {
+  gap: 4px;
+  padding: 4px 6px 4px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.book-breadcrumb .text-button:hover {
+  color: var(--ink);
+}
+
+.book-cover {
+  position: relative;
+  padding: 30px 28px 28px 52px;
+  border: 1px solid #e1dccc;
+  border-radius: 12px;
+  background: var(--paper);
+  box-shadow: 0 18px 40px #203b3912;
+}
+/* No overflow: hidden here (the ⋯ menu must reach past the cover), so the
+   spine rounds its own corners. */
+.book-cover::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 12px;
+  border-right: 3px solid #ffffff26;
+  border-radius: 11px 0 0 11px;
+  background: var(--ink);
+  content: "";
+  pointer-events: none;
+}
+.book-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.book-title-row h1 {
+  min-width: 0;
+  margin: 0;
+  color: var(--ink);
+  font: 500 30px/1.4 "Noto Serif CJK SC", serif;
+  letter-spacing: 0.02em;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+.book-menu {
+  position: relative;
   flex-shrink: 0;
+  margin: 2px -8px 0 0;
+}
+.book-menu > .icon-button {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+}
+.book-menu > .icon-button[aria-expanded="true"] {
+  background: #eee9dc;
+  color: var(--ink);
+}
+.book-menu-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 160px;
+  padding: 6px;
+  border: 1px solid #e1dccc;
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow: 0 14px 32px #203b3924;
+  animation: book-menu-in 0.12s ease-out;
+}
+@keyframes book-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+.book-menu-panel button {
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.book-menu-panel button:hover:not(:disabled) {
+  background: #f1ede2;
+}
+.book-menu-panel button:disabled {
+  color: #a7ad9f;
+  cursor: default;
+}
+.book-menu-panel .book-delete {
+  margin-top: 4px;
+  border-top: 1px solid #ece6d8;
+  border-radius: 0 0 5px 5px;
+  color: #a15b42;
+}
+.book-menu-panel .book-delete:hover:not(:disabled) {
+  background: #f4e4d9;
+  color: #813b2b;
+}
+.book-facts {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
 }
 .book-rename {
   display: flex;
   align-items: flex-end;
   gap: 10px;
-  max-width: 620px;
-  margin-bottom: 28px;
+  max-width: 560px;
+  margin-top: 20px;
 }
 .book-rename label {
   display: flex;
@@ -31,7 +143,7 @@
   gap: 8px;
   min-width: 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 .book-rename input,
 .book-jump select,
@@ -46,83 +158,150 @@
   padding: 8px 12px;
   font-size: 13px;
 }
+.book-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 24px;
+}
+.book-actions .button {
+  gap: 6px;
+  max-width: 100%;
+  min-height: 44px;
+  padding: 10px 20px;
+}
+.book-actions .button > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.book-page > .error-notice {
+  margin: 16px 0 0;
+}
+
+.book-reorder-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 24px;
+  padding: 8px 8px 8px 16px;
+  border-radius: 8px;
+  background: #ece7da;
+  color: var(--ink);
+  font-size: 13px;
+}
+.book-reorder-bar .button {
+  min-height: 34px;
+  padding: 6px 16px;
+}
+/* A table of contents: number, title, a dotted leader and the one state. */
 .book-page-list {
-  list-style: none;
+  margin: 34px 0 0;
   padding: 0;
-  margin: 0;
+  list-style: none;
   border-top: 1px solid var(--line);
+}
+.book-reorder-bar + .book-page-list {
+  margin-top: 12px;
 }
 .book-page-row {
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 16px;
-  padding: 18px 0;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0 14px;
+  padding: 14px 0;
   border-bottom: 1px solid var(--line);
 }
+/* Same top padding and line box as the title, so the number sits on its first line. */
 .book-page-number {
+  justify-self: center;
+  width: 24px;
+  padding-top: 8px;
   color: #8d9981;
-  font-size: 12px;
+  font: 400 14px/25.5px "Noto Serif CJK SC", serif;
+  font-variant-numeric: tabular-nums;
   text-align: center;
+}
+/* The ribbon hangs from the rule above the row and carries the number. */
+.book-page-row.is-current .book-page-number {
+  margin-top: -15px;
+  padding: 23px 0 8px;
+  background: var(--rust);
+  color: #fff8ee;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% calc(100% - 7px), 0 100%);
 }
 .book-page-open {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 8px;
+  align-items: baseline;
+  align-items: last baseline;
+  gap: 12px;
+  width: 100%;
   min-width: 0;
-  padding: 6px 0;
+  padding: 8px 0;
   border: 0;
+  border-radius: 4px;
   background: transparent;
+  color: inherit;
+  font: inherit;
   text-align: left;
+  cursor: pointer;
+}
+.book-page-open:disabled {
+  cursor: default;
 }
 .book-page-open strong {
+  min-width: 0;
+  color: var(--ink);
   font-size: 15px;
   font-weight: 500;
   line-height: 1.7;
+  overflow-wrap: anywhere;
 }
-.book-page-open:hover strong {
-  color: var(--green);
+.book-page-leader {
+  position: relative;
+  top: -4px;
+  flex: 1 1 24px;
+  min-width: 24px;
+  border-bottom: 1px dotted #cfc6b2;
 }
-.book-page-open > span {
+.book-page-state {
+  flex: none;
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1.8;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.book-page-state.is-position {
+  color: #3f6a55;
+}
+.book-page-state.is-working {
+  color: #8a7a52;
+}
+.book-page-state.is-attention {
+  color: var(--rust-dark);
+  font-weight: 500;
 }
 .book-page-order {
   display: flex;
+  align-self: center;
   gap: 4px;
 }
 .book-page-order .button {
-  min-height: 34px;
-  padding: 7px 10px;
-  font-size: 11px;
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: 12px;
 }
 .book-empty {
-  padding: 38px 26px;
+  margin: 34px 0 0;
+  padding: 28px 26px;
   border: 1px dashed #d6ddcf;
-  border-radius: 6px;
+  border-radius: 8px;
   background: #f1f3ea;
-}
-.book-empty h2 {
-  margin: 0 0 12px;
-  color: #58704e;
-  font-size: 17px;
-  font-weight: 500;
-}
-.book-empty p {
-  margin: 0;
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.9;
-}
-.book-footer {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 25px;
-}
-.book-delete {
-  color: #9d6152;
+  font-size: 13px;
+  text-align: center;
 }
 .sr-only {
   position: absolute;
@@ -300,23 +479,70 @@
   min-width: 160px;
 }
 @media (max-width: 760px) {
-  .book-heading {
-    flex-direction: column;
+  .book-page.stage2-page {
+    width: calc(100% - 32px);
+    padding: 16px 0 32px;
+  }
+  .book-breadcrumb {
+    margin-bottom: 10px;
+  }
+  .book-cover {
+    padding: 22px 16px 20px 32px;
+  }
+  .book-cover::before {
+    width: 10px;
+  }
+  .book-title-row {
+    gap: 8px;
+  }
+  .book-title-row h1 {
+    font-size: 24px;
+  }
+  .book-menu {
+    margin-right: -4px;
   }
   .book-actions {
-    justify-content: flex-start;
-    width: 100%;
+    margin-top: 20px;
+  }
+  .book-actions .button {
+    flex: 1 1 100%;
+  }
+  .book-rename {
+    flex-wrap: wrap;
+  }
+  .book-rename label {
+    flex-basis: 100%;
+  }
+  .book-page-list,
+  .book-empty {
+    margin-top: 26px;
   }
   .book-page-row {
-    grid-template-columns: 22px minmax(0, 1fr);
-    gap: 8px 12px;
-    padding: 15px 0;
+    grid-template-columns: 26px minmax(0, 1fr);
+    gap: 0 10px;
+    padding: 12px 0;
+  }
+  .book-page-number {
+    width: 22px;
+  }
+  .book-page-row.is-current .book-page-number {
+    margin-top: -13px;
+    padding-top: 21px;
+  }
+  .book-page-open {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+  }
+  .book-page-leader {
+    display: none;
   }
   .book-page-order {
     grid-column: 2;
+    padding-bottom: 4px;
   }
   .book-empty {
-    padding: 28px 20px;
+    padding: 22px 18px;
   }
   .book-navigation {
     width: calc(100% - 32px);
@@ -359,5 +585,10 @@
   }
   .book-target > small {
     font-size: 10px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .book-menu-panel {
+    animation: none;
   }
 }

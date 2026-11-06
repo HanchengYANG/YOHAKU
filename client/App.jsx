@@ -979,9 +979,10 @@ function Workspace({ user, onLoggedOut }) {
         ) : book && activeId.startsWith("book/") ? (
           <BookView
             book={book}
+            taskCounts={taskCounts}
+            onOpenShelf={goHome}
             onOpenPage={openDocument}
-            onAddImage={() => beginBookPage(true)}
-            onAddText={() => beginBookPage(false)}
+            onAddArticle={() => beginBookPage(true)}
             onRename={(title) => updateBook({ title })}
             onReorder={(pageIds) => updateBook({ pageIds })}
             onDelete={deleteBook}

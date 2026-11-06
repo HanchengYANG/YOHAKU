@@ -127,7 +127,7 @@ for(const target of ["task","book","article"])test(`${target} deletion uses an a
   const state=await fixture(page);
   let nativeDialogs=0;
   page.on("dialog",async dialog=>{nativeDialogs++;await dialog.dismiss();});
-  let trigger,deletePath,dialogName,scopeText,confirmLabel;
+  let trigger,deletePath,dialogName,scopeText,confirmLabel,opener=null,openTrigger=async()=>{};
   if(target==="task"){
     state.task={...state.task,status:"failed",state:"failed",canDelete:true};
     await page.goto("/#tasks/prepare-14");
@@ -135,7 +135,7 @@ for(const target of ["task","book","article"])test(`${target} deletion uses an a
     dialogName="删除任务";scopeText="文章、原始文件和原页预览会保留";confirmLabel="删除任务";
   }else if(target==="book"){
     state.book={id:"book",title:"待删除的测试书",revision:7,pages:[{id:"a",title:"第一篇",charCount:1,rubyCount:0},{id:"b",title:"第二篇",charCount:1,rubyCount:0}]};
-    await page.goto("/#book/book");
+    await page.goto("/#book/book");opener=page.getByRole("button",{name:"书籍操作",exact:true});openTrigger=()=>opener.click();
     trigger=page.getByRole("button",{name:"删除书籍",exact:true});deletePath="/books/book";
     dialogName="删除书籍";scopeText="全部 2 篇文章";confirmLabel="删除书籍";
   }else{
@@ -147,22 +147,23 @@ for(const target of ["task","book","article"])test(`${target} deletion uses an a
   }
   const deletions=()=>state.calls.filter(call=>call.path===deletePath&&call.method==="DELETE");
   const dialog=page.getByRole("dialog",{name:dialogName,exact:true});
-  await trigger.click();
+  await openTrigger();await trigger.click();
   await expect(dialog).toBeVisible();
+  if(opener)await expect(opener).toHaveAttribute("aria-expanded","false");
   await expect(dialog).toContainText(scopeText);
   await expect(dialog).toContainText("无法撤销");
   await expect(dialog.getByRole("button",{name:"取消",exact:true})).toBeFocused();
   expect(deletions()).toEqual([]);
   await dialog.getByRole("button",{name:"取消",exact:true}).click();
   await expect(dialog).toHaveCount(0);
-  await expect(trigger).toBeFocused();
+  await expect(opener ?? trigger).toBeFocused();
   expect(deletions()).toEqual([]);
-  await trigger.click();
+  await openTrigger();await trigger.click();
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
-  await expect(trigger).toBeFocused();
+  await expect(opener ?? trigger).toBeFocused();
   expect(deletions()).toEqual([]);
-  await trigger.click();
+  await openTrigger();await trigger.click();
   await page.keyboard.press("Tab");
   await expect(dialog.getByRole("button",{name:confirmLabel,exact:true})).toBeFocused();
   await page.keyboard.press("Tab");
