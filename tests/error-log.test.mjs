@@ -51,8 +51,22 @@ test("capture 对同一个错误对象只记录一次，并返回带代码的文
   assert.equal(error.errorCode, "AAAAAA");
   assert.equal(error.errorAction, AI_SETTINGS_ACTION);
   assert.equal(log.list().items.length, 1);
-  // Background failures are always recorded, even 4xx ones.
-  assert.equal(log.capture(fail(400, "识别结果缺少正文")), failureText("BBBBBB"));
+});
+
+test("capture 与 HTTP 同一规则：用户可自行处理的失败保留原文且不记录", () => {
+  const { log } = fixture({ codes: ["AAAAAA", "BBBBBB"] });
+  const userError = fail(400, "识别结果缺少正文");
+  assert.equal(log.capture(userError, { scope: "task" }), "识别结果缺少正文");
+  assert.equal(userError.errorCode, undefined);
+  const cancelled = fail(409, "已取消本次回答", { diagnostic: { code: "AI_CANCELLED", category: "cancelled" } });
+  assert.equal(log.capture(cancelled, { scope: "chat" }), "已取消本次回答");
+  assert.equal(log.list().items.length, 0);
+  // Server and provider failures are still recorded once.
+  const upstream = fail(502, "上游失败");
+  assert.equal(log.capture(upstream, { scope: "task" }), failureText("AAAAAA"));
+  assert.equal(log.capture(upstream, { scope: "task" }), failureText("AAAAAA"));
+  assert.equal(log.list().items.length, 1);
+  assert.equal(log.get("AAAAAA").message, "上游失败");
 });
 
 test("列表倒序、可按代码过滤、可分页，并能关联网站账号", () => {

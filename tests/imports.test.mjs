@@ -11,8 +11,10 @@ import { attachImportRoutes } from '../server/imports.mjs';
 import { renderImportedSource,inspectImportFile } from '../server/import-parsers.mjs';
 import { attachTaskRoutes } from '../server/tasks.mjs';
 import { execFileSync } from 'node:child_process';
+import { createErrorLog, errorResponder } from '../server/errors.mjs';
+import { failureText } from '../shared/error-codes.mjs';
 
-async function fixture(t,{proposal,extractChapterPage,renderSourcePreview,inspectFile}={}) {
+async function fixture(t,{proposal,extractChapterPage,renderSourcePreview,inspectFile,errorLog}={}) {
   const storageDir=await mkdtemp(join(tmpdir(),'yohaku-import-test-'));
   const database=new DatabaseSync(':memory:');
   database.exec('CREATE TABLE books(id TEXT PRIMARY KEY,title TEXT,owner_id TEXT,revision INTEGER,created_at TEXT,updated_at TEXT)');
@@ -21,9 +23,9 @@ async function fixture(t,{proposal,extractChapterPage,renderSourcePreview,inspec
   const sources={adoptDocument(){},createArticleSources(userId,id,values){attached.push({userId,id,values});return {...articles.find(article=>article.id===id),sources:values};}};
   const ai={async proposeChapters(_user,input){proposals.push(input);return proposal?proposal(input):{chapters:[{title:'正文',startPage:1,endPage:input.metadata.pageCount,needsReview:true}]};},async saveImage(){return{id:'image-1'};}};
   const books={transaction:work=>work(),requireBook(_user,id){return database.prepare('SELECT * FROM books WHERE id=?').get(id);}};
-  const imports=attachImportRoutes({app,database,storageDir,ai,sources,books,renderSourcePreview,inspectFile,extractChapterPage:async source=>{extractions.push(source.original.page);extractionTypes.push(source.type);return extractChapterPage?extractChapterPage(source):{text:`第${source.original.page}页正文。\n页脚`};},createImportedArticle(userId,value){createCalls++;const row={id:`article-${createCalls}`,...value};articles.push(row);return row;},requireDocument(_user,id){const row=articles.find(article=>article.id===id);if(!row)throw Object.assign(new Error('missing'),{status:404});return row;}});
+  const imports=attachImportRoutes({app,database,storageDir,ai,sources,books,renderSourcePreview,inspectFile,errorLog,extractChapterPage:async source=>{extractions.push(source.original.page);extractionTypes.push(source.type);return extractChapterPage?extractChapterPage(source):{text:`第${source.original.page}页正文。\n页脚`};},createImportedArticle(userId,value){createCalls++;const row={id:`article-${createCalls}`,...value};articles.push(row);return row;},requireDocument(_user,id){const row=articles.find(article=>article.id===id);if(!row)throw Object.assign(new Error('missing'),{status:404});return row;}});
   attachTaskRoutes({app,database,adapters:[imports.taskAdapter]});
-  app.use((error,_req,res,_next)=>res.status(error.status||500).json({error:error.message}));
+  app.use(errorLog?errorResponder({errorLog,log:()=>{}}):(error,_req,res,_next)=>res.status(error.status||500).json({error:error.message}));
   const server=app.listen(0,'127.0.0.1');await once(server,'listening');const url=`http://127.0.0.1:${server.address().port}`;
   t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));imports.close?.();if(database.isOpen)database.close();await rm(storageDir,{recursive:true,force:true});});
   async function request(path,method='GET',body,user) {
@@ -434,6 +436,16 @@ for(const type of ['photo','epub','text','scan_pdf'])test(`${type} import progre
   assert.equal(archived.steps.find(step=>step.step==='confirm').status,'completed');
   assert.ok(f.attached.flatMap(item=>item.values).every(source=>source.status!=='ready'),'import completion must not mark source correction/annotation ready');
   assert.equal(f.extractions.length,0);assert.equal(f.proposals.length,0);
+});
+
+test('a failed parse on upload returns the recorded code without writing a second record',async t=>{
+  const errorLog=createErrorLog(new DatabaseSync(':memory:'),{log:()=>{}});
+  const f=await fixture(t,{errorLog,inspectFile:async()=>{throw Object.assign(new Error('parser crashed'),{status:503,expose:true});}});
+  const response=await f.request('/api/imports','POST',{text:'本文。'});
+  assert.equal(response.status,503);
+  const {items}=errorLog.list();
+  assert.equal(items.length,1);assert.equal(items[0].summary,'parser crashed');assert.equal(items[0].scope,'import');
+  assert.equal(response.data.errorCode,items[0].code);assert.equal(response.data.error,failureText(items[0].code));
 });
 
 test('a failed EPUB parse does not count parsing or confirmation as completed',async t=>{

@@ -10,6 +10,7 @@ import { blocksToHtml } from '../shared/article-html.mjs';
 import { parseText } from '../shared/document.mjs';
 import { createLocalWorkerPool } from './ocr/worker-pool.mjs';
 import { createErrorLog } from './errors.mjs';
+import { parseFailure } from '../shared/error-codes.mjs';
 const fail=(status,message)=>Object.assign(new Error(message),{status,expose:true});
 const utf8Name=value=>{
   const text=String(value||'');
@@ -217,7 +218,8 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
         const type=pasted!==null?'text':detected[index];
         const file={id:fileId,name:cleanName(uploaded.originalname),mimeType:uploaded.mimetype||'application/octet-stream',bytes:uploaded.buffer.length,filePath,type,previewUrl:`/api/imports/${id}/files/${fileId}/raw`};
         const parsed=await inspectFileEntry(file,{userId:req.user.id,importId:id});
-        if(!parsed&&!isPdf(type)&&type!=='epub')throw fail(file.inspection.httpStatus,file.info.error);
+        // Keep the code already recorded for this failure so the HTTP layer does not record it again.
+        if(!parsed&&!isPdf(type)&&type!=='epub'){const recorded=parseFailure(file.info.error);throw Object.assign(fail(file.inspection.httpStatus,file.info.error),recorded?{errorCode:recorded.code,errorAction:recorded.action}:{});}
         if(isImage(type)){
           file.imageId=(await ai.saveImage(req.user.id,uploaded.buffer,{mimeType:uploaded.mimetype,originalName:file.name})).id;
           file.contentHash=createHash('sha256').update(uploaded.buffer).digest('hex');

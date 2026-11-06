@@ -97,13 +97,15 @@ export function createErrorLog(database, {
   }
 
   // Background failures: record once per error object and return the text
-  // that is stored in the existing error fields. Never throws: callers are
-  // already handling a failure, so a broken log falls back to the plain text.
+  // that is stored in the existing error fields. Same rule as HTTP: errors the
+  // user can fix keep their own text and are not recorded. Never throws: callers
+  // are already handling a failure, so a broken log falls back to the plain text.
   function capture(error, meta) {
     const target = error && typeof error === "object" ? error : new Error(String(error));
     if (!isErrorCode(target.errorCode)) {
       try {
-        const { action } = classifyError(target);
+        const { record: shouldRecord, action } = classifyError(target);
+        if (!shouldRecord) return String(target.message || GENERIC_FAILURE);
         target.errorCode = record(target, meta);
         target.errorAction = action;
       } catch (cause) {

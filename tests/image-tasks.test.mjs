@@ -289,8 +289,21 @@ test("共享授权失效进入blocked，恢复后只执行未完成步骤", asyn
   const task = await f.submit(await f.prepared());
   await f.app.imageTasks.runNext();
   await f.app.imageTasks.runNext();
-  assert.equal((await f.get(task.id)).state, "blocked");
+  const blocked = await f.get(task.id);
+  assert.equal(blocked.state, "blocked");
   assert.equal(f.state.calls.length, 0);
+  // Each blocked retry reuses the recorded code instead of adding another record.
+  const errorRows = () => f.inspect((db) => db.prepare("SELECT count(*) AS count FROM error_log").get().count);
+  const nextRunAt = () => f.inspect((db) => db.prepare("SELECT next_run_at FROM image_tasks WHERE id=?").get(task.id).next_run_at);
+  assert.equal(errorRows(), 1);
+  const scheduled = nextRunAt();
+  f.clock.value += 100;
+  await f.app.imageTasks.runNext();
+  const retried = await f.get(task.id);
+  assert.equal(retried.state, "blocked");
+  assert.ok(nextRunAt() > scheduled, "the blocked attempt ran again");
+  assert.equal(retried.lastError, blocked.lastError);
+  assert.equal(errorRows(), 1);
   f.state.connected = true;
   f.clock.value += 100;
   const ready = await f.runUntil(task.id, "ready");

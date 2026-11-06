@@ -3,6 +3,7 @@ import multer from "multer";
 import { blocksToHtml, htmlToBlocks, appendImageBodyHtml, bodyText, hasCompleteSentenceBoundaries } from "../shared/article-html.mjs";
 import { serializeBlocks, plainText, parseText } from "../shared/document.mjs";
 import { createErrorLog } from "./errors.mjs";
+import { AI_SETTINGS_ACTION, parseFailure } from "../shared/error-codes.mjs";
 
 const phases = ["prepare", "recognize", "annotate"];
 const fail = (status, message, code) => Object.assign(new Error(message), { status, expose: true, ...(code ? { code } : {}) });
@@ -282,7 +283,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
       throw fail(502, "注音结果改变了正文，原识别结果已保留，请重试或手动注音。");
     return result;
   }
-  async function execute(task, item, phase, token, controller) {
+  async function execute(task, item, phase, token, controller, blockedReason = null) {
     try {
       const onStatus=event=>{
         if(!validAttempt(task.id,item?.id,token))return;
@@ -329,8 +330,10 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
         const busy = error.code === "AI_BUSY";
         const transient = error.name === "TypeError" || [408, 429, 500, 502, 503, 504].includes(error.status) || ["ETIMEDOUT", "ECONNRESET", "ENETUNREACH"].includes(error.code);
         const retry = authRequired || busy || transient && step.attempts <= maxAutomaticRetries;
-        const message = errorLog.capture(error, { userId: task.user_id, scope: "task", location: `image:${phase}`,
-          context: { taskId: task.id, ...(item?.id ? { itemId: item.id } : {}) } });
+        // Blocked retries keep the code recorded by the first authorization failure.
+        const message = authRequired && parseFailure(blockedReason)?.action === AI_SETTINGS_ACTION ? blockedReason
+          : errorLog.capture(error, { userId: task.user_id, scope: "task", location: `image:${phase}`,
+            context: { taskId: task.id, ...(item?.id ? { itemId: item.id } : {}) } });
         const failed = { ...step, ...(error.execution ? { execution: {...step.execution,...error.execution} } : {}), state: retry ? "pending" : "failed",resourceState:retry?'retry_wait':error.status===504?'timeout':'failed',finishedAt:iso(),error: message,
           attempts: authRequired || busy ? Math.max(0, step.attempts - 1) : step.attempts,
           nextRunAt: retry ? now() + (authRequired ? blockedRetryMs : retryDelayMs * Math.max(1, step.attempts)) : 0 };
@@ -363,7 +366,7 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
               changeTask(task.id, { state: "running", blocked_reason: null, next_run_at: 0,
                 started_at: task.started_at || iso(), queue_order: ++queueOrder, segmentation_token: token,
                 segmentation_json: json({ ...segmentation, state: "running",resourceState:'queued',queuedAt:iso(),startedAt:null,finishedAt:null,attempts: segmentation.attempts + 1, error: null }) });
-              selected = { task: requireTask(task.user_id, task.id), item: null, phase: "segment", token, controller };
+              selected = { task: requireTask(task.user_id, task.id), item: null, phase: "segment", token, controller, blockedReason: task.blocked_reason };
               break;
             }
           }
@@ -374,15 +377,15 @@ export function attachImageTaskRoutes({ app, database, ai, applyResult, getAppli
         setSteps(item, next.steps, { attempt_token: token });
         changeTask(task.id, { state: "running", blocked_reason: null, next_run_at: 0,
           started_at: task.started_at || iso(), queue_order: ++queueOrder });
-        selected = { task: requireTask(task.user_id, task.id), item: getItem.get(task.id, item.id), phase: next.phase, token, controller };
+        selected = { task: requireTask(task.user_id, task.id), item: getItem.get(task.id, item.id), phase: next.phase, token, controller, blockedReason: task.blocked_reason };
         break;
       }
     });
     if (!selected) { schedule(pollIntervalMs); return Promise.resolve(false); }
-    const { task, item, phase, token, controller } = selected;
+    const { task, item, phase, token, controller, blockedReason } = selected;
     const execution = { taskId: task.id, itemId: item?.id || null, token, controller, promise: null };
     active.set(task.id, execution);
-    execution.promise = execute(task, item, phase, token, controller).finally(() => {
+    execution.promise = execute(task, item, phase, token, controller, blockedReason).finally(() => {
       active.delete(task.id);
       schedule(0);
     });
