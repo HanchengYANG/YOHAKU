@@ -4,7 +4,16 @@
     {
       "name": "yohaku-dev",
       "runtimeExecutable": "env",
-      "runtimeArgs": ["PORT=4317", "npm", "run", "dev"],
+      "runtimeArgs": [
+        "PATH=/home/hyang/.nvm/versions/node/v24.14.0/bin:/usr/local/bin:/usr/bin:/bin",
+        "HOST=127.0.0.1",
+        "TLS_KEY=",
+        "TLS_CERT=",
+        "PORT=4317",
+        "npm",
+        "run",
+        "dev"
+      ],
       "port": 5173
     }
   ]
