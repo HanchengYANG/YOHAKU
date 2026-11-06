@@ -3,6 +3,9 @@
 import { expect } from "@playwright/test";
 
 export async function openShelf(page) {
+  // The sidebar mounts once the session has loaded; checking visibility before
+  // that would skip opening the drawer on phones.
+  await page.locator("#bookshelf").waitFor({ state: "attached" });
   const toggle = page.getByRole("button", { name: "打开书架", exact: true });
   if (!(await toggle.isVisible())) return;
   if (await page.getByRole("button", { name: "关闭书架", exact: true }).isVisible()) return;

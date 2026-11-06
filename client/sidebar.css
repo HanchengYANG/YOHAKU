@@ -67,6 +67,8 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+  max-height: calc(100dvh - 120px);
+  overflow-y: auto;
   padding: 6px;
   border: 1px solid #496358;
   border-radius: 8px;

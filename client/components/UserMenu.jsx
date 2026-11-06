@@ -24,13 +24,29 @@ export default function UserMenu({ user, onLoggedOut, onBeforeLogout, onOpenPane
     setCopied(false);
     setError(null);
   }, [user?.id, user?.username]);
+  // Closing also drops an error from the last action, so reopening starts clean.
+  const close = () => {
+    setOpen(false);
+    setError(null);
+  };
   useEffect(() => {
     if (!open) return;
     const outside = (event) => {
-      if (!root.current?.contains(event.target)) setOpen(false);
+      if (!root.current?.contains(event.target)) close();
+    };
+    // On the document, so Escape works wherever focus is (Safari does not
+    // focus a button on click).
+    const escape = (event) => {
+      if (event.key !== "Escape") return;
+      close();
+      trigger.current?.focus();
     };
     window.document.addEventListener("pointerdown", outside);
-    return () => window.document.removeEventListener("pointerdown", outside);
+    window.document.addEventListener("keydown", escape);
+    return () => {
+      window.document.removeEventListener("pointerdown", outside);
+      window.document.removeEventListener("keydown", escape);
+    };
   }, [open]);
 
   const perform = async (action, operation) => {
@@ -52,7 +68,7 @@ export default function UserMenu({ user, onLoggedOut, onBeforeLogout, onOpenPane
       if (onBeforeLogout && (await onBeforeLogout()) === false) return;
       await api("/session/logout", { method: "POST", body: "{}" });
       setInvitation(null);
-      setOpen(false);
+      close();
       onLoggedOut();
     });
   const invite = () =>
@@ -85,7 +101,7 @@ export default function UserMenu({ user, onLoggedOut, onBeforeLogout, onOpenPane
   const choose = (item) => {
     if (item.id === "invite") return invite();
     if (item.id === "logout") return logout();
-    setOpen(false);
+    close();
     onOpenPanel?.(item.panel);
   };
   const expiryValue =
@@ -96,17 +112,11 @@ export default function UserMenu({ user, onLoggedOut, onBeforeLogout, onOpenPane
 
   if (!user) return null;
   return (
-    <section className="account-user-menu" aria-label="当前网站账号" ref={root}
-      onKeyDown={(event) => {
-        if (event.key !== "Escape" || !open) return;
-        event.stopPropagation();
-        setOpen(false);
-        trigger.current?.focus();
-      }}>
+    <section className="account-user-menu" aria-label="当前网站账号" ref={root}>
       <button ref={trigger} type="button" className="account-trigger"
-        aria-label={`账号菜单（${user.username}）`} aria-haspopup="true" aria-expanded={open}
+        aria-label={`账号菜单（${user.username}）`} aria-expanded={open}
         aria-controls={open ? "account-menu" : undefined}
-        onClick={() => setOpen((value) => !value)}>
+        onClick={() => (open ? close() : setOpen(true))}>
         <span className="account-avatar" aria-hidden="true">{user.username.slice(0, 1).toUpperCase()}</span>
         <span className="account-name">
           <strong title={user.username}>{user.username}</strong>
