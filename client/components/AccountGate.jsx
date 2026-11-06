@@ -54,7 +54,7 @@ export default function AccountGate({ session, onAuthenticated }) {
       onAuthenticated(result.user, result.loginSession);
     } catch (cause) {
       setError(
-        cause instanceof TypeError
+        cause.network
           ? "无法连接本机服务，请确认余白已经启动。"
           : cause.message,
       );

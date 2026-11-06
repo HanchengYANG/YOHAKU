@@ -402,7 +402,7 @@ export default function Editor({ initial, chatSession, onSave, onDelete, onCance
       awaitingPaint = true;
     } catch (error) {
       if (!controller.signal.aborted)
-        setAnnotationError(error instanceof TypeError
+        setAnnotationError(error.network
           ? "无法连接本机服务，当前正文保留，请重试生成注音。"
           : error.message);
     } finally {

@@ -66,7 +66,7 @@ test("图片上传网络、超时、服务器和无效响应都明确失败，�
   let expired = 0;
   window.addEventListener("yohaku:session-expired", () => { expired++; });
   for (const [respond, expected] of [
-    [(request) => request.onerror(), TypeError],
+    [(request) => request.onerror(), (error) => error instanceof TypeError && error.network === true],
     [(request) => request.ontimeout(), /上传超时/],
     [(request) => request.reply(503, { error: "测试上传失败" }), /测试上传失败/],
     [(request) => request.reply(200, "null"), /结果无效/],

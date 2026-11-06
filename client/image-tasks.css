@@ -27,6 +27,7 @@
 .task-current { margin:17px 0 0; font-size:13px; line-height:1.8; color:var(--muted); overflow-wrap:anywhere; }
 .task-actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:20px; }
 .task-status-panel .task-note { margin:14px 0 0; }
+.task-status-panel > .error-notice { margin:0 0 17px; }
 .task-timestamp { margin:15px 0 0; font-size:11px; }
 .task-item-list { list-style:none; margin:0; padding:0; display:grid; gap:12px; }
 .task-item-list li { display:flex; align-items:flex-start; gap:18px; padding:17px; border:1px solid var(--line); border-radius:7px; background:var(--paper); }

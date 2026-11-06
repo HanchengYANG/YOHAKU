@@ -39,7 +39,8 @@ export default function uploadImage(body, { signal, onProgress, path = "/images"
         finish(new Error("图片上传结果无效，请重试。"));
       } else finish(null, result);
     };
-    request.onerror = () => finish(new TypeError("图片上传网络连接失败。"));
+    // Marked like api.mjs network failures, so callers can check `network` alone.
+    request.onerror = () => finish(Object.assign(new TypeError("图片上传网络连接失败。"), { network: true }));
     request.onabort = () => finish(new DOMException("图片上传已取消。", "AbortError"));
     request.ontimeout = () => finish(new Error("图片上传超时，所选图片已保留，请重试。"));
     signal?.addEventListener("abort", abort, { once: true });

@@ -25,7 +25,7 @@ export default function UserMenu({ user, onLoggedOut, onBeforeLogout }) {
       await operation();
     } catch (cause) {
       setError(
-        cause instanceof TypeError
+        cause.network
           ? "无法连接本机服务，请稍后重试。"
           : cause.message,
       );

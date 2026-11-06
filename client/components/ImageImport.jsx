@@ -83,7 +83,7 @@ export default function ImageImport({ taskId = null, initialTask = null, onTaskC
         if (!mounted.current || cause.name === "AbortError") return;
         if (cause.code === "TASK_UNAVAILABLE" || cause.status === 410) { markUnavailable(); return; }
         if (unavailableRef.current) return;
-        setError(cause instanceof TypeError ? "暂时无法连接服务器。已上传的原图保留在草稿中，请恢复连接后重试。" : cause.message);
+        setError(cause.network ? "暂时无法连接服务器。已上传的原图保留在草稿中，请恢复连接后重试。" : cause.message);
         try {
           const latest = await refresh();
           if (!mounted.current) return;

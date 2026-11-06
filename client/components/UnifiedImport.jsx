@@ -99,7 +99,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, initialBo
       } catch (cause) {
         if (!stopped && cause.name !== "AbortError") {
           if (cause instanceof SyntaxError || [401,403,404].includes(cause.status)) forgetDraft();
-          else if (cause.status || cause instanceof TypeError) setError(`暂时无法恢复导入草稿：${cause.message}`);
+          else if (cause.status || cause.network) setError(`暂时无法恢复导入草稿：${cause.message}`);
           try {await listDrafts();} catch {}
         }
       }

@@ -1,6 +1,18 @@
 import { apiFetch, readApiResult } from "./api.mjs";
 import { readEventStream } from "../shared/event-stream.mjs";
 
+const DROPPED = "回答传输中断，未完成的内容没有保存。请重试。";
+
+// The reader rejects with TypeError when the connection drops mid-answer.
+// Errors thrown by the loop body do not pass through here.
+async function* frames(body) {
+  try { yield* readEventStream(body); }
+  catch (cause) {
+    if (cause?.name === "TypeError") throw Object.assign(new Error(DROPPED), { network: true });
+    throw cause;
+  }
+}
+
 export async function sendChat(path, { body, signal, onEvent } = {}) {
   const response = await apiFetch(`/api${path}`, {
     method:"POST", signal, body,
@@ -8,14 +20,14 @@ export async function sendChat(path, { body, signal, onEvent } = {}) {
   });
   if (!response.ok || !response.headers.get("content-type")?.includes("text/event-stream")) return readApiResult(response);
   let result;
-  for await (const frame of readEventStream(response.body)) {
+  for await (const frame of frames(response.body)) {
     let event;
     try { event = JSON.parse(frame.data); }
-    catch { throw new Error("回答传输中断，未完成的内容没有保存。请重试。"); }
+    catch { throw new Error(DROPPED); }
     if (event.type === "error") throw Object.assign(new Error(event.error || "回答中断，请重试。"), {status:event.status,code:event.code,errorCode:event.errorCode,action:event.action});
     if (event.type === "done") result = event.conversation;
     else onEvent?.(event);
   }
-  if (!result) throw new Error("回答传输中断，未完成的内容没有保存。请重试。");
+  if (!result) throw new Error(DROPPED);
   return result;
 }

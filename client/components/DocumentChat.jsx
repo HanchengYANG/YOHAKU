@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import api from "../api.mjs";
 import Icon from "./Icon.jsx";
+import ErrorNotice from "./ErrorNotice.mjs";
 import Markdown from "react-markdown";
 import { chatMarkdownOptions } from "../chat-markdown.mjs";
 import { availableChatGroups, createChatSession, visibleChatMessages } from "../chat-history.mjs";
@@ -320,10 +321,10 @@ export default function DocumentChat({ document, open, onOpen, onClose, session:
         {conversation && <button className="chat-delete" type="button" onClick={remove}>删除文章对话</button>}
       </div>}
       <div ref={messageArea} className="chat-messages" aria-label="对话记录" aria-live="polite" aria-busy={sending} onScroll={captureView}>
-        {error && <div className="stage2-error" role="alert">{error}
+        {error && <div className="stage2-error"><ErrorNotice error={error} />
           {pendingSelection?.failed && <button className="text-button chat-retry" type="button" disabled={loading || sending} onClick={() => send(pendingSelection)}>重试</button>}
         </div>}
-        {conversation?.lastError && !error && <div className="stage2-error" role="alert">上次回答未完成：{conversation.lastError}。可在对应问答组继续提问。</div>}
+        {conversation?.lastError && !error && <div className="stage2-error">上次回答未完成，可在对应问答组继续提问。<ErrorNotice error={conversation.lastError} /></div>}
         {pendingSelection ? <>
           <details className="chat-group-contexts" data-chat-detail="references"><summary>{pendingSelection.selection.text.slice(0,32)} · 查看引用</summary>
             <blockquote lang="ja">{pendingSelection.selection.text}</blockquote></details>

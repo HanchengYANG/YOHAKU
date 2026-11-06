@@ -879,6 +879,15 @@
   cursor: copy;
 }
 .error-notice-action { color: var(--green); }
+/* Inside an existing error box the notice adds only the code and action. */
+.stage2-error .error-notice {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: inherit;
+}
 .error-log-search { display: flex; gap: 8px; margin: 22px 0 16px; }
 .error-log-search input {
   flex: 1;
