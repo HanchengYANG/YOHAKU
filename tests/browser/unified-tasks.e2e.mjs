@@ -261,8 +261,8 @@ for(const status of ["timeout","failed"])test(`preparation task can explicitly k
   const correction=page.getByRole("region",{name:"校对正文",exact:true});
   await expect(correction.getByLabel("切换校对来源",{exact:true})).toHaveValue(target.id);
   const failure=correction.getByRole("alert").filter({has:page.getByRole("heading",{name:status==="timeout" ? "AI 校对已超时" : "AI 校对未完成",exact:true})});
-  await expect(failure).toContainText("当前正文已保存");
-  await expect(failure).toContainText("尚未校对的正文");
+  await expect(failure.getByRole("button",{name:"使用当前正文继续",exact:true})).toBeVisible();
+  await expect(failure.getByRole("button",{name:"重试校对",exact:true})).toBeVisible();
   await expect(correction.locator(".source-current-body")).toContainText(targetText);
   const originalPage=correction.getByRole("img",{name:"PDF 原始页面，第 110 页",exact:true});
   await expect(originalPage).toHaveAttribute("src",previewUrl);

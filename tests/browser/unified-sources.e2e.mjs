@@ -810,7 +810,7 @@ test("source correction opens the mapped source, saves its version and preserves
   await expect(page.locator(".source-original-text")).toHaveText("保存された原文。");
   await page.screenshot({path:`artifacts/sources-${testInfo.project.name}.png`,fullPage:true});
   await page.getByRole("button",{name:"全文检查",exact:true}).click();
-  await expect(page.getByRole("heading",{name:"已准备正文与待准备位置"})).toBeVisible();
+  await expect(page.getByRole("heading",{name:"全文",exact:true})).toBeVisible();
   expect(state.calls.filter((item)=>item.path.endsWith("/prepare")).map((item)=>item.path)).toEqual(["/documents/doc/sources/s2/prepare"]);
   await page.getByRole("button",{name:"照片 1 · 待核对",exact:true}).click();
   await expect(page.getByLabel("切换校对来源")).toHaveValue("s1");
@@ -1083,7 +1083,7 @@ test("a segmentation failure offers explicit retry but cannot keep current text 
   const prepares=()=>state.calls.filter(call=>call.method==="POST"&&call.path==="/documents/doc/sources/s2/prepare");
   await expect.poll(()=>prepares().length).toBe(1);
   expect(prepares()[0].input).toMatchObject({retry:false});
-  await correction.getByRole("button",{name:"重试准备此来源",exact:true}).click();
+  await correction.getByRole("button",{name:"重试准备",exact:true}).click();
   await expect.poll(()=>prepares().length).toBe(2);
   expect(prepares()[1].input.retry).not.toBe(false);
 });
@@ -1105,9 +1105,9 @@ test("imported PDF correction displays a loaded original-page image with zoom an
   const originalPage=page.getByRole("img",{name:"PDF 原始页面，第 12 页",exact:true});
   await expect(originalPage).toBeVisible();await expect.poll(()=>originalPage.evaluate((element)=>element.complete && element.naturalWidth > 0)).toBe(true);
   await expect(originalPage).toHaveAttribute("src","/api/imports/imp/files/file/pages/12");await expect(page.getByTitle("PDF 原始页面")).toHaveCount(0);
-  await page.getByLabel("PDF 原页缩放").fill("150");await expect(originalPage).toHaveAttribute("style",/width: 150%/);
+  for(const _ of [1,2])await page.getByRole("button",{name:"放大",exact:true}).click();await expect(originalPage).toHaveAttribute("style",/width: 150%/);
   await expect(page.getByRole("link",{name:"打开完整原 PDF",exact:true})).toHaveAttribute("href","/api/imports/imp/files/file/raw#page=12");
-  await page.getByLabel("PDF 原页缩放").fill("100");await page.screenshot({path:`artifacts/pdf-original-page-${info.project.name}.png`,fullPage:true});
+  for(const _ of [1,2])await page.getByRole("button",{name:"缩小",exact:true}).click();await page.screenshot({path:`artifacts/pdf-original-page-${info.project.name}.png`,fullPage:true});
 });
 
 test("PDF chapter edits use physical ranges and retain uncertain boundaries after confirmation",async({page})=>{
@@ -1659,6 +1659,7 @@ test("the reading bar lists book and page contents, arrow keys turn pages and th
   await expect(page.getByRole("button",{name:"下一篇：第二篇文章",exact:true})).toBeVisible();
   await page.keyboard.press("ArrowLeft");
   await expect(article).toContainText(texts[1]);
+  await expect(page.getByLabel("阅读分页",{exact:true})).toContainText("2 / 3");
   await expect(page.getByRole("button",{name:/^下一篇/})).toHaveCount(0);
   await page.keyboard.press("ArrowRight");
   await expect(article).toContainText(texts[2]);
@@ -1683,4 +1684,33 @@ test("a failed page with extracted text stays readable with its error code and n
   await expect(preview).toContainText("抽出された本文。");
   await expect(page.getByLabel("日语原文")).toHaveCount(0);
   await expect(page.getByRole("button",{name:/^对话/})).toHaveCount(0);
+});
+
+test("the source editor commits Japanese and Chinese composition as one edit that undo, redo and cancel respect",async({page})=>{
+  const state=await fixture(page);await page.goto("/#doc");
+  await page.getByRole("button",{name:"校对",exact:true}).click();
+  await page.getByRole("button",{name:"编辑正文与注音",exact:true}).click();
+  const input=page.getByRole("textbox",{name:"来源正文",exact:true});
+  const original=await input.inputValue();
+  const cdp=await page.context().newCDPSession(page);
+  for(const [composition,committed] of [["にほん","日本語"],["zhongwen","中文"]]){
+    await input.evaluate(element=>{element.focus();element.setSelectionRange(0,0);});
+    await cdp.send("Input.imeSetComposition",{text:composition,selectionStart:composition.length,selectionEnd:composition.length});
+    await expect(page.locator(".body-editor")).toHaveAttribute("data-composing","true");
+    await cdp.send("Input.insertText",{text:committed});
+    await expect(input).toHaveValue(committed+original);
+    await expect(page.locator(".body-editor")).not.toHaveAttribute("data-composing","true");
+    await page.getByRole("button",{name:"撤销",exact:true}).click();
+    await expect(input).toHaveValue(original);
+    await page.getByRole("button",{name:"重做",exact:true}).click();
+    await expect(input).toHaveValue(committed+original);
+    await page.getByRole("button",{name:"撤销",exact:true}).click();
+    await expect(input).toHaveValue(original);
+  }
+  await input.press("End");await page.keyboard.insertText("取消修改");
+  page.once("dialog",dialog=>dialog.accept());
+  await page.getByRole("button",{name:"取消",exact:true}).click();
+  await expect(input).toHaveCount(0);
+  await expect(page.locator(".source-current-body")).toContainText(original);
+  expect(state.saves).toEqual([]);
 });
