@@ -28,9 +28,11 @@ test("角色页紧凑配置，保存时自动测试且仅显示失败角色与�
     if (url.pathname === "/api/ai/models/test") tests.push(request.postDataJSON());
     if (url.pathname === "/api/ai/roles" && request.method() === "PUT") saves.push(request.postDataJSON());
   });
+  // One AI page with "连接" and "角色" tabs (§5.3).
   const open = async (name) => {
     await openAccountMenu(page);
-    await page.getByRole("button", { name, exact: true }).click();
+    await page.getByRole("button", { name: "AI", exact: true }).click();
+    await page.getByRole("tab", { name: name === "角色配置" ? "角色" : "连接", exact: true }).click();
   };
   const save = page.getByRole("button", { name: "保存角色配置", exact: true });
   try {
@@ -55,7 +57,7 @@ test("角色页紧凑配置，保存时自动测试且仅显示失败角色与�
     await expect(page.getByText("已授权", { exact: true })).toBeVisible();
     expect((await state()).activeAccountId).toBe(originalOpenAI.activeAccountId);
     await open("角色配置");
-    await expect(page.getByRole("heading", { name: "角色配置", exact: true })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "角色", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(save).toHaveCount(1);
     for (const role of ["OCR", "分章", "正文校正", "注音", "分句", "问答"]) {
       await page.getByRole("combobox", { name: `${role}提供方`, exact: true }).selectOption("api_base");
@@ -170,7 +172,8 @@ test("角色推理设置按模型提供，保存测试使用相同参数且不�
   const row = (name) => page.getByRole("region", { name: `${name}角色`, exact: true });
   const openRoles = async () => {
     await openAccountMenu(page);
-    await page.getByRole("button", { name: "角色配置", exact: true }).click();
+    await page.getByRole("button", { name: "AI", exact: true }).click();
+    await page.getByRole("tab", { name: "角色", exact: true }).click();
   };
   const advanced = (name) => row(name).locator("details");
   const openAdvanced = (name) => advanced(name).locator("summary").click();

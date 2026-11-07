@@ -107,3 +107,36 @@ export const taskImageUrl = (item) => item.imageId ? `/api/images/${encodeURICom
 export function pendingLocalEntries(entries, task) {
   return [...entries].filter((entry) => !(task?.items || []).some((item) => item.id === entry.id && item.imageId));
 }
+
+// Task list rows (§5.1): the task's own title, one sentence and one action.
+export function taskTitle(task) {
+  const names = [...new Set([task?.bookTitle || task?.newBookTitle, task?.targetTitle, task?.title].map((value) => String(value || "").trim()).filter(Boolean))];
+  if (!names.length && task?.items?.length) names.push(`${task.items[0].name} · ${taskCounts(task).total} 张`);
+  return names.join(" · ") || "未命名任务";
+}
+// The article or book an archived task produced, when it can be opened.
+export function taskResult(task) {
+  const bookId = task?.type === "import" && task.archived && task.resultKind === "book" ? task.bookId : null;
+  const documentId = task?.appliedDocumentId || (task?.archived && task.canOpenResult ? task.documentId : null);
+  return bookId ? { bookId } : documentId ? { documentId } : null;
+}
+export function taskRowStatus(task) {
+  const status = taskStatus(task);
+  // An archived import whose result was deleted says so instead of "已完成".
+  if (task?.archived && !taskResult(task) && task.message) return task.message;
+  if (task?.archived || task?.appliedDocumentId || ["completed", "succeeded", "done"].includes(status)) return "已完成";
+  if (status === "draft") return isImageTask(task) ? "上传未完成" : "导入未完成";
+  if (["failed", "timeout", "interrupted", "needs_attention", "blocked"].includes(status)) return "出错了";
+  if (["requires_review", "ready"].includes(status)) return "需要核对";
+  if (status === "running") {
+    const { completed = 0, total = 0, unit } = task?.progress || {};
+    return total ? `正在处理 · ${completed} / ${total} ${unit === "page" ? "页" : "步"}` : "正在处理";
+  }
+  return "等待处理";
+}
+export function taskRowAction(task) {
+  if (taskStatus(task) === "draft") return { kind: "continue", label: "继续" };
+  if (taskActions(task).retry && ["failed", "timeout", "interrupted", "needs_attention", "blocked"].includes(taskStatus(task))) return { kind: "retry", label: "重试" };
+  if (taskResult(task)) return { kind: "open", label: "打开" };
+  return { kind: "view", label: "查看" };
+}

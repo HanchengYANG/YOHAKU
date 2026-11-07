@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { useRegisterSW } from "virtual:pwa-register/react";
 import { createInstallChoices, installChoiceScope } from "./pwa-choice.mjs";
+import { installPrompt } from "./install-prompt.mjs";
 
 // Path of the developer certificate download, set by vite.config.mjs only when
 // the dev server runs over HTTPS; empty in production builds.
 const devCertificateUrl =
   typeof __YOHAKU_DEV_CERT__ !== "undefined" ? __YOHAKU_DEV_CERT__ : "";
 const iosHintKey = "yohaku.pwa.iosHintDismissed";
+// Phones are asked once per device (§5.4); desktops install from the account menu.
+const promptedKey = "yohaku.pwa.prompted";
 
 function readFlag(key) {
   try {
@@ -38,6 +41,7 @@ export default function PWAManager({ session }) {
     secure: window.location.protocol === "https:",
   });
   const [choice, setChoice] = useState({ scope: null, decided: false });
+  const [prompted, setPrompted] = useState(() => readFlag(promptedKey));
   const [prompting, setPrompting] = useState(false);
   const [certificateDismissed, setCertificateDismissed] = useState(false);
   const [certificateUrl, setCertificateUrl] = useState(devCertificateUrl);
@@ -57,7 +61,11 @@ export default function PWAManager({ session }) {
       document.removeEventListener("visibilitychange", sync);
     };
   }, [session]);
-  const remember = (value, expectedScope) => setChoice(choices.current.choose(value, expectedScope));
+  const remember = (value, expectedScope) => {
+    try { localStorage.setItem(promptedKey, "1"); } catch { /* the login-scoped cookie still applies */ }
+    setPrompted(true);
+    setChoice(choices.current.choose(value, expectedScope));
+  };
 
   useEffect(() => {
     if (devCertificateUrl) return;
@@ -81,9 +89,11 @@ export default function PWAManager({ session }) {
       // Keep the native prompt until the user taps our button.
       event.preventDefault();
       setInstallEvent(event);
+      installPrompt.set(event);
     };
     const onAppInstalled = () => {
       setInstallEvent(null);
+      installPrompt.set(null);
       setInstalled(true);
       setChoice(choices.current.choose("accepted"));
     };
@@ -100,6 +110,7 @@ export default function PWAManager({ session }) {
     navigator.standalone === true;
   const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent) ||
     (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const phone = isIos || window.matchMedia("(pointer: coarse)").matches;
   // An untrusted certificate stops the service worker from registering.
   const certificateUntrusted =
     certificateUrl && (registerFailed || !("serviceWorker" in navigator));
@@ -129,7 +140,7 @@ export default function PWAManager({ session }) {
       </div>
     );
   const scope = installChoiceScope(session);
-  if (!scope || choice.scope !== scope.id || choice.decided) return certificateLink;
+  if (!phone || prompted || !scope || choice.scope !== scope.id || choice.decided) return certificateLink;
   if (installEvent)
     return (
       <div className="pwa-banner" role="status">
@@ -147,10 +158,11 @@ export default function PWAManager({ session }) {
                 const { outcome } = await installEvent.userChoice;
                 if (outcome === "accepted" || outcome === "dismissed") remember(outcome, requestedScope);
                 if (outcome === "accepted") setInstalled(true);
-                setInstallEvent(null);
               } catch {
-                setInstallEvent(null);
-              } finally { setPrompting(false); }
+                // A failed prompt cannot be repeated; the account menu no longer offers it either.
+              } finally {
+                setInstallEvent(null); installPrompt.set(null); setPrompting(false);
+              }
             }}
           >
             安装

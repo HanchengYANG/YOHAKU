@@ -3,6 +3,7 @@ import api from "../api.mjs";
 import Icon from "./Icon.jsx";
 import ErrorNotice from "./ErrorNotice.mjs";
 import { accountMenuItems, isAdminUser } from "../account-menu.mjs";
+import { promptInstall, useInstallPrompt } from "../install-prompt.mjs";
 
 // The account row at the bottom of the sidebar. Admin pages, invitations and
 // logout open from a menu that unfolds upward over the shelf. The panel comes
@@ -98,8 +99,11 @@ export default function UserMenu({ user, onLoggedOut, onBeforeLogout, onOpenPane
       setError("未能复制，请选中邀请码手动复制。");
     }
   };
+  const installEvent = useInstallPrompt();
+  const standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
   const choose = (item) => {
     if (item.id === "invite") return invite();
+    if (item.id === "install") { trigger.current?.focus(); close(); void promptInstall(installEvent); return; }
     if (item.id === "logout") return logout();
     // The chosen item unmounts with the menu; keep focus on the trigger
     // instead of letting it fall to <body>.
@@ -133,7 +137,7 @@ export default function UserMenu({ user, onLoggedOut, onBeforeLogout, onOpenPane
       </button>
       {open && (
         <div className="account-menu-panel" id="account-menu">
-          {accountMenuItems(user).map((item) => (
+          {accountMenuItems(user, { installable: !!installEvent && !standalone }).map((item) => (
             <Fragment key={item.id}>
               <button type="button" className={`account-menu-item${item.id === "logout" ? " is-logout" : ""}`}
                 disabled={!!busy || (disabled && !!item.panel)} onClick={() => choose(item)}>

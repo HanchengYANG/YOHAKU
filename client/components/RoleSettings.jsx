@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import api from "../api.mjs";
 import { ROLE_IDS, ROLE_NAMES, requiredCapabilities, normalizeReasoning, reasoningKey } from "../../shared/ai-roles.mjs";
 
-const ROLES = ROLE_IDS.map((id) => ({ id, name: ROLE_NAMES[id] }));
+// One short purpose per role (§5.3); providers and models stay admin-only.
+const ROLE_PURPOSES = { ocr: "从照片识别文字", chaptering: "为 PDF 提议章节", correction: "校正识别出的正文",
+  annotation: "检查注音", segmentation: "把正文切分成句", chat: "回答划词提问" };
+const ROLES = ROLE_IDS.map((id) => ({ id, name: ROLE_NAMES[id], purpose: ROLE_PURPOSES[id] }));
 const labels = { json: "JSON 输出", image: "图片输入", streaming: "流式文本" };
 const effortLabels = { none: "关闭推理（none）", minimal: "最低（minimal）", low: "低（low）", medium: "中（medium）", high: "高（high）", xhigh: "很高（xhigh）", max: "最高（max）" };
 
@@ -38,7 +41,7 @@ function selectionErrors(roles, providers) {
   }));
 }
 
-export default function RoleSettings({ onClose }) {
+export default function RoleSettings({ onClose, embedded = false }) {
   const [configuration, setConfiguration] = useState(null);
   const [draft, setDraft] = useState({});
   const [referenceImage, setReferenceImage] = useState(false);
@@ -172,12 +175,11 @@ export default function RoleSettings({ onClose }) {
       } finally { if (saveController.current === controller) saveController.current = null; }
     });
   };
-  return <section className="stage2-page ai-role-settings" aria-label="角色配置">
-    <div className="stage2-heading">
-      <div><span className="eyebrow">阅读助手</span><h1>角色配置</h1></div>
+  return <section className={embedded ? "ai-role-settings" : "stage2-page ai-role-settings"} aria-label="角色配置">
+    {!embedded && <div className="stage2-heading">
+      <h1>AI 角色</h1>
       <button type="button" className="button subtle" disabled={!!busy} onClick={onClose}>返回</button>
-    </div>
-    <p className="stage2-description">保存时自动验证所选模型，全部通过后统一生效。</p>
+    </div>}
     {error && <div className="stage2-error" role="alert">{error}
       <button type="button" className="text-button" disabled={!!busy}
         onClick={() => perform("reload", async () => { accept(await api("/ai/roles")); })}>重新读取配置</button>
@@ -195,7 +197,7 @@ export default function RoleSettings({ onClose }) {
           const showAdvanced = options.efforts.length > 0 || options.toggle === true || !!options.budget || hasReasoning;
           const unsupportedReasoning = reasoningError(selection, model);
           return <section className="ai-role-row" key={role.id} aria-label={`${role.name}角色`}>
-            <h2>{role.name}</h2>
+            <div className="ai-role-name"><h2>{role.name}</h2>{role.purpose && <small>{role.purpose}</small>}</div>
             <div className="ai-role-fields">
               <label className="stage2-field">提供方
                 <select aria-label={`${role.name}提供方`} value={selection.providerId || ""} disabled={!!busy}
@@ -214,7 +216,7 @@ export default function RoleSettings({ onClose }) {
                   {selection.model && !models.some((model) => model.id === selection.model) &&
                     <option value={selection.model}>{selection.model}（请刷新目录确认）</option>}
                   {models.map((model) => <option key={model.id} value={model.id}>
-                    {model.name && model.name !== model.id ? `${model.name} · ${model.id}` : model.id}
+                    {model.name || model.id}
                   </option>)}
                 </select>
               </label>
@@ -223,7 +225,6 @@ export default function RoleSettings({ onClose }) {
               disabled={!!busy || !provider?.connected} onClick={() => refreshModels(role)}>
               {busy === `models:${role.id}` ? "刷新中…" : "刷新"}
             </button>
-            {role.id === "chaptering" && <small className="ai-role-note">用于 PDF 的 AI 章节建议，输入为本地提取的文字。</small>}
             {role.id === "annotation" && <label className="ai-role-image-option" title="没有原图的文章仍按文字处理。">
               <input type="checkbox" checked={referenceImage} disabled={!!busy}
                 onChange={(event) => {
@@ -232,9 +233,6 @@ export default function RoleSettings({ onClose }) {
                   setNotice("");
                 }} />参考原图
             </label>}
-            {role.id === "annotation" && <small className="ai-role-note">
-              新导入正文先本地注音，再由此角色查错；未指定推理强度时，查错优先使用模型支持的快速模式。显式推理设置会照常执行。
-            </small>}
             {role.id === "chat" && <small className="ai-role-note">
               {selection.providerId === "openai" ? "使用网页工具" : "未联网"}
             </small>}

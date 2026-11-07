@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import api from "../api.mjs";
-import { imageTasksChangedEvent, notifyImageTasksChanged, newerTask, isImageTask, taskActions, taskCounts, taskDisplayName, taskDuration, taskImageUrl, taskItemState, taskManualAnnotationStep, taskSegmentationState, taskStateLabel, taskStatus, taskStepState, taskSummary, taskTypeLabel } from "../image-tasks.mjs";
+import { imageTasksChangedEvent, notifyImageTasksChanged, newerTask, isImageTask, taskActions, taskCounts, taskDisplayName, taskDuration, taskImageUrl, taskItemState, taskManualAnnotationStep, taskResult, taskRowAction, taskRowStatus, taskSegmentationState, taskStateLabel, taskStatus, taskStepState, taskTitle } from "../image-tasks.mjs";
+import { taskAttention } from "../../shared/task-attention.mjs";
 import Icon from "./Icon.jsx";
 import ErrorNotice from "./ErrorNotice.mjs";
 import { useConfirmation } from "./ConfirmDialog.jsx";
@@ -37,7 +38,6 @@ function useTaskPolling(path, interval = 2000) {
 function dateLabel(value) {
   return value ? new Date(value).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
 }
-const errorMessage=(value)=>typeof value === "string" ? value : value?.message || "";
 const stepNames={extract:"提取／OCR",correct:"正文校对",segment:"分句",annotate:"注音",chapters:"分章",parse:"本地解析"};
 function elapsedLabel(value) {
   if (!Number.isFinite(value)) return null;
@@ -50,84 +50,95 @@ function ExecutionTiming({execution}) {
   if (!queued && !elapsed && !retries) return null;
   return <p className="task-step-timing">{[queued && `排队 ${queued}`,elapsed && `执行 ${elapsed}`,retries].filter(Boolean).join(" · ")}</p>;
 }
-function BackgroundStep({step,index,type}) {
+function BackgroundStep({step,index}) {
   const display=taskStepState(step),title=step.title || stepNames[step.step] || step.step || `步骤 ${index+1}`;
   return <li data-task-step={step.id || step.step} data-status-kind={display.statusKind}><div>
-    <span className="task-item-number">步骤 {index+1}{step.page ? ` · PDF 第${step.page}页` : ""}</span><h2>{title}</h2>
+    <h3>{title}{step.page ? ` · PDF 第${step.page}页` : ""}</h3>
     <p className="task-item-status" role="status">{display.status}</p>
-    {step.progress?.total > 0 && <p className="task-note">{taskSummary({type,progress:step.progress})}</p>}
-    {step.message && <p className="task-note">{step.message}</p>}
-    {errorMessage(step.error) && <p className="task-item-error">{errorMessage(step.error)}</p>}
-    <ExecutionTiming execution={step.execution} />
-    {!!step.children?.length && <details className="task-step-children"><summary>查看子步骤（{step.children.length}）</summary><ol className="task-item-list task-step-list">{step.children.map((child,childIndex)=><BackgroundStep key={child.id || `${child.step}:${childIndex}`} step={child} index={childIndex} type={type} />)}</ol></details>}
+    {step.error && <ErrorNotice error={step.error} />}
+    {!!step.children?.length && <ol className="task-item-list task-step-list">{step.children.map((child,childIndex)=><BackgroundStep key={child.id || `${child.step}:${childIndex}`} step={child} index={childIndex} />)}</ol>}
   </div></li>;
 }
 const archivedImportBook = (task) => task.type === "import" && task.archived && task.resultKind === "book" ? task.bookId : null;
 
 function BackgroundTaskDetail({task,busy,error,onBack,onDocumentOpen,onImportOpen,onRetry,onDelete,reload}) {
-  const capabilities=taskActions(task),status=taskStatus(task),steps=task.steps || [];
+  const capabilities=taskActions(task),steps=task.steps || [];
   const archivedBookId=archivedImportBook(task);
   const bookId=archivedBookId || (!task.documentId && !(task.type === "import" && task.archived) ? task.bookId : null);
   const attentionSteps = task.type === "preparation" && task.documentId && !task.archived
     ? steps.filter(step => step.step === "correct" && ["requires_review", "timeout", "failed"].includes(step.status) && step.sourceId)
     : [];
-  const stoppedError=["failed","timeout","interrupted"].includes(status);
-  const message=task.message || (task.archived ? "任务已完成并归档，成功结果与处理记录会保留。" : stoppedError ? "任务已停止，成功步骤与原始资料已保留。重试只执行失败或超时的步骤。" : status === "requires_review" || status === "ready" ? "请核对结果后继续，成功步骤已保留。" : status === "draft" ? "原始资料已保存，可继续确认来源和导入范围。" : "可以离开此页面，后台会继续处理。不同章节独立推进。");
   return <section className="stage2-page image-tasks-page task-detail-page" aria-label="任务状态" aria-busy={busy}>
-    <div className="stage2-heading"><div><span className="eyebrow">{taskTypeLabel(task)}</span><h1>{taskDisplayName(task)}</h1></div><button className="button subtle" type="button" onClick={onBack}><Icon name="back" size={16} />任务列表</button></div>
-    {error && <div className="stage2-error" role="alert">{error}<button className="button subtle" onClick={reload}>重新同步</button></div>}
+    <div className="stage2-heading"><h1>{taskTitle(task)}</h1><button className="button subtle" type="button" onClick={onBack}><Icon name="back" size={16} />任务</button></div>
+    {error && <div className="stage2-error" role="alert">暂时无法同步任务<button className="button subtle" onClick={reload}>重新同步</button></div>}
     <div className="task-status-panel">
-      <span className={`task-state is-${status}`}>{taskStateLabel(task)}</span>
-      <p className="task-status-copy" role="status">{message}</p>
-      {errorMessage(task.error) && <p className="task-item-error" role="alert">{errorMessage(task.error)}</p>}
-      <div className="task-statistics"><span>{taskSummary(task)}</span>{taskDuration(task) && <span>历时 <strong>{taskDuration(task)}</strong></span>}</div>
-      <p className="task-note">历时可能包含排队、依赖等待和人工核对，执行耗时见各步骤。</p>
-      <ExecutionTiming execution={task.execution} />
+      <p className="task-status-copy" role="status">{taskRowStatus(task)}</p>
+      {task.error && <ErrorNotice error={task.error} />}
       <div className="task-actions">
         {attentionSteps.map(step => {
           const label = step.source?.label || step.title || "来源";
           return <button key={step.sourceId} className="button primary" type="button" disabled={busy}
             onClick={() => onDocumentOpen?.(task.documentId, { reviewSourceId: step.sourceId })}>
-            {step.status === "requires_review" ? `核对 ${label}` : `查看 ${label} 正文`}<Icon name="arrow" size={16} />
+            {step.status === "requires_review" ? `核对 ${label}` : `查看 ${label} 正文`}
           </button>;
         })}
-        {bookId && <button className="button primary" type="button" onClick={()=>onDocumentOpen?.(`book/${bookId}`)}>打开关联书籍<Icon name="arrow" size={16} /></button>}
-        {task.documentId && <button className={`button ${attentionSteps.length || archivedBookId ? "secondary" : "primary"}`} type="button" onClick={()=>onDocumentOpen?.(task.documentId)}>打开关联文章<Icon name="arrow" size={16} /></button>}
-        {task.type === "import" && task.importId && !task.archived && task.canOpenResult && <button className="button primary" type="button" disabled={busy} onClick={onImportOpen}>继续导入<Icon name="arrow" size={16} /></button>}
-        {capabilities.retry && <button className="button primary" type="button" disabled={busy} onClick={onRetry}>重试失败步骤</button>}
-        {capabilities.delete && <button className="button subtle task-delete" type="button" disabled={busy} onClick={onDelete}>删除任务</button>}
+        {bookId && <button className="button primary" type="button" onClick={()=>onDocumentOpen?.(`book/${bookId}`)}>打开书籍</button>}
+        {task.documentId && <button className={`button ${attentionSteps.length || archivedBookId ? "secondary" : "primary"}`} type="button" onClick={()=>onDocumentOpen?.(task.documentId)}>打开文章</button>}
+        {task.type === "import" && task.importId && !task.archived && task.canOpenResult && <button className="button primary" type="button" disabled={busy} onClick={onImportOpen}>继续</button>}
+        {capabilities.retry && <button className="button primary" type="button" disabled={busy} onClick={onRetry}>重试</button>}
+        {capabilities.delete && <button className="button subtle task-delete" type="button" disabled={busy} onClick={onDelete}>删除</button>}
       </div>
-      {["queued","running","dependency_wait","waiting"].includes(status) && <p className="task-note">任务排队或执行期间无法删除。出错并停止后，可重试失败步骤或删除任务记录。</p>}
-      {task.createdAt && <p className="task-timestamp">创建于 {dateLabel(task.createdAt)}{task.updatedAt ? ` · 更新于 ${dateLabel(task.updatedAt)}` : ""}</p>}
     </div>
-    <ol className="task-item-list task-step-list" aria-label="后台处理步骤">{steps.map((step,index)=><BackgroundStep key={step.id || `${step.sourceId || "step"}:${step.step}:${index}`} step={step} index={index} type={task.type} />)}</ol>
+    {!!steps.length && <details className="task-steps"><summary>处理步骤</summary>
+      <ol className="task-item-list task-step-list" aria-label="后台处理步骤">{steps.map((step,index)=><BackgroundStep key={step.id || `${step.sourceId || "step"}:${step.step}:${index}`} step={step} index={index} />)}</ol>
+    </details>}
   </section>;
 }
 
-export function TaskList({ onOpen, onNew, onDocumentOpen }) {
-  const [offset, setOffset] = useState(0), [scope, setScope] = useState("active"), [type,setType]=useState("");
-  const { data, error, loading, reload } = useTaskPolling(`/tasks?scope=${scope}&limit=20&offset=${offset}${type ? `&type=${type}` : ""}`, 5000);
+function TaskRow({ task, busy, onAct, onOpen }) {
+  const action = taskRowAction(task), status = taskRowStatus(task);
+  return <li className="task-row" data-task-id={task.id}>
+    <div className="task-row-copy">
+      <h3><button className="task-title-button" type="button" onClick={() => onOpen(task.id)}>{taskTitle(task)}</button></h3>
+      <p className={`task-row-status is-${taskAttention(task) || "done"}`}>{status}</p>
+    </div>
+    <button className={`button ${action.kind === "view" ? "subtle" : "secondary"}`} type="button" disabled={busy}
+      aria-label={`${action.label}：${taskTitle(task)}`} onClick={() => onAct(task, action.kind)}>{action.label}</button>
+  </li>;
+}
+
+// One list (§5.1): what needs the reader first, then what is still running.
+export function TaskList({ onOpen, onNew, onDocumentOpen, onContinue }) {
+  const [offset, setOffset] = useState(0), [scope, setScope] = useState("active");
+  const { data, error, loading, reload } = useTaskPolling(`/tasks?scope=${scope}&limit=20&offset=${offset}`, 5000);
+  const [busyId, setBusyId] = useState(null), [actionError, setActionError] = useState(null);
   const tasks = data?.tasks || [];
   useEffect(() => { if (data && offset > 0 && offset >= data.total) setOffset(Math.max(0, Math.ceil(data.total / 20) * 20 - 20)); }, [data, offset]);
-  return <section className="stage2-page image-tasks-page" aria-label="任务与导入草稿">
-    <div className="stage2-heading"><div><span className="eyebrow">随时接着读</span><h1>任务与导入草稿</h1></div><button className="button primary" type="button" onClick={onNew}><Icon name="plus" size={16} />导入资料</button></div>
-    <p className="stage2-description">在这里继续导入、查看正文处理进度，或重试失败的步骤。成功结果与原始资料会保留。</p>
-    <div className="task-tabs" role="tablist" aria-label="任务分类">{[["active", "当前任务"], ["archived", "已归档"]].map(([value, label]) => <button className="button subtle" role="tab" type="button" key={value} aria-selected={scope === value} onClick={() => { setScope(value); setOffset(0); }}>{label}</button>)}</div>
-    <label className="task-type-filter">任务类型<select aria-label="任务类型" value={type} onChange={(event)=>{setType(event.target.value);setOffset(0);}}><option value="">全部类型</option><option value="image">图片导入</option><option value="import">文件与文字导入</option><option value="preparation">正文准备</option></select></label>
-    {error && <div className="stage2-error" role="status">暂时无法同步任务：{error}<button className="button subtle" type="button" onClick={reload}>重新同步</button></div>}
+  const act = async (task, kind) => {
+    if (kind === "view") return onOpen(task.id);
+    if (kind === "continue") return task.type === "import" ? onContinue?.(task) : onOpen(task.id);
+    if (kind === "open") { const result = taskResult(task); return onDocumentOpen?.(result.bookId ? `book/${result.bookId}` : result.documentId); }
+    setBusyId(task.id); setActionError(null);
+    try {
+      await api(`/tasks/${encodeURIComponent(task.id)}/retry`, { method: "POST", body: JSON.stringify({ version: task.version }) });
+      notifyImageTasksChanged();
+    } catch (cause) { setActionError(cause); reload(); }
+    finally { setBusyId(null); }
+  };
+  const groups = scope === "archived" ? [["", tasks]]
+    : [["需要处理", tasks.filter((task) => taskAttention(task) === "attention")], ["进行中", tasks.filter((task) => taskAttention(task) !== "attention")]];
+  return <section className="stage2-page image-tasks-page" aria-label="任务">
+    <div className="stage2-heading"><h1>任务</h1><button className="button primary" type="button" onClick={onNew}><Icon name="plus" size={16} />添加</button></div>
+    <div className="task-tabs" role="tablist" aria-label="任务分类">{[["active", "当前"], ["archived", "已归档"]].map(([value, label]) => <button className="button subtle" role="tab" type="button" key={value} aria-selected={scope === value} onClick={() => { setScope(value); setOffset(0); }}>{label}</button>)}</div>
+    {error && <div className="stage2-error" role="status">暂时无法同步任务<button className="button subtle" type="button" onClick={reload}>重新同步</button></div>}
+    {actionError && <ErrorNotice error={actionError} />}
     {loading && !data && <p role="status">正在读取任务…</p>}
-    {!loading && !tasks.length && !error && <div className="task-empty"><Icon name="book" size={32} /><h2>{scope === "archived" ? "还没有归档任务" : "没有待处理的任务"}</h2><p>{scope === "archived" ? "完成的任务会自动归档，处理记录会保留。" : "从「添加」导入资料或打开尚未准备的章节后，可在这里查看进度。"}</p>{scope === "active" && <button className="button primary" onClick={onNew}>导入阅读资料</button>}</div>}
-    <div className="task-list">
-      {tasks.map((task) => { const segmentation = isImageTask(task) ? taskSegmentationState(task) : null; const bookId=archivedImportBook(task);const documentId=task.appliedDocumentId || (task.archived && task.canOpenResult ? task.documentId : null);return <article className="task-card" key={task.id} data-task-id={task.id}>
-        <div className="task-card-main"><span className="task-type">{taskTypeLabel(task)}</span><span className={`task-state is-${task.appliedDocumentId ? "saved" : taskStatus(task)}`}>{taskStateLabel(task)}</span><h2><button className="task-title-button" type="button" onClick={() => onOpen(task.id)}>{taskDisplayName(task)}</button></h2>
-          <p>{taskSummary(task)}</p>
-          {task.type === "import" && task.archived && !task.canOpenResult && task.message && <p className="task-note">{task.message}</p>}
-          {segmentation && <p data-task-phase="segment" data-status-kind={segmentation.statusKind}>{segmentation.status}</p>}
-          <small>{dateLabel(task.submittedAt || task.createdAt)}{task.state !== "draft" && taskDuration(task) ? ` · 历时 ${taskDuration(task)}` : ""}</small></div>
-        <button className="button subtle" type="button" onClick={() => bookId ? onDocumentOpen?.(`book/${bookId}`) : documentId ? onDocumentOpen?.(documentId) : onOpen(task.id)}>{bookId ? "打开书籍" : documentId ? "打开文章" : "查看任务"}<Icon name="arrow" size={16} /></button>
-      </article>; })}
-    </div>
-    {(data?.total > 20 || offset > 0) && <nav className="task-pagination" aria-label="任务分页"><button className="button subtle" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}>上一页</button><span>第 {Math.floor(offset / 20) + 1} 页 · 共 {data?.total ?? "…"} 个任务</span><button className="button subtle" disabled={!data || offset + 20 >= data.total} onClick={() => setOffset(offset + 20)}>下一页</button></nav>}
+    {!loading && !tasks.length && !error && <p className="task-empty">没有任务</p>}
+    {groups.filter(([, items]) => items.length).map(([label, items]) => <section className="task-group" key={label || "all"} aria-label={label || "已归档"}>
+      {label && <h2>{label}</h2>}
+      <ol className="task-rows">{items.map((task) => <TaskRow key={task.id} task={task} busy={busyId === task.id} onAct={act} onOpen={onOpen} />)}</ol>
+    </section>)}
+    {(data?.total > 20 || offset > 0) && <nav className="task-pagination" aria-label="任务分页"><button className="button subtle" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}>上一页</button><span>第 {Math.floor(offset / 20) + 1} 页</span><button className="button subtle" disabled={!data || offset + 20 >= data.total} onClick={() => setOffset(offset + 20)}>下一页</button></nav>}
   </section>;
 }
 

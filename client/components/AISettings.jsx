@@ -3,7 +3,7 @@ import api from "../api.mjs";
 import Icon from "./Icon.jsx";
 import APIBaseSettings from "./APIBaseSettings.jsx";
 
-export default function AISettings({ onClose, onChanged }) {
+export default function AISettings({ onClose, onChanged, embedded = false }) {
   const [status, setStatus] = useState(null);
   const [selectedProviderId, setSelectedProviderId] = useState("openai");
   const [busy, setBusy] = useState("loading");
@@ -124,24 +124,11 @@ export default function AISettings({ onClose, onChanged }) {
   );
 
   return (
-    <section className="stage2-page ai-settings" aria-label="AI 授权设置">
-      <div className="stage2-heading">
-        <div>
-          <span className="eyebrow">阅读助手</span>
-          <h1>AI 设置</h1>
-        </div>
-        <button
-          type="button"
-          className="button subtle"
-          disabled={!!busy}
-          onClick={onClose}
-        >
-          返回
-        </button>
-      </div>
-      <p className="stage2-description">
-        管理网站共享的 ChatGPT 授权和 API key。角色使用的提供方与模型在「角色配置」中统一保存。
-      </p>
+    <section className={embedded ? "ai-settings" : "stage2-page ai-settings"} aria-label="AI 授权设置">
+      {!embedded && <div className="stage2-heading">
+        <h1>AI 连接</h1>
+        <button type="button" className="button subtle" disabled={!!busy} onClick={onClose}>返回</button>
+      </div>}
       <label className="stage2-field account-picker">
         AI 提供方
         <select

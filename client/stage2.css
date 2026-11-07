@@ -931,3 +931,13 @@
   .error-log-row span { display: none; }
   .error-log-row .error-log-summary { display: block; grid-column: 1 / -1; }
 }
+/* §5.3: each role shows its name with a one-line purpose in the first column. */
+.ai-role-row { grid-template-columns: 104px minmax(0, 1fr) auto; }
+.ai-role-name { margin-top: 12px; min-width: 0; }
+.ai-role-name h2 { margin: 0; }
+.ai-role-name small { display: block; margin-top: 2px; color: #839175; font-size: 11px; line-height: 1.35; }
+@media (max-width: 760px) {
+  .ai-role-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .ai-role-name { margin-top: 0; }
+  .ai-role-name small { display: inline; margin-left: 8px; }
+}

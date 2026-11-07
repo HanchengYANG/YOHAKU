@@ -52,7 +52,7 @@ test("原生安装拒绝后重复事件与刷新都不再主动提示", async ({
   await expect(page.locator(".pwa-banner")).toHaveCount(0);
 });
 
-test("访客暂不选择平滑承接登录，退出后重新评估", async ({ page }) => {
+test("访客暂不后登录与退出都不再提示", async ({ page }) => {
   await ensureOwnerSession(page.request);
   await page.request.post("/api/session/logout", { data: {} });
   await page.goto("/");
@@ -70,7 +70,8 @@ test("访客暂不选择平滑承接登录，退出后重新评估", async ({ pa
   await page.request.post("/api/session/logout", { data: {} });
   await page.reload();
   await expect(page.locator(".account-gate")).toBeVisible();
-  await expect(iosHint(page)).toBeVisible();
+  // Phones are asked once per device (§5.4).
+  await expect(iosHint(page)).toHaveCount(0);
 });
 
 test("登录状态未加载时不闪出安装提示", async ({ page }) => {

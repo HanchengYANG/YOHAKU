@@ -99,3 +99,28 @@ test("超时与完成任务的耗时不会随轮询继续增长", () => {
   assert.equal(taskDuration(task,Date.parse("2026-11-04T12:00:00Z")),"3 分 0 秒");
   assert.equal(taskDuration({...task,status:"completed",completedAt:"2026-11-04T10:02:30Z"},Date.parse("2026-11-04T12:00:00Z")),"1 分 30 秒");
 });
+
+test("任务列表每行：自身标题、一句状态、一个主操作", () => {
+  const { taskTitle, taskRowStatus, taskRowAction } = presentation;
+  assert.equal(taskTitle({ title: "课本", createdAt: "2026-11-07T08:00:00Z", id: "abcdef123456" }), "课本");
+  assert.equal(taskTitle({ bookTitle: "读书笔记", title: "第一章" }), "读书笔记 · 第一章");
+  assert.equal(taskTitle({ items: [{ name: "a.png" }, { name: "b.png" }] }), "a.png · 2 张");
+  assert.equal(taskTitle({}), "未命名任务");
+
+  const importDraft = { type: "import", status: "draft", importId: "imp" };
+  assert.equal(taskRowStatus(importDraft), "导入未完成");
+  assert.deepEqual(taskRowAction(importDraft), { kind: "continue", label: "继续" });
+  const failed = { type: "preparation", status: "failed", canRetry: true };
+  assert.equal(taskRowStatus(failed), "出错了");
+  assert.deepEqual(taskRowAction(failed), { kind: "retry", label: "重试" });
+  assert.deepEqual(taskRowAction({ ...failed, canRetry: false }), { kind: "view", label: "查看" });
+  assert.equal(taskRowStatus({ type: "preparation", status: "requires_review" }), "需要核对");
+  assert.equal(taskRowStatus({ type: "preparation", status: "running", progress: { completed: 2, total: 5, unit: "page" } }), "正在处理 · 2 / 5 页");
+  assert.equal(taskRowStatus({ type: "import", status: "queued" }), "等待处理");
+  const done = { type: "import", status: "completed", archived: true, documentId: "doc", canOpenResult: true };
+  assert.equal(taskRowStatus(done), "已完成");
+  assert.equal(taskRowStatus({ ...done, canOpenResult: false, message: "导入结果已不在书架" }), "导入结果已不在书架");
+  assert.deepEqual(taskRowAction(done), { kind: "open", label: "打开" });
+  assert.deepEqual(taskRowAction({ type: "image", state: "draft" }), { kind: "continue", label: "继续" });
+  assert.equal(taskRowStatus({ type: "image", state: "draft" }), "上传未完成");
+});

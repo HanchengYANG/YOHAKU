@@ -23,7 +23,9 @@ async function fixture(page) {
       const source=state.sources?.find(item=>path===`/documents/article/sources/${encodeURIComponent(item.id)}`);
       return source ? send(source) : send({error:"找不到这个正文来源。"},404);
     }
-    if(path==="/tasks")return send({tasks:url.searchParams.get("type")==="image" ? [] : [state.task],total:1,counts:{active:0,archived:0}});
+    if(path==="/tasks"){const tasks=state.tasks || [state.task];return send({tasks:url.searchParams.get("type")==="image" ? [] : tasks,total:tasks.length,counts:{active:0,archived:0}});}
+    const extraRetry=state.tasks && path.match(/^\/tasks\/([^/]+)\/retry$/);
+    if(extraRetry && extraRetry[1]!=="prepare-14"){const task=state.tasks.find(item=>item.id===extraRetry[1]);Object.assign(task,{status:"queued",state:"queued",canRetry:false,version:task.version+1});return send(task);}
     if(path==="/tasks/prepare-14" && method==="GET")return send(state.task);
     if(path==="/tasks/prepare-14/retry"){
       if(body.version!==state.task.version)return send({error:"任务已更新"},409);
@@ -97,19 +99,31 @@ test("book navigation uses the known table of contents during refresh and reject
   }finally{gates.releaseKnown();gates.releaseUnknown();gates.releaseChapter();}
 });
 
-test("unified task entry stays visible with zero active tasks and filters task types", { tag: "@phone" },async({page},info)=>{
-  const state=await fixture(page);await page.goto("/#tasks");
-  await expect(page.getByRole("heading",{name:"任务与导入草稿",exact:true})).toBeVisible();
+test("the task list puts tasks that need the reader first with one action per row", { tag: "@phone" },async({page},info)=>{
+  const state=await fixture(page);
+  state.tasks=[state.task,
+    {id:"prepare-15",type:"preparation",title:"失败的文章",status:"failed",state:"failed",version:2,canRetry:true,canDelete:true,documentId:"doc",createdAt,updatedAt:createdAt,steps:[]},
+    {id:"imp-draft",type:"import",title:"未完成的导入",status:"draft",state:"draft",version:1,importId:"imp",createdAt,updatedAt:createdAt,steps:[]}];
+  await page.goto("/#tasks");
+  await expect(page.getByRole("heading",{name:"任务",exact:true})).toBeVisible();
   await openShelf(page);
-  await expect(page.getByRole("button",{name:"任务",exact:true})).toBeVisible();
-  if(info.project.name==="phone")await page.getByRole("button",{name:"任务",exact:true}).click();
-  await expect(page.getByRole("article").filter({hasText:"十四元気茶"})).toContainText("正文准备");
-  await page.getByLabel("任务类型",{exact:true}).selectOption("image");
-  await expect(page.getByRole("article").filter({hasText:"十四元気茶"})).toHaveCount(0);
-  expect(state.calls.some(call=>call.path==="/tasks" && call.search.includes("type=image"))).toBe(true);
+  await expect(page.getByRole("button",{name:/^任务/})).toBeVisible();
+  if(info.project.name==="phone")await page.getByRole("button",{name:/^任务/}).click();
+  const attention=page.getByRole("region",{name:"需要处理",exact:true}),working=page.getByRole("region",{name:"进行中",exact:true});
+  await expect(attention.getByRole("listitem")).toHaveCount(2);
+  await expect(working.getByRole("listitem")).toHaveCount(1);
+  expect(await page.evaluate(()=>{const [first,second]=[...document.querySelectorAll(".task-group")];return first.getAttribute("aria-label")+"→"+second.getAttribute("aria-label");})).toBe("需要处理→进行中");
+  await expect(working).toContainText("十四元気茶");await expect(working).not.toContainText("正文准备");
+  await expect(attention.locator('[data-task-id="prepare-15"]')).toContainText("出错了");
+  await expect(page.getByLabel("任务类型")).toHaveCount(0);
+  await page.screenshot({path:`artifacts/unified-tasks-list-${info.project.name}.png`,fullPage:true});
+  await page.getByRole("button",{name:"重试：失败的文章",exact:true}).click();
+  await expect.poll(()=>state.calls.filter(call=>call.path==="/tasks/prepare-15/retry").map(call=>call.body)).toEqual([{version:2}]);
   await page.getByRole("tab",{name:"已归档",exact:true}).click();
   await expect.poll(()=>state.calls.some(call=>call.search.includes("scope=archived"))).toBe(true);
-  await page.screenshot({path:`artifacts/unified-tasks-list-${info.project.name}.png`,fullPage:true});
+  await page.getByRole("tab",{name:"当前",exact:true}).click();
+  await page.getByRole("button",{name:"继续：未完成的导入",exact:true}).click();
+  await expect(page.getByRole("region",{name:"统一导入",exact:true})).toBeVisible();
 });
 
 for(const target of ["task","book","article"])test(`${target} deletion uses an accessible page dialog for cancel, Escape and keyboard confirmation`,async({page},info)=>{
@@ -120,7 +134,7 @@ for(const target of ["task","book","article"])test(`${target} deletion uses an a
   if(target==="task"){
     state.task={...state.task,status:"failed",state:"failed",canDelete:true};
     await page.goto("/#tasks/prepare-14");
-    trigger=page.getByRole("button",{name:"删除任务",exact:true});deletePath="/tasks/prepare-14";
+    trigger=page.getByRole("button",{name:"删除",exact:true});deletePath="/tasks/prepare-14";
     dialogName="删除任务";scopeText="文章、原始文件和原页预览会保留";confirmLabel="删除任务";
   }else if(target==="book"){
     state.book={id:"book",title:"待删除的测试书",revision:7,pages:[{id:"a",title:"第一篇",charCount:1,rubyCount:0},{id:"b",title:"第二篇",charCount:1,rubyCount:0}]};
@@ -172,13 +186,14 @@ test("preparation detail shows dependency and execution states without running d
   state.task.steps[0].execution.retryCount=1;
   await page.goto("/#tasks/prepare-14");
   const detail=page.getByRole("region",{name:"任务状态",exact:true});
+  await detail.getByText("处理步骤",{exact:true}).click();
   await expect(detail).toContainText("PDF 第105页");
   await expect(detail).toContainText("等待依赖");
-  await expect(detail.getByRole("button",{name:"删除任务",exact:true})).toHaveCount(0);
+  await expect(detail.getByRole("button",{name:"删除",exact:true})).toHaveCount(0);
   await expect(detail.getByRole("button",{name:/取消|停止任务/})).toHaveCount(0);
-  await expect(detail).toContainText("排队 1 秒");
-  await expect(detail).toContainText("执行 2 秒");
-  await expect(detail).toContainText("自动重试 1 次");
+  await expect(detail).not.toContainText("排队 1 秒");
+  await expect(detail).not.toContainText("执行 2 秒");
+  await expect(detail).not.toContainText("历时");
   await page.screenshot({path:`artifacts/unified-task-detail-${info.project.name}.png`,fullPage:true});
 });
 
@@ -207,7 +222,7 @@ for(const missing of [false,true])test(`preparation task review ${missing ? "rep
   const {state,target,previewUrl}=await pdfTaskSourceFixture(page,{missing});
   await page.goto("/#tasks/prepare-14");
   const detail=page.getByRole("region",{name:"任务状态",exact:true});
-  await expect(detail.locator(".task-state")).toHaveText("执行中");
+  await expect(detail.locator(".task-status-copy")).toHaveText(/^正在处理/);
   await expect(detail.getByRole("button",{name:"核对 PDF 第109页",exact:true})).toBeVisible();
   await expect(detail.getByRole("button",{name:"核对 PDF 第105页",exact:true})).toHaveCount(0);
   await detail.getByRole("button",{name:"核对 PDF 第110页",exact:true}).click();
@@ -266,39 +281,21 @@ for(const status of ["timeout","failed"])test(`preparation task can explicitly k
   expect(writes()).toEqual([]);
 });
 
-for(const type of ["import","preparation","image"])test(`${type} task duration is labeled as elapsed lifecycle time without changing recorded execution time`,async({page})=>{
-  const state=await fixture(page);
-  state.task={...state.task,type,status:"completed",state:type==="image"?"ready":"completed",archived:true,createdAt,updatedAt:"2026-11-04T11:00:00Z",
-    ...(type==="image"?{startedAt:createdAt,completedAt:"2026-11-04T10:00:03Z",appliedDocumentId:"doc",items:[{id:"photo",name:"原图",hasRecognition:true,hasAnnotation:true}],counts:{total:1,uploaded:1,completed:1}}:{}),
-    steps:[{id:"correct",title:"正文校对",status:"completed",execution:{queueMs:1200,elapsedMs:2000}}]};
-  const expected=type==="image"?"3 秒":"60 分 0 秒";
-  await page.goto("/#tasks");
-  const card=page.locator(`[data-task-id="${state.task.id}"]`);
-  await expect(card).toContainText(`历时 ${expected}`);
-  await page.goto("/#tasks/prepare-14");
-  const detail=page.getByRole("region",{name:"任务状态",exact:true});
-  await expect(detail.locator(".task-statistics")).toContainText(`历时 ${expected}`);
-  if(type!=="image"){
-    await expect(detail).toContainText("排队 1 秒");await expect(detail).toContainText("执行 2 秒");
-    await expect(detail).toContainText(/历时.*排队.*核对/);
-  }
-});
-
 test("timeout task retries only via server capability and latest version",async({page})=>{
   const state=await fixture(page);state.task={...state.task,status:"timeout",state:"timeout",canRetry:true,canDelete:true,error:"远端步骤执行超时，成功校对已保留。",steps:[{id:"correct",title:"正文校对",status:"completed"},{id:"segment",title:"分句",status:"timeout",error:"执行超过180秒"}]};
   await page.goto("/#tasks/prepare-14");
-  await expect(page.getByRole("button",{name:"删除任务",exact:true})).toBeVisible();
+  await expect(page.getByRole("button",{name:"删除",exact:true})).toBeVisible();
   await expect(page.getByRole("region",{name:"任务状态",exact:true})).toContainText("成功校对已保留");
-  await page.getByRole("button",{name:"重试失败步骤",exact:true}).click();
-  await expect(page.getByRole("button",{name:"重试失败步骤",exact:true})).toHaveCount(0);
+  await page.getByRole("button",{name:"重试",exact:true}).click();
+  await expect(page.getByRole("button",{name:"重试",exact:true})).toHaveCount(0);
   expect(state.calls.filter(call=>call.path.endsWith("/retry")).map(call=>call.body)).toEqual([{version:3}]);
-  await expect(page.getByRole("button",{name:"删除任务",exact:true})).toHaveCount(0);
+  await expect(page.getByRole("button",{name:"删除",exact:true})).toHaveCount(0);
 });
 
 test("file task continues the exact persisted PDF draft and chapter review",async({page})=>{
   const state=await fixture(page);state.task={...state.task,type:"import",title:"原始 PDF 草稿",documentId:null,importId:"imp",status:"requires_review",state:"requires_review",canOpenResult:true};
   await page.goto("/#tasks/prepare-14");
-  await page.getByRole("button",{name:"继续导入",exact:true}).click();
+  await page.getByRole("button",{name:"继续",exact:true}).click();
   await expect(page.getByRole("region",{name:"统一导入",exact:true})).toBeVisible();
   await expect(page.getByLabel("章节 1 标题",{exact:true})).toHaveValue("十四元気茶");
   await expect(page.getByLabel("作为书籍导入",{exact:true})).toBeChecked();
@@ -333,13 +330,12 @@ async function archivedImportFixture(page,resultKind) {
   });
   await page.goto("/#tasks");
   await page.getByRole("tab",{name:"已归档",exact:true}).click();
-  await page.getByLabel("任务类型",{exact:true}).selectOption("import");
   return {state,first,second,card:page.locator(`[data-task-id="${state.task.id}"]`)};
 }
 
 test("an archived whole-book import opens its directory from the card and task detail",async({page})=>{
   const {state,second,card}=await archivedImportFixture(page,"book");
-  await card.getByRole("button",{name:"打开书籍",exact:true}).click();
+  await card.getByRole("button",{name:/^打开：/}).click();
   await expect(page).toHaveURL(/#book\/book$/);
   await expect(page.getByRole("heading",{name:state.book.title,exact:true})).toBeVisible();
   expect(state.calls.some(call=>call.path==="/documents/article")).toBe(false);
@@ -352,9 +348,9 @@ test("an archived whole-book import opens its directory from the card and task d
 
   await page.goto("/#tasks/prepare-14");
   const detail=page.getByRole("region",{name:"任务状态",exact:true});
-  const bookButton=detail.getByRole("button",{name:"打开关联书籍",exact:true});
+  const bookButton=detail.getByRole("button",{name:"打开书籍",exact:true});
   await expect(bookButton).toHaveClass(/\bprimary\b/);
-  await expect(detail.getByRole("button",{name:"打开关联文章",exact:true})).toHaveClass(/\bsecondary\b/);
+  await expect(detail.getByRole("button",{name:"打开文章",exact:true})).toHaveClass(/\bsecondary\b/);
   await bookButton.click();
   await expect(page).toHaveURL(/#book\/book$/);
   await expect(chapters.getByRole("listitem")).toHaveCount(2);
@@ -362,14 +358,14 @@ test("an archived whole-book import opens its directory from the card and task d
 
 test("an archived article appended to a book still opens the imported article",async({page})=>{
   const {first,card}=await archivedImportFixture(page,"article");
-  await card.getByRole("button",{name:"打开文章",exact:true}).click();
+  await card.getByRole("button",{name:/^打开：/}).click();
   await expect(page).toHaveURL(/#article$/);
   await expect(page.getByRole("heading",{name:first.title,exact:true})).toBeVisible();
   await page.goto("/#tasks/prepare-14");
   const detail=page.getByRole("region",{name:"任务状态",exact:true});
-  const articleButton=detail.getByRole("button",{name:"打开关联文章",exact:true});
+  const articleButton=detail.getByRole("button",{name:"打开文章",exact:true});
   await expect(articleButton).toHaveClass(/\bprimary\b/);
-  await expect(detail.getByRole("button",{name:"打开关联书籍",exact:true})).toHaveCount(0);
+  await expect(detail.getByRole("button",{name:"打开书籍",exact:true})).toHaveCount(0);
   await articleButton.click();
   await expect(page).toHaveURL(/#article$/);
 });
@@ -377,13 +373,14 @@ test("an archived article appended to a book still opens the imported article",a
 test("a removed archived import result keeps its task record accessible",async({page})=>{
   const {state,card}=await archivedImportFixture(page,null);
   await expect(card).toContainText(removedImportMessage);
-  await expect(card.getByRole("button",{name:/打开书籍|打开文章/})).toHaveCount(0);
-  await card.getByRole("button",{name:"查看任务",exact:true}).click();
+  await expect(card.getByRole("button",{name:/^打开/})).toHaveCount(0);
+  await card.getByRole("button",{name:/^查看：/}).click();
   await expect(page).toHaveURL(/#tasks\/prepare-14$/);
   const detail=page.getByRole("region",{name:"任务状态",exact:true});
   await expect(detail.getByText(removedImportMessage,{exact:true})).toBeVisible();
+  await detail.getByText("处理步骤",{exact:true}).click();
   await expect(detail.getByRole("list",{name:"后台处理步骤",exact:true})).toContainText("确认导入");
-  await expect(detail.getByRole("button",{name:/打开关联书籍|打开关联文章|继续导入/})).toHaveCount(0);
+  await expect(detail.getByRole("button",{name:/^(打开书籍|打开文章|继续)$/})).toHaveCount(0);
   expect(state.calls.filter(call=>call.path==="/books/book"||call.path==="/documents/article")).toEqual([]);
 });
 
@@ -391,7 +388,7 @@ test("PDF task pages stay collapsed until opened and retain individual errors",a
   const state=await fixture(page);state.task.steps[0].children=[{id:"page105",title:"PDF 第105页",page:105,status:"completed"},{id:"page106",title:"PDF 第106页",page:106,status:"failed",error:"此页 OCR 失败，前一页已保留"}];
   await page.goto("/#tasks/prepare-14");
   await expect(page.getByText("此页 OCR 失败，前一页已保留",{exact:true})).not.toBeVisible();
-  await page.getByText("查看子步骤（2）",{exact:true}).click();
+  await page.getByText("处理步骤",{exact:true}).click();
   await expect(page.getByText("此页 OCR 失败，前一页已保留",{exact:true})).toBeVisible();
 });
 

@@ -462,7 +462,7 @@ test("账号菜单收纳管理员入口，错误记录从菜单打开", async ({
   await page.goto("/");
   await openAccountMenu(page);
   const menu = page.getByRole("region", { name: "当前网站账号", exact: true });
-  for (const name of ["AI 设置", "角色配置", "错误记录", "邀请朋友", "退出"])
+  for (const name of ["AI", "错误记录", "邀请朋友", "退出"])
     await expect(menu.getByRole("button", { name, exact: true })).toBeVisible();
   await page.screenshot({ path: `artifacts/step2-account-menu-${test.info().project.name}.png`, animations: "disabled" });
   // Focus leaving the menu and its button closes it.
@@ -473,6 +473,24 @@ test("账号菜单收纳管理员入口，错误记录从菜单打开", async ({
   await menu.getByRole("button", { name: "错误记录", exact: true }).click();
   await expect(page.getByRole("heading", { name: "错误记录", exact: true })).toBeVisible();
   await expect(menu.getByRole("button", { name: "退出", exact: true })).toHaveCount(0);
+});
+
+test("桌面不弹安装横幅，可从账号菜单安装为 App", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".app-shell")).toBeVisible();
+  await page.evaluate(() => {
+    const event = new Event("beforeinstallprompt", { cancelable: true });
+    event.prompt = async () => { window.__installPrompted = true; };
+    event.userChoice = Promise.resolve({ outcome: "accepted" });
+    window.dispatchEvent(event);
+  });
+  await expect(page.locator(".pwa-banner")).toHaveCount(0);
+  await openAccountMenu(page);
+  const menu = page.getByRole("region", { name: "当前网站账号", exact: true });
+  await menu.getByRole("button", { name: "安装为 App", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.__installPrompted === true)).toBe(true);
+  await openAccountMenu(page);
+  await expect(menu.getByRole("button", { name: "安装为 App", exact: true })).toHaveCount(0);
 });
 
 test("书籍页可继续阅读最近打开的文章，并从「书籍操作」菜单重命名和调整顺序", async ({ page }, info) => {

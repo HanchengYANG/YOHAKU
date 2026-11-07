@@ -11,8 +11,7 @@ import SourceCorrection from "./components/SourceCorrection.jsx";
 import UnifiedImport from "./components/UnifiedImport.jsx";
 import PhotoImport from "./components/PhotoImport.jsx";
 import Editor from "./components/Editor.jsx";
-import AISettings from "./components/AISettings.jsx";
-import RoleSettings from "./components/RoleSettings.jsx";
+import AIPage from "./components/AIPage.jsx";
 import ImageImport from "./components/ImageImport.jsx";
 import { TaskList, TaskDetail } from "./components/ImageTasks.jsx";
 import ErrorLog from "./components/ErrorLog.jsx";
@@ -146,6 +145,7 @@ function Workspace({ user, onLoggedOut }) {
   const [taskCounts, setTaskCounts] = useState({});
   const [importDraftId,setImportDraftId]=useState(null);
   const [photoImport, setPhotoImport] = useState(null);
+  const [aiTab, setAiTab] = useState("connection");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem("yohaku.sidebarCollapsed") === "1"; }
@@ -155,7 +155,7 @@ function Workspace({ user, onLoggedOut }) {
   const [fontSize, setFontSize] = useState(26);
   const [panel, setPanel] = useState(() =>
     user.isAdmin && new URLSearchParams(window.location.search).get("chatgpt") === "connected"
-      ? "settings"
+      ? "ai"
       : null,
   );
   const savedDetail = useRef(null);
@@ -191,7 +191,7 @@ function Workspace({ user, onLoggedOut }) {
   // Welcome shows shelf load failures itself; the banner would repeat them there.
   const showsWelcome = !activeId && !draft
     && !["newBook", "import", "image", "photo"].includes(panel)
-    && !(user.isAdmin && ["settings", "roles", "errors"].includes(panel))
+    && !(user.isAdmin && ["ai", "errors"].includes(panel))
     && !(panel === "correction" && currentReadingDocument);
   const rememberReadingPosition = () => {
     if (!window.matchMedia("(min-width: 761px)").matches) return;
@@ -443,8 +443,10 @@ function Workspace({ user, onLoggedOut }) {
     }
   };
   // Returns whether the panel opened (the reader may keep unsaved changes).
-  const openPanel = (name, { handover = false } = {}) => {
-    if (["settings", "roles", "errors"].includes(name) && !user.isAdmin) return false;
+  const openPanel = (requested, { handover = false } = {}) => {
+    // "settings" and "roles" still arrive from error notices ("去 AI 设置").
+    const name = ["settings", "roles"].includes(requested) ? "ai" : requested;
+    if (["ai", "errors"].includes(name) && !user.isAdmin) return false;
     if (!handover && !mayLeave()) return false;
     if (name === "chat" && panel !== "chat") rememberReadingPosition();
     importRequest.current++;
@@ -455,6 +457,7 @@ function Workspace({ user, onLoggedOut }) {
       setImportDraftId(null);
     }
     setDraft(null);
+    if (name === "ai") setAiTab(requested === "roles" ? "roles" : "connection");
     setPanel(name);
     setDirty(false);
     setError("");
@@ -866,10 +869,8 @@ function Workspace({ user, onLoggedOut }) {
             onCancel={closePanel}
             onDirty={setDirty}
           />
-        ) : panel === "settings" && user.isAdmin ? (
-          <AISettings onClose={closePanel} />
-        ) : panel === "roles" && user.isAdmin ? (
-          <RoleSettings onClose={closePanel} />
+        ) : panel === "ai" && user.isAdmin ? (
+          <AIPage key={aiTab} initialTab={aiTab} onClose={closePanel} />
         ) : panel === "errors" && user.isAdmin ? (
           <ErrorLog onClose={closePanel} />
         ) : panel === "photo" && photoImport ? (
@@ -915,7 +916,7 @@ function Workspace({ user, onLoggedOut }) {
           />
         ) : activeId === "tasks" ? (
           <TaskList onOpen={(task) => openDocument(`tasks/${typeof task === "string" ? task : task.id}`)}
-            onNew={() => openUnifiedImport()} onDocumentOpen={openDocument} />
+            onNew={() => openUnifiedImport()} onDocumentOpen={openDocument} onContinue={resumeImportDraft} />
         ) : activeId.startsWith("tasks/") ? (
           <TaskDetail key={activeId} taskId={activeId.slice(6)}
             onOpenDraft={resumeTaskDraft} onImportOpen={resumeImportDraft} onReady={imageReady}

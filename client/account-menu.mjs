@@ -1,15 +1,14 @@
 // Items of the account menu at the bottom of the sidebar, in display order.
-// AI 设置 and 角色配置 stay separate until step 5 merges them into one AI page.
 export const isAdminUser = (user) => user?.role === "admin" || user?.isAdmin === true;
 
-export function accountMenuItems(user) {
+export function accountMenuItems(user, { installable = false } = {}) {
   return [
     ...(isAdminUser(user) ? [
-      { id: "settings", label: "AI 设置", panel: "settings" },
-      { id: "roles", label: "角色配置", panel: "roles" },
+      { id: "ai", label: "AI", panel: "ai" },
       { id: "errors", label: "错误记录", panel: "errors" },
       { id: "invite", label: "邀请朋友" },
     ] : []),
+    ...(installable ? [{ id: "install", label: "安装为 App" }] : []),
     { id: "logout", label: "退出" },
   ];
 }

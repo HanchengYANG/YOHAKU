@@ -91,10 +91,8 @@ async function openSettings(page) {
   )
     return;
   await openAccountMenu(page);
-  await page.getByRole("button", { name: "AI 设置", exact: true }).click();
-  await expect(
-    page.getByRole("heading", { name: "AI 设置", exact: true }),
-  ).toBeVisible();
+  await page.getByRole("button", { name: "AI", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "连接", exact: true })).toHaveAttribute("aria-selected", "true");
 }
 
 async function enableTestAccount(page) {
@@ -299,7 +297,7 @@ test(accountFlowTitle, async ({ page, playwright, baseURL }, info) => {
     await expect(menu.getByText(username, { exact: true })).toBeVisible();
     await openAccountMenu(page);
     await expect(menu.getByRole("button", { name: "邀请朋友", exact: true })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "AI 设置", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "AI", exact: true })).toHaveCount(0);
     expect((await page.request.post("/api/ai/login", { data: {} })).status()).toBe(403);
     const aiStatus = await page.request.get("/api/ai/status");
     expect((await aiStatus.json()).canManageAI).toBe(false);

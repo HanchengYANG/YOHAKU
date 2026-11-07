@@ -76,3 +76,19 @@
 .task-delete { color:#8b5743; margin-left:auto; }
 .task-detail-page .stage2-heading h1 { overflow-wrap:anywhere; font-size:25px; line-height:1.5; }
 @media(max-width:760px) { .task-preparation-actions { justify-content:flex-end; gap:8px; } }
+
+/* Task list (§5.1): grouped rows with one action each. */
+.task-group { margin-top: 22px; }
+.task-group h2 { margin: 0 0 8px; font-size: 14px; font-weight: 600; color: var(--muted); }
+.task-rows { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.task-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); }
+.task-row-copy { min-width: 0; }
+.task-row h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+.task-row h3 .task-title-button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-row-status { margin: 0; font-size: 13px; color: var(--muted); }
+.task-row-status.is-attention { color: var(--rust-dark); }
+.task-row > .button { flex-shrink: 0; }
+.task-empty { margin: 48px 0; text-align: center; color: var(--muted); }
+.task-steps { margin-top: 20px; }
+.task-steps > summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+.task-step-list h3 { margin: 0 0 4px; font-size: 14px; }
