@@ -18,11 +18,20 @@ export default async function api(path, options) {
   return readApiResult(response);
 }
 
+// A proxy error page (not JSON) still says why it failed, with the HTTP code.
+export function unreadableResponseText(status) {
+  const reason = status === 413 ? "文件太大，服务器拒绝接收"
+    : [502, 503].includes(status) ? "服务器没有响应，可能正在重启，请稍后重试"
+      : status === 504 ? "服务器处理超时，请稍后重试"
+        : status >= 500 ? "服务器出错，请稍后重试" : "服务器返回了无法识别的结果";
+  return `${reason}（HTTP ${status}）。`;
+}
+
 export async function readApiResult(response) {
   if (response.status === 204) return null;
   const result = await response
     .json()
-    .catch(() => ({ error: "服务没有返回有效结果，请稍后重试。" }));
+    .catch(() => ({ error: unreadableResponseText(response.status) }));
   if (result.code === "WEBSITE_AUTH_REQUIRED")
     globalThis.window?.dispatchEvent(new Event("yohaku:session-expired"));
   if (!response.ok) throw Object.assign(new Error(result.error || "操作未成功，请重试。"), {

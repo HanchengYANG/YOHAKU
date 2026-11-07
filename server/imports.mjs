@@ -114,6 +114,8 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
     finally{await rendered.cleanup();}
   });
   const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:50*1024*1024,files:100,fields:4,fieldSize:200000}});
+  // The shared responder speaks of the 12 MB photo limit; imports allow 50 MB per file.
+  const receiveFiles=(req,res,next)=>upload.array('files',100)(req,res,error=>next(error?.code==='LIMIT_FILE_SIZE'?fail(413,'单个文件最大 50 MB，请换一个较小的文件。'):error));
   function get(userId,id) {
     const row=database.prepare('SELECT * FROM import_drafts WHERE id=? AND user_id=?').get(id,userId);
     if(!row)throw fail(404,'找不到这次导入。');
@@ -211,7 +213,7 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
     }catch(error){await rm(filePath,{force:true});throw error;}
   }
   app.post('/api/imports', (req,res,next)=> {
-    if(req.is('multipart/form-data'))upload.array('files',100)(req,res,next);else next();
+    if(req.is('multipart/form-data'))receiveFiles(req,res,next);else next();
   },async(req,res)=>{
     const files=req.files||[];
     if(files.length && typeof req.body?.text==='string' && req.body.text.trim())throw fail(400,'文件和粘贴文字请分别导入，不支持混合类型。');
@@ -252,7 +254,7 @@ export function attachImportRoutes({app,database,storageDir,ai,sources,books,cre
     return draft;
   }
   const photoFile=(draft,fileId)=>{const file=draft.files.find(item=>item.id===fileId);if(!file)throw fail(404,'找不到这张照片。');return file;};
-  app.post('/api/imports/:id/files',(req,res,next)=>upload.array('files',100)(req,res,next),async(req,res)=>{
+  app.post('/api/imports/:id/files',receiveFiles,async(req,res)=>{
     const files=req.files||[];
     editablePhotos(req.user.id,req.params.id);
     if(!files.length)throw fail(400,'请先选择照片。');

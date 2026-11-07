@@ -32,6 +32,8 @@ test("部署模板使用实例中的路径、端口与来源，运行环境不�
   assert.match(nginx, /default_type application\/x-x509-ca-cert;/);
   assert.match(nginx, /add_header Content-Disposition \$yohaku_certificate_disposition;/);
   assert.match(nginx, /limit_except GET \{ deny all; \}/);
+  // Imports accept up to 200 MB in one request; the proxy must not refuse them first.
+  assert.ok(Number(nginx.match(/client_max_body_size (\d+)m;/)?.[1]) > 200, "proxy body limit is above the 200 MB import limit");
   const service = run(config, 'render_deploy_template "$1/deploy/yohaku.service"');
   assert.ok(service.includes(`WorkingDirectory=${project}`));
   assert.match(service, /EnvironmentFile=\/etc\/yohaku\/runtime.env/);

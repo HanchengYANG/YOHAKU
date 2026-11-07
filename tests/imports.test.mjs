@@ -544,3 +544,11 @@ test('confirming photos starts preparing the first page; other imports wait for 
   const saved=await f.request(`/api/imports/${draft.id}/confirm`,'POST',{type:'photo',title:'照片'});
   assert.deepEqual(f.preparations,[{userId:'one',id:saved.data.firstDocumentId,mode:'reading',index:0}]);
 });
+
+test('a file over the import limit is refused with the file limit, not the photo limit',async t=>{
+  const f=await fixture(t,{errorLog:createErrorLog(new DatabaseSync(':memory:'),{log:()=>{}})}),form=new FormData();
+  form.append('files',new Blob([new Uint8Array(50*1024*1024+1)],{type:'application/pdf'}),'big.pdf');
+  const result=await f.request('/api/imports','POST',form);
+  assert.equal(result.status,413);
+  assert.match(result.data.error,/50 MB/);
+});
