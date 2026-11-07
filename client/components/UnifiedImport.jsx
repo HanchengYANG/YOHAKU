@@ -9,6 +9,8 @@ const typeNames = { photo:"照片", screenshot:"截图", scan_pdf:"扫描 PDF", 
 const draftReference = ({createdAt,taskId}) => taskDisplayName({createdAt,id:taskId});
 const isImageType = (type) => type === "photo" || type === "screenshot";
 const isImageFile = (file) => /^image\/(?:png|jpeg|webp)$/i.test(file.type) || /\.(?:png|jpe?g|webp)$/i.test(file.name);
+const chapterStatusText = (status) => ["queued","extracting","proposing"].includes(status) ? "正在分章…"
+  : status === "done" ? "分章完成，待确认" : ["failed","timeout"].includes(status) ? "分章失败" : "待确认";
 const defaultDraftType = (draft) => draft.chapterProcessing?.type ||
   (draft.allowedTypes?.includes(draft.suggestedType) ? draft.suggestedType : draft.detectedType);
 function ChapterPagePreview({ importId, file, chapter, nextChapter, index, totalPages }) {
@@ -20,9 +22,8 @@ function ChapterPagePreview({ importId, file, chapter, nextChapter, index, total
   useEffect(() => { setImageState("loading"); }, [currentPage, expanded, attempt]);
   const url = `/api/imports/${encodeURIComponent(importId)}/files/${encodeURIComponent(file.id)}/pages/${currentPage}`;
   return <details className="chapter-page-review" onToggle={(event) => setExpanded(event.currentTarget.open)}>
-    <summary><span>核对原页</span><small>PDF 第 {chapter.startPage}–{chapter.endPage} 页</small></summary>
+    <summary>核对原页</summary>
     {expanded && <section aria-label={`章节 ${index + 1} 原页核对`}>
-      <p>对照原页后，再勾选「已核对章节边界」。</p>
       <div className="chapter-preview-controls">
         <button type="button" className="button subtle" onClick={() => setPage(chapter.startPage)}>本章首页</button>
         <button type="button" className="button subtle" onClick={() => setPage(chapter.endPage)}>本章尾页</button>
@@ -60,7 +61,6 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, onPhotos,
   const dirty = () => onDirty?.(true);
   const processing = draft?.chapterProcessing;
   const chapterRunning = ["queued","extracting","proposing"].includes(processing?.status);
-  const chapterFailed = ["failed","timeout"].includes(processing?.status) || !!draft?.chapterError;
   const structureLocked = busy || chapterRunning;
   const inIncludedChapter = ({page}) => chapters.some(({excluded,startPage,endPage}) => !excluded && page >= startPage && page <= endPage);
   const includedLineSuggestions = exclusions.filter(inIncludedChapter);
@@ -232,21 +232,18 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, onPhotos,
   };
   const updateChapter = (index, patch) => { setChapters((current) => current.map((item,i) => i === index ? {...item,...patch} : item)); dirty(); };
   const editChapterStructure = (next) => { if (next !== chapters) {setChapters(next);dirty();} };
-  const currentDraftReference = draft && draftReference(draft);
+  const addChapter = () => editChapterStructure([...chapters,{id:crypto.randomUUID(),title:`章节 ${chapters.length + 1}`,startPage:1,endPage:1,excluded:false,needsReview:true}]);
   return <section className="unified-import editor-page" aria-label="统一导入">
     <div className="source-heading"><h1>添加</h1>
       <button className="button subtle" disabled={busy} onClick={onCancel}>返回</button></div>
-    {!draft && <p>拖入或选择照片、PDF、EPUB、文本文件，也可以粘贴文字。</p>}
     {(error || processing?.error || draft?.chapterError) && <ErrorNotice error={error || processing?.error || draft.chapterError} />}
     {restoring ? <p role="status">正在恢复导入草稿…</p> : !draft ? <>
       {!!availableDrafts.length && <section aria-label="继续未完成的导入"><h2>继续未完成的导入</h2>
         {availableDrafts.map((item) => {
           const draftTitle = item.title || "未命名资料", reference = draftReference(item);
           return <div key={item.id} className="source-chapter"><div style={{minWidth:0,overflowWrap:"anywhere"}}><strong>{draftTitle}</strong>
-            {reference && <div className="source-scope-note">创建于 {reference}</div>}
-            <p>{item.chapterProcessing?.status === "queued" ? "资源排队中，等待开始提取和分章。" : item.chapterProcessing?.status === "extracting" ? `${(item.chapterProcessing.type || item.detectedType) === "scan_pdf" ? "全书本地 OCR" : "全书文字提取"}：${item.chapterProcessing.completedPages ?? 0} / ${item.chapterProcessing.totalPages || "待确定"} 页`
-              : item.chapterProcessing?.status === "proposing" ? `正在由 AI 分章 · 已提取 ${item.chapterProcessing.completedPages ?? 0} / ${item.chapterProcessing.totalPages || "待确定"} 页`
-                : item.chapterProcessing?.status === "done" ? "分章已完成，等待确认章节与排除内容。" : ["failed","timeout"].includes(item.chapterProcessing?.status) ? "分章未完成，可继续重试或手工编辑。" : "原始资料已保存，等待确认导入。"}</p></div>
+            {reference && availableDrafts.some((other) => other !== item && (other.title || "未命名资料") === draftTitle) && <div className="source-scope-note">{reference}</div>}
+            <p className="source-scope-note">{chapterStatusText(item.chapterProcessing?.status)}</p></div>
             <button className="button secondary" type="button" disabled={busy} aria-label={[`继续导入：${draftTitle}`,reference].filter(Boolean).join(" · ")} onClick={() => resumeDraft(item.id)}>继续导入</button>
           </div>;
         })}
@@ -261,11 +258,10 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, onPhotos,
           const selected = [...event.clipboardData.files];
           if (selected.length) {event.preventDefault();selectFiles(selected,true);}
         }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => {event.preventDefault();selectFiles([...event.dataTransfer.files]);}}>
-          <div className="source-field"><span>拖到这里，或</span><div><button type="button" className="button secondary" disabled={busy} onClick={() => fileInput.current?.click()}>选择文件</button></div></div>
+          <button type="button" className="button secondary" disabled={busy} onClick={() => fileInput.current?.click()}>选择文件</button>
           <input ref={fileInput} hidden aria-label="选择来源文件" type="file" disabled={busy} multiple
             accept="image/png,image/jpeg,image/webp,application/pdf,application/epub+zip,text/plain,.txt,.epub,.pdf"
             onChange={(e) => {const selected = [...e.currentTarget.files];e.currentTarget.value = "";selectFiles(selected);}} />
-          <p>一次导入同一类型的文件。</p>
           {files.length > 0 && <ol className="source-file-list" aria-label="已选文件顺序">
             {files.map(({id,file},index) => <li key={id}><div className="source-file-row">
               <span className="source-file-name">{file.name}</span>
@@ -281,32 +277,34 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, onPhotos,
         </div>}
       <button className="button primary" disabled={busy || (mode === "text" ? !text.trim() : !files.length)} onClick={stage}>{busy ? "正在上传…" : "继续"}</button>
     </> : <>
-      {currentDraftReference && <div className="source-scope-note">当前草稿 · {currentDraftReference}</div>}
       <div className="source-import-confirm"><label className="source-field">标题<input required value={title} disabled={structureLocked} maxLength={160} onChange={(e) => {setTitle(e.target.value);dirty();}} /></label>
         {(draft.allowedTypes || []).length > 1 && <label className="source-field">文件类型<select aria-label="确认来源类型" value={type} disabled={structureLocked} onChange={(e) => {setType(e.target.value);setChapters([]);setExclusions([]);if(["photo","screenshot"].includes(e.target.value))setAsBook(false);dirty();}}>
-          {draft.allowedTypes.map((value) => <option key={value} value={value}>{typeNames[value] || value}</option>)}</select></label>}
+          {draft.allowedTypes.map((value) => <option key={value} value={value}>{typeNames[value] || value}</option>)}</select>
+          <small className="source-scope-note">能直接选中文字的选「文字 PDF」</small></label>}
         {!initialBookId && !initialTargetId && !["photo","screenshot"].includes(type) && <label className="source-checkbox"><input type="checkbox" checked={asBook} disabled={structureLocked} onChange={(e) => {setAsBook(e.target.checked);dirty();}} />作为书籍导入</label>}
       </div>
-      {(draft.allowedTypes || []).length > 1 && <p>扫描件选「扫描 PDF」，能直接选中文字的选「文字 PDF」。</p>}
       {asBook && type.includes("pdf") && <div className="source-chapters">
         <h2>章节</h2>
-        {draft.files?.[0] && <a className="text-button" target="_blank" rel="noreferrer" href={`/api/imports/${draft.id}/files/${draft.files[0].id}/raw`}>查看原 PDF</a>}
-        {processing && <section aria-label="PDF 分章进度" aria-live="polite" aria-busy={chapterRunning}>
-          <p>{type === "scan_pdf" ? "全书本地 OCR" : "全书文字提取"}：{processing.completedPages ?? 0} / {processing.totalPages || "待确定"} 页</p>
-          {processing.status === "extracting" && <progress aria-label="全书文字提取页数" value={processing.completedPages || 0} max={Math.max(1,processing.totalPages || 1)} />}
-          <p>{({queued:"排队中",extracting:"正在提取文字",proposing:"AI 正在分章",failed:"分章未完成",timeout:"分章超时",done:"请确认章节"})[processing.status]}</p>
-          {chapterRunning && <p>可以离开此页，会在后台继续。</p>}
-        </section>}
-        {chapterFailed && !chapters.length && <p>可重试，或手动添加章节。</p>}
-        <button type="button" className="button secondary" disabled={structureLocked} onClick={propose}>{chapterRunning ? "正在分章…" : busy ? "正在提议章节…" : chapters.length ? "重新提议章节" : "AI 提议章节"}</button>
-        {chapters.map((chapter,index) => <div key={chapter.id || index} className={`source-chapter ${chapter.excluded ? "excluded" : ""}`}>
-          <label className="source-checkbox"><input type="checkbox" checked={!chapter.excluded} disabled={structureLocked} onChange={(e) => updateChapter(index,{excluded:!e.target.checked})} />纳入正文</label>
-          <input aria-label={`章节 ${index + 1} 标题`} value={chapter.title} disabled={structureLocked} maxLength={160} onChange={(e) => updateChapter(index,{title:e.target.value})} />
-          <label>PDF 页 <input aria-label={`章节 ${index + 1} 起始页`} type="number" min="1" value={chapter.startPage} disabled={structureLocked} onChange={(e) => updateChapter(index,{startPage:Number(e.target.value)})} /></label>
-          <label>至 <input aria-label={`章节 ${index + 1} 结束页`} type="number" min={chapter.startPage} value={chapter.endPage} disabled={structureLocked} onChange={(e) => updateChapter(index,{endPage:Number(e.target.value)})} /></label>
-          <label className="source-checkbox"><input type="checkbox" checked={!chapter.needsReview} disabled={structureLocked} onChange={(e) => updateChapter(index,{needsReview:!e.target.checked})} />已核对章节边界</label>
-          {chapter.needsReview && <span className="source-status">边界待核对</span>}
-          <div className="source-chapter-actions">
+        {chapterRunning ? <section className="chapter-progress" aria-label="PDF 分章进度" aria-live="polite" aria-busy="true">
+          <p>正在分章…</p>
+          <progress aria-label="分章进度" {...(processing.status === "extracting" && processing.totalPages ? {value:processing.completedPages || 0,max:processing.totalPages} : {})} />
+          <small className="source-scope-note">可离开此页，后台继续</small>
+        </section> : <div className="chapter-toolbar">
+          <button type="button" className="button secondary" disabled={structureLocked} onClick={propose}>{busy ? "正在提议章节…" : chapters.length ? "重新提议章节" : "AI 提议章节"}</button>
+          <button type="button" className="button subtle" disabled={structureLocked} onClick={addChapter}>添加章节</button>
+          {draft.files?.[0] && <a className="button subtle" target="_blank" rel="noreferrer" href={`/api/imports/${draft.id}/files/${draft.files[0].id}/raw`}>原 PDF</a>}
+        </div>}
+        {chapters.map((chapter,index) => <div key={chapter.id || index} className={`source-chapter ${chapter.excluded ? "excluded" : ""} ${chapter.needsReview ? "needs-review" : ""}`}>
+          <div className="chapter-row">
+            <input type="checkbox" aria-label="纳入正文" title="纳入正文" checked={!chapter.excluded} disabled={structureLocked} onChange={(e) => updateChapter(index,{excluded:!e.target.checked})} />
+            <input className="chapter-title" aria-label={`章节 ${index + 1} 标题`} value={chapter.title} disabled={structureLocked} maxLength={160} onChange={(e) => updateChapter(index,{title:e.target.value})} />
+          </div>
+          <div className="chapter-row">
+            <span className="chapter-pages">页 <input aria-label={`章节 ${index + 1} 起始页`} type="number" min="1" value={chapter.startPage} disabled={structureLocked} onChange={(e) => updateChapter(index,{startPage:Number(e.target.value)})} />
+              – <input aria-label={`章节 ${index + 1} 结束页`} type="number" min={chapter.startPage} value={chapter.endPage} disabled={structureLocked} onChange={(e) => updateChapter(index,{endPage:Number(e.target.value)})} /></span>
+            <label className="source-checkbox"><input type="checkbox" aria-label="已核对章节边界" checked={!chapter.needsReview} disabled={structureLocked} onChange={(e) => updateChapter(index,{needsReview:!e.target.checked})} />已核对</label>
+          </div>
+          <div className="chapter-tail"><div className="source-chapter-actions">
             <button type="button" className="text-button" disabled={structureLocked || index === 0} onClick={() => editChapterStructure(moveChapter(chapters,index,-1))}>上移</button>
             <button type="button" className="text-button" disabled={structureLocked || index === chapters.length - 1} onClick={() => editChapterStructure(moveChapter(chapters,index,1))}>下移</button>
             <button type="button" className="text-button" disabled={structureLocked || index === chapters.length - 1} onClick={() => editChapterStructure(mergeChapter(chapters,index))}>与下一章合并</button>
@@ -317,20 +315,19 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, onPhotos,
           </div>
           {draft.files?.[0] && <ChapterPagePreview importId={draft.id} file={draft.files[0]} chapter={chapter}
             nextChapter={chapters[index + 1]} index={index} totalPages={draft.files[0].info?.pageCount || processing?.totalPages || Math.max(...chapters.map((item) => item.endPage))} />}
-        </div>)}
-        <button type="button" className="text-button" disabled={structureLocked} onClick={() => editChapterStructure([...chapters,{id:crypto.randomUUID(),title:`章节 ${chapters.length + 1}`,startPage:1,endPage:1,excluded:false,needsReview:true}])}>添加章节</button>
-        {!!exclusions.length && <section aria-label="建议排除的内容"><h3>建议排除的内容</h3><p>以下全部建议均可修改。取消勾选可将对应内容保留在正文中；原始文件和{type === "scan_pdf" ? "原始 OCR 结果" : "原始文字提取结果"}完整保留。</p>
+        </div></div>)}
+        {!!exclusions.length && <details className="exclusion-list" aria-label="建议排除的内容"><summary>建议排除（{exclusions.length}）</summary><p className="source-scope-note">取消勾选即保留在正文中。</p>
           {!!includedLineSuggestions.length && <div className="source-status-row">
             <button type="button" className="button secondary" disabled={structureLocked || !selectedLineExclusions} onClick={() => {
               setExclusions((current) => current.map((item) => item.excluded !== false && inIncludedChapter(item) ? {...item,excluded:false} : item));dirty();
             }}>保留正文中的全部建议行</button>
             <span role="status">正文范围内已选 {selectedLineExclusions} 处行排除</span>
           </div>}
-          {exclusions.map((item,index) => <div key={item.id || `${item.page}:${item.startLine}:${item.endLine}:${index}`} className="source-chapter">
-            <label className="source-checkbox"><input type="checkbox" checked={item.excluded !== false} disabled={structureLocked} onChange={(event) => {setExclusions((current) => current.map((entry,i) => i === index ? {...entry,excluded:event.target.checked} : entry));dirty();}} />排除 PDF 第 {item.page} 页，第 {item.startLine}–{item.endLine} 行</label>
-            <p>{item.reason}</p>{item.bodyLike && <p className="source-scope-note">这几行像是正文，默认保留；核对原页确认是非正文后再勾选排除。</p>}{item.text && <pre className="source-original-text">{item.text}</pre>}
+          {exclusions.map((item,index) => <div key={item.id || `${item.page}:${item.startLine}:${item.endLine}:${index}`} className="exclusion-item">
+            <label className="source-checkbox"><input type="checkbox" aria-label={`排除 PDF 第 ${item.page} 页，第 ${item.startLine}–${item.endLine} 行`} checked={item.excluded !== false} disabled={structureLocked} onChange={(event) => {setExclusions((current) => current.map((entry,i) => i === index ? {...entry,excluded:event.target.checked} : entry));dirty();}} />第 {item.page} 页 · {item.reason}</label>
+            {item.bodyLike && <p className="source-scope-note">像是正文，默认保留</p>}{item.text && <pre className="source-original-text">{item.text}</pre>}
           </div>)}
-        </section>}
+        </details>}
       </div>}
       <div className="source-actions"><button className="button subtle" disabled={busy} onClick={chooseAgain}>重新选择</button>
         <button className="button primary" disabled={structureLocked || !title.trim() || (asBook && type.includes("pdf") && !chapters.some((chapter) => !chapter.excluded))} onClick={confirm}>{busy ? "正在创建资料…" : "确认导入"}</button></div>

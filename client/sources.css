@@ -27,3 +27,28 @@
 .source-image-tools{position:absolute;top:8px;right:8px;z-index:2;display:flex;align-items:center;gap:2px;padding:4px;border:1px solid var(--line);border-radius:10px;background:#fffdf7e6;font-size:12px;color:var(--muted)}
 .source-image-tools .icon-button{width:32px;height:32px;font-size:16px}
 .source-image-tools span{min-width:40px;text-align:center}
+/* Import page: compact chapter list and one-line progress. */
+.source-import-confirm{gap:0 20px}.source-import-confirm .source-field small{margin-top:-2px}
+.chapter-toolbar{display:flex;flex-wrap:wrap;gap:10px;margin:12px 0}
+.chapter-progress{margin:12px 0}.chapter-progress p{margin:0 0 8px}.chapter-progress progress{width:100%;height:8px;display:block;margin-bottom:6px}
+.source-chapters h2{margin:0 0 4px}
+.source-chapter{display:block;padding:10px 12px;margin:8px 0}
+.source-chapter.needs-review{border-color:var(--rust,#be6243)}
+.chapter-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:4px 0}
+.chapter-row .chapter-title{flex:1;min-width:0;padding:6px 8px}
+.chapter-pages{display:inline-flex;align-items:center;gap:6px;color:var(--muted,#776e5f);font-size:14px}
+.source-chapter .chapter-pages input[type=number]{width:62px;padding:4px 6px}
+.source-chapter .source-chapter-actions{gap:14px;font-size:13px;margin:2px 0}
+.source-chapter .chapter-page-review{border-top:0;padding-top:0;font-size:14px}
+.source-actions{justify-content:flex-end}
+.source-actions .button.primary{min-width:140px}
+.chapter-tail{display:flex;flex-wrap:wrap;align-items:center;gap:4px 14px}
+.chapter-tail .source-chapter-actions{width:auto;order:1}
+.chapter-tail .chapter-page-review{flex:1 1 auto;order:0}
+.chapter-tail .chapter-page-review[open]{flex-basis:100%;order:2}
+.source-chapter .chapter-pages input{color:var(--ink,#203b39)}
+.exclusion-list{margin:16px 0;border-top:1px solid var(--line,#ded8ca);padding-top:10px}
+.exclusion-list>summary{cursor:pointer;font-weight:600;line-height:2}
+.exclusion-item{padding:6px 0;border-bottom:1px solid var(--line,#ded8ca);font-size:14px}
+.exclusion-item p{margin:2px 0 0 26px}
+.exclusion-item .source-original-text{margin:2px 0 0 26px;color:var(--muted,#627166);line-height:1.5}

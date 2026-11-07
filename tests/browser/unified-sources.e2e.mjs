@@ -1178,12 +1178,12 @@ async function startScannedBook(page,options={}) {
 
 test("scanned books show whole-book OCR then AI chapter progress and review every exclusion",async({page})=>{
   const state=await startScannedBook(page);
-  const progress=page.getByLabel("PDF 分章进度");await expect(progress).toContainText("全书本地 OCR：0 / 10 页");
+  const progress=page.getByLabel("PDF 分章进度");await expect(progress).toContainText("正在分章");await expect(progress.getByLabel("分章进度",{exact:true})).toHaveAttribute("value","0");
   await expect(page.getByRole("button",{name:"确认导入",exact:true})).toBeDisabled();await expect(page.getByRole("button",{name:"返回",exact:true})).toBeEnabled();
-  await expect(progress).toContainText("全书本地 OCR：3 / 10 页");await expect(progress).toContainText("AI 正在分章");
+  await expect(progress.getByLabel("分章进度",{exact:true})).toHaveAttribute("value","3");await expect(progress.getByLabel("分章进度",{exact:true})).not.toHaveAttribute("value");
   await expect(page.getByLabel("章节 1 标题")).toHaveValue("第一章");
-  const exclusions=page.getByLabel("建议排除的内容");await expect(exclusions).toContainText("版権所有・学習資料");await expect(exclusions).toContainText("関連図書のお知らせ");
-  await expect(exclusions).toContainText("原始 OCR 结果完整保留");
+  const exclusions=page.getByLabel("建议排除的内容");await exclusions.locator("summary").click();await expect(exclusions).toContainText("版権所有・学習資料");await expect(exclusions).toContainText("関連図書のお知らせ");
+  await expect(exclusions).toContainText("取消勾选即保留");
   await expect(exclusions.getByRole("checkbox")).toHaveCount(2);await expect(exclusions.getByRole("checkbox").first()).toBeChecked();
   await exclusions.getByRole("checkbox").last().uncheck();await page.getByRole("button",{name:"确认导入",exact:true}).click();
   await expect(page.getByLabel("日语原文")).toBeVisible();
@@ -1200,7 +1200,7 @@ test("PDF review can keep all suggested lines in included chapters and still exc
   ]});
   const appendix=page.locator(".source-chapter").filter({has:page.getByLabel("章节 2 标题",{exact:true})});
   await appendix.getByLabel("纳入正文").uncheck();
-  const exclusions=page.getByLabel("建议排除的内容");
+  const exclusions=page.getByLabel("建议排除的内容");await exclusions.locator("summary").click();
   const keep=exclusions.getByRole("button",{name:"保留正文中的全部建议行",exact:true});
   const line=(n)=>exclusions.getByRole("checkbox",{name:new RegExp(`^排除 PDF 第 ${n} 页`)});
   await expect(exclusions.getByRole("status")).toHaveText("正文范围内已选 2 处行排除");
@@ -1220,7 +1220,7 @@ test("PDF review can keep all suggested lines in included chapters and still exc
 test("queued PDF chapter tasks keep polling and stay locked until ready",async({page})=>{
   await startScannedBook(page,{queuedChapters:true});
   const progress=page.getByLabel("PDF 分章进度");
-  await expect(progress).toContainText("排队中");
+  await expect(progress).toContainText("正在分章");
   await expect(page.getByRole("button",{name:"确认导入",exact:true})).toBeDisabled();
   await expect(page.getByLabel("章节 1 标题")).toHaveValue("第一章");
   await expect(page.getByRole("button",{name:"确认导入",exact:true})).toBeEnabled();
@@ -1237,7 +1237,7 @@ test("failed async chapter proposals allow manual chapter confirmation",async({p
 
 test("leaving async chapter preparation stops UI polling without cancelling the background job",async({page})=>{
   const state=await startScannedBook(page,{keepExtracting:true});
-  await expect(page.getByLabel("PDF 分章进度")).toContainText("全书本地 OCR：3 / 10 页");
+  await expect(page.getByLabel("PDF 分章进度")).toContainText("正在分章");
   let prompts=0;page.on("dialog",async dialog=>{prompts++;await dialog.accept();});await page.getByRole("button",{name:"返回",exact:true}).click();
   await expect(page.getByLabel("统一导入")).toHaveCount(0);
   expect(prompts).toBe(0);
@@ -1285,7 +1285,7 @@ test("an uploaded PDF draft can be left when its browser cache cannot be written
 test("a server accepted PDF chapter job can be left when its browser cache cannot be written",async({page})=>{
   await simulateUnavailableImportDraftCache(page);
   const state=await startScannedBook(page,{keepExtracting:true});
-  await expect(page.getByLabel("PDF 分章进度")).toContainText("全书本地 OCR：3 / 10 页");
+  await expect(page.getByLabel("PDF 分章进度")).toContainText("正在分章");
   await leaveSavedImportWithoutDialog(page);
   expect(state.calls.filter(call=>call.path==="/imports/imp/chapters"&&call.method==="POST").map(call=>call.input)).toEqual([{type:"scan_pdf",title:"扫描书籍"}]);
   expect(state.calls.filter(call=>call.path.startsWith("/imports/")&&call.method==="DELETE")).toHaveLength(0);
@@ -1297,7 +1297,7 @@ for(const restore of [true,false])test(`${restore?"restored":"resumed"} server P
   const state=await fixture(page,{importType:"scan_pdf",keepExtracting:true,draft:pending,serverDrafts:[pending]});await page.goto("/");await showShelf(page);
   await page.getByRole("button",{name:"添加",exact:true}).click();
   if(!restore)await page.getByRole("button",{name:"继续导入：可继续的扫描书籍",exact:true}).click();
-  await expect(page.getByLabel("PDF 分章进度")).toContainText("全书本地 OCR：3 / 10 页");
+  await expect(page.getByLabel("PDF 分章进度")).toContainText("正在分章");
   await leaveSavedImportWithoutDialog(page);
   expect(state.calls.filter(call=>call.path.startsWith("/imports")&&call.method==="POST")).toHaveLength(0);
 });
@@ -1318,12 +1318,12 @@ test("an added chapter still warns before leaving if its only copy is in the edi
 
 test("reopening an import after refresh restores its draft and resumes existing OCR progress",async({page})=>{
   const state=await startScannedBook(page,{keepExtracting:true});
-  await expect(page.getByLabel("PDF 分章进度")).toContainText("全书本地 OCR：3 / 10 页");
+  await expect(page.getByLabel("PDF 分章进度")).toContainText("正在分章");
   const reads=state.calls.filter((call)=>call.path === "/imports/imp" && call.method === "GET").length;
   const acceptReload=(dialog)=>dialog.accept();page.on("dialog",acceptReload);await page.reload();page.off("dialog",acceptReload);
   await showShelf(page);
   await page.getByRole("button",{name:"添加",exact:true}).click();
-  await expect(page.getByLabel("PDF 分章进度")).toContainText("全书本地 OCR：3 / 10 页");
+  await expect(page.getByLabel("PDF 分章进度")).toContainText("正在分章");
   await expect(page.getByLabel("标题")).toHaveValue("扫描书籍");await expect(page.getByLabel("作为书籍导入")).toBeChecked();
   await expect.poll(()=>state.calls.filter((call)=>call.path === "/imports/imp" && call.method === "GET").length).toBeGreaterThan(reads+1);
   expect(state.calls.filter((call)=>call.path === "/imports" && call.method === "POST")).toHaveLength(1);
@@ -1336,7 +1336,7 @@ test("reopening an import after refresh restores its draft and resumes existing 
   expect(state.calls.filter(call=>call.path==="/imports/imp"&&call.method==="GET")).toHaveLength(restoredReads);
   expect(state.calls.filter(call=>call.path.includes("/imports/")&&call.method==="DELETE")).toHaveLength(0);
   await showShelf(page);await page.getByRole("button",{name:"添加",exact:true}).click();
-  await expect(page.getByLabel("PDF 分章进度")).toContainText("全书本地 OCR：3 / 10 页");
+  await expect(page.getByLabel("PDF 分章进度")).toContainText("正在分章");
   expect(state.calls.filter(call=>call.path==="/imports"&&call.method==="POST")).toHaveLength(1);
   expect(state.calls.filter(call=>call.path==="/imports/imp/chapters")).toHaveLength(1);
 });
@@ -1448,7 +1448,7 @@ test("choosing files again clears the previous import flow's error",async({page}
 
 test("a new tab without session cache resumes a server draft from the matching import context",async({page})=>{
   await startScannedBook(page,{keepExtracting:true});
-  await expect(page.getByLabel("PDF 分章进度")).toContainText("全书本地 OCR：3 / 10 页");
+  await expect(page.getByLabel("PDF 分章进度")).toContainText("正在分章");
   const otherTab=await page.context().newPage();
   try {
     const pending={id:"imp",title:"后台扫描书籍",detectedType:"text_pdf",allowedTypes:["text_pdf","scan_pdf"],status:"staged",chapterAttempted:true,context:{bookId:null,targetId:null},chapterProcessing:{status:"extracting",type:"scan_pdf",completedPages:3,totalPages:10}};
@@ -1459,14 +1459,14 @@ test("a new tab without session cache resumes a server draft from the matching i
     ]});
     await otherTab.goto("/");expect(await otherTab.evaluate(()=>Object.keys(sessionStorage).filter((key)=>key.startsWith("yohaku:import-draft:")).length)).toBe(0);
     await showShelf(otherTab);await otherTab.getByRole("button",{name:"添加",exact:true}).click();
-    const list=otherTab.getByLabel("继续未完成的导入");await expect(list).toContainText("全书本地 OCR：3 / 10 页");
+    const list=otherTab.getByLabel("继续未完成的导入");await expect(list).toContainText("正在分章");
     await expect(list.getByRole("button",{name:"继续导入：旧格式独立草稿",exact:true})).toBeVisible();
     await expect(list.getByRole("button",{name:"继续导入：其他书籍的后台任务",exact:true})).toHaveCount(0);
     await expect(list.getByRole("button",{name:"继续导入：已经确认的导入",exact:true})).toHaveCount(0);
     await list.getByRole("button",{name:"继续导入：后台扫描书籍",exact:true}).click();
     await expect(otherTab.getByLabel("标题")).toHaveValue("后台扫描书籍");
     await expect(otherTab.getByLabel("确认来源类型")).toHaveValue("scan_pdf");await expect(otherTab.getByLabel("作为书籍导入")).toBeChecked();
-    await expect(otherTab.getByLabel("PDF 分章进度")).toContainText("全书本地 OCR：3 / 10 页");
+    await expect(otherTab.getByLabel("PDF 分章进度")).toContainText("正在分章");
     await expect.poll(()=>state.calls.filter((call)=>call.path === "/imports/imp" && call.method === "GET").length).toBeGreaterThan(1);
     expect(state.calls.filter((call)=>call.path === "/imports" && call.method === "POST")).toHaveLength(0);
     expect(state.calls.filter((call)=>call.path === "/imports/imp/chapters")).toHaveLength(0);
