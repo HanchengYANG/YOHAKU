@@ -397,7 +397,7 @@ test("manual image annotation remains active while the native failed checkpoint 
   const state=await fixture(page);state.task={...state.task,type:"image",state:"needs_attention",status:"running",canReview:true,canRetry:true,canDelete:true,items:[{id:"photo1",name:"原图",status:"failed",error:"上次注音失败"}],counts:{total:1,uploaded:1,completed:0},steps:[{id:"manual:photo1",step:"annotate",status:"running"}]};
   await page.goto("/#tasks/prepare-14");
   const detail=page.getByRole("region",{name:"任务状态",exact:true});
-  await expect(detail).toContainText("当前手动注音仍在后台执行");
+  await expect(detail).toContainText("正在注音…");
   await expect(detail.getByRole("button",{name:/校对|重试|删除任务/})).toHaveCount(0);
 });
 

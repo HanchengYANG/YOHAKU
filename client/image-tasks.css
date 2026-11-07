@@ -82,9 +82,9 @@
 .task-group h2 { margin: 0 0 8px; font-size: 14px; font-weight: 600; color: var(--muted); }
 .task-rows { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .task-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); }
-.task-row-copy { min-width: 0; }
+.task-row-copy { min-width: 0; flex: 1; }
 .task-row h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
-.task-row h3 .task-title-button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-row h3 .task-title-button { max-width: 100%; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; text-align: left; white-space: normal; overflow-wrap: anywhere; }
 .task-row-status { margin: 0; font-size: 13px; color: var(--muted); }
 .task-row-status.is-attention { color: var(--rust-dark); }
 .task-row > .button { flex-shrink: 0; }

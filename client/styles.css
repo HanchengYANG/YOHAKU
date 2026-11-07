@@ -1220,3 +1220,8 @@ textarea::placeholder {
     scroll-behavior: auto !important;
   }
 }
+/* Shelf items: title on the left, count on the right, one line. */
+.document-link { display: flex; flex-direction: row-reverse; align-items: baseline; gap: 10px; padding: 10px 12px; margin-bottom: 2px; }
+.document-link strong { flex: 1; min-width: 0; margin: 0; }
+.document-link-top { flex-shrink: 0; }
+.document-link-top .kind-dot { display: none; }

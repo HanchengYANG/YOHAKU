@@ -80,3 +80,7 @@
 `.claude/launch.json` 的 `yohaku-dev` 用 Node 24，强制 `HOST=127.0.0.1`，清空 TLS 设置，使用端口 4317/5173。它会加载 `~/.nvm/nvm.sh` 选 Node 24；没有 nvm 时直接用 PATH 里的 node。依赖装不上或版本不对时先跑 `npm ci`。它读的是真实 `data/`，需要用户的账号。
 
 `yohaku-fixture`（端口 4320）启动 `tests/browser/server.mjs`：带分句／注音测试替身，数据在 `artifacts/preview-data`（每次启动清空），用 `tests/browser/session.mjs` 的夹具账号登录。它直接提供 `dist`，改完前端要先 `npm run build`。用统一导入接口造文章（`POST /api/imports` + `/confirm`），直接 `POST /api/documents` 得到的是旧式文章。页面由 PWA service worker 缓存，换构建后要注销 service worker 或刷新两次；只改 `#` 后面的地址不会重新加载页面。
+
+## 2026-11-07 精简文案
+
+按「只说进行中／完成／出错」的原则删了重复文字：导入页（说明、草稿 id、分阶段进度，章节卡压成三行，建议排除折叠）、首页（继续卡不再重复出现在最近阅读，卡片去掉类型小字）、侧栏书架（去掉摘录，标题和篇数一行）、任务列表（标题可两行）、图片任务详情（状态改成一句短语）。没做的：分章「好像卡住了 + 重试」需要服务器给出进度停滞信号，属于业务改动。「shelf totals」用例仍偶发等不到侧栏（重复 3 次失败 1 次）。

@@ -65,11 +65,10 @@ export default function Sidebar({
               aria-current={item.id === activeBookId ? (activeId === `book/${item.id}` ? "page" : "true") : undefined}
               type="button" disabled={saving || bookBusy} onClick={() => onOpenBook(item.id)}>
               <span className="document-link-top">
-                <span className="kind-dot book" />书籍
-                <span>{item.pageCount} 篇 · {item.charCount} 字</span>
+                <span className="kind-dot book" aria-label="书籍" />
+                <span>{item.pageCount} 篇</span>
               </span>
               <strong>{item.title}</strong>
-              <small lang="ja">{item.preview?.replace(/\n/g, " ") || "还没有文章"}</small>
             </button>
           ))}
           {documents.map((item) => (
@@ -77,12 +76,10 @@ export default function Sidebar({
               aria-current={item.id === activeId ? "page" : undefined}
               type="button" disabled={saving} onClick={() => onOpenDocument(item.id)}>
               <span className="document-link-top">
-                <span className={`kind-dot ${item.kind}`} />
-                {kinds[item.kind]}
+                <span className={`kind-dot ${item.kind}`} aria-label={kinds[item.kind]} />
                 <span>{item.charCount} 字</span>
               </span>
               <strong>{item.title}</strong>
-              <small lang="ja">{item.preview?.replace(/\n/g, " ")}</small>
             </button>
           ))}
         </nav>

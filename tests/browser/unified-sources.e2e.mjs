@@ -283,8 +283,9 @@ test("prepared source pages refresh authoritative shelf totals once per content 
   state.extraPages=[{id:"p1",index:1,ready:true,bodyHtml:html("あ".repeat(79)+"。"),sourceIds:["s3"],start:271,end:351}];
   await expect(shelfItem).toContainText("351 字");
   await page.locator(".brand").click();
-  await expect(page.getByRole("region",{name:"最近阅读",exact:true})).toContainText("351 字");
-  await expect(page.getByRole("button",{name:"开始阅读：分页阅读资料",exact:true})).toContainText("351 字");
+  // The only article is the continue card, so the recent list does not repeat it.
+  await expect(page.getByRole("region",{name:"继续阅读",exact:true})).toContainText("分页阅读资料");
+  await expect(page.getByRole("region",{name:"最近阅读",exact:true})).toHaveCount(0);
 });
 
 test("reading preparation links to its existing background task",async({page})=>{

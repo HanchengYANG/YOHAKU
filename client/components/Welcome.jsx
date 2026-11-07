@@ -30,7 +30,8 @@ export default function Welcome({
   onAddPhoto,
 }) {
   const current = continueReading(articles, books);
-  const recent = recentEntries(books, documents);
+  // The continue card already shows the current article; the list starts after it.
+  const recent = recentEntries(books, documents).filter((item) => item.entryType === "book" || item.id !== current?.document.id);
   const empty = !current && !recent.length;
   const camera = useRef(null);
   // Phones lead with the photo action, then what needs the reader; the DOM
@@ -56,7 +57,6 @@ export default function Welcome({
       {current ? (
         <section className="home-continue closed-book" aria-label="继续阅读">
           <div className="home-continue-copy">
-            <span className="eyebrow">继续阅读</span>
             <h2>{current.document.title}</h2>
             {current.book && <p className="home-continue-book">{current.book.title}</p>}
             {current.progress && (
@@ -79,7 +79,7 @@ export default function Welcome({
           <span className="home-empty-mark" aria-hidden="true">本</span>
           <div>
             <h3>{loading ? "正在打开书架…" : "还没有材料"}</h3>
-            {!loading && <p>点「添加」导入照片、PDF、EPUB 或文字。</p>}
+            {!loading && <p>拍照，或从菜单「添加」PDF、EPUB、文字。</p>}
           </div>
         </div>
       )}
@@ -100,11 +100,10 @@ export default function Welcome({
                   <span>{item.entryType === "book" ? "本" : "文"}</span>
                 </span>
                 <span className="home-reading-content">
-                  <small>{item.entryType === "book" ? `书籍 · ${item.pageCount} 篇` : "文章"}</small>
                   <strong>{item.title}</strong>
                   <span lang="ja">{item.preview?.replace(/\n/g, " ") || ""}</span>
                   <span className="home-reading-bottom">
-                    {(item.charCount || 0).toLocaleString("zh-CN")} 字
+                    {item.entryType === "book" && `${item.pageCount} 篇 · `}{(item.charCount || 0).toLocaleString("zh-CN")} 字
                     <Icon name="arrow" size={18} />
                   </span>
                 </span>
