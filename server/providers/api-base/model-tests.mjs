@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import sharp from "sharp";
+import { digitTestImage } from "../test-image.mjs";
 import { generateText, streamText, Output } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { requiredCapabilities, normalizeReasoning, reasoningKey } from "../../../shared/ai-roles.mjs";
@@ -84,7 +84,7 @@ export function createModelTests({ directory, fetchImpl, timeoutMs = 60000 }) {
       if (result.finishReason !== "stop" || result.output?.ok !== true) throw new Error("JSON 测试未通过。");
     });
     await check("image", async (options) => {
-      const pixels = await sharp(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="240" height="160"><rect width="240" height="160" fill="white"/><text x="50" y="115" font-family="sans-serif" font-size="100" fill="black">42</text></svg>')).png().toBuffer();
+      const pixels = await digitTestImage();
       const result = await generateText({ ...options, messages: [{ role: "user", content: [
         { type: "text", text: "读取图片中的数字，只回复数字，不要解释。" },
         { type: "file", data: pixels, mediaType: "image/png" },

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import sharp from "sharp";
+import { digitTestImage } from "../test-image.mjs";
 import { requiredCapabilities, roleReport, normalizeReasoning, reasoningKey } from "../../../shared/ai-roles.mjs";
 
 const fail = (status, message) => Object.assign(new Error(message), { status, expose: true });
@@ -48,7 +48,7 @@ export function createOpenAIModelTests({ directory, credentialStatus, runtime })
             prompt: '正文：日本語を勉強しています。语境：日语学习。只返回 JSON 对象 {"ok":true}。' });
           if (!result.completed || JSON.parse(result.text)?.ok !== true) throw new Error("JSON 输出无效。");
         } else {
-          const pixels = await sharp(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="240" height="160"><rect width="240" height="160" fill="white"/><text x="50" y="115" font-family="sans-serif" font-size="100" fill="black">42</text></svg>')).png().toBuffer();
+          const pixels = await digitTestImage();
           const result = await runtime.run({ ...input, image: `data:image/png;base64,${pixels.toString("base64")}`,
             prompt: "读取图片中的数字，只回复数字，不要解释。" });
           if (!result.completed || result.text?.replace(/\s/g, "") !== "42") throw new Error("图片输出无效。");
