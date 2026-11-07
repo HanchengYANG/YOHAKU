@@ -118,7 +118,6 @@ function Workspace({ user, onLoggedOut }) {
   const [book, setBook] = useState(null);
   const [importBookId, setImportBookId] = useState(null);
   const [importSession, setImportSession] = useState(0);
-  const [importText, setImportText] = useState(false);
   const [correctionTarget, setCorrectionTarget] = useState({});
   const [importTask, setImportTask] = useState(null);
   const [chatRequest, setChatRequest] = useState(null);
@@ -453,7 +452,6 @@ function Workspace({ user, onLoggedOut }) {
     if (name === "image" || name === "import") {
       setImportSession((current) => current + 1);
       setImportTask(null);
-      setImportText(false);
       setImportDraftId(null);
     }
     setDraft(null);
@@ -472,9 +470,7 @@ function Workspace({ user, onLoggedOut }) {
     window.addEventListener(OPEN_PANEL_EVENT, open);
     return () => window.removeEventListener(OPEN_PANEL_EVENT, open);
   });
-  const openUnifiedImport = (text = false) => {
-    openPanel("import"); setImportText(text);
-  };
+  const openUnifiedImport = () => { openPanel("import"); };
   // Photos go to the photo page: from the home camera button, from pictures
   // chosen on the add page, or when an unfinished photo draft is continued.
   // From the add page the pictures are handed over, not left behind.
@@ -878,7 +874,7 @@ function Workspace({ user, onLoggedOut }) {
             onCancel={closePanel} onDirty={setDirty} onCreated={() => setRefresh((n) => n + 1)}
             onOpenDocument={(id) => { setDirty(false); setPanel(null); openDocument(id); }} />
         ) : panel === "import" ? (
-          <UnifiedImport key={importSession} initialText={importText} initialBookId={importBookId} initialTargetId={appendTargetId} initialImportId={importDraftId}
+          <UnifiedImport key={importSession} initialBookId={importBookId} initialTargetId={appendTargetId} initialImportId={importDraftId}
             onCancel={closePanel} onDirty={setDirty} onImported={imported} onPhotos={(files, importId) => openPhotoImport(files, importId, true)} />
         ) : panel === "correction" && currentReadingDocument ? (
           <SourceCorrection key={currentReadingDocument.id} document={currentReadingDocument} sourceIds={correctionTarget.sourceIds} reviewSourceId={correctionTarget.reviewSourceId}

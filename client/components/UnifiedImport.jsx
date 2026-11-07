@@ -40,7 +40,7 @@ function ChapterPagePreview({ importId, file, chapter, nextChapter, index, total
     </section>}
   </details>;
 }
-export default function UnifiedImport({ onCancel, onImported, onDirty, onPhotos, initialBookId, initialTargetId, initialImportId, initialText = false }) {
+export default function UnifiedImport({ onCancel, onImported, onDirty, onPhotos, initialBookId, initialTargetId, initialImportId }) {
   const [text, setText] = useState("");
   const [title, setTitle] = useState("");
   const [files, setFiles] = useState([]);
@@ -53,7 +53,7 @@ export default function UnifiedImport({ onCancel, onImported, onDirty, onPhotos,
   const [restoring, setRestoring] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [mode, setMode] = useState(initialText ? "text" : "files");
+  const [mode, setMode] = useState("files");
   const fileInput = useRef(null);
   const nextFileId = useRef(0);
   const loadedContext = useRef(null);

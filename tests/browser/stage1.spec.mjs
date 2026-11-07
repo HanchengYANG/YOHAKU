@@ -397,18 +397,12 @@ test("首页继续阅读与最近阅读使用已保存书籍和材料并能正�
     await page.goto("/");
     await expect(page.getByRole("region", { name: "阅读首页", exact: true })).toBeVisible();
     await expect(page.getByRole("region", { name: "继续阅读", exact: true })).toBeVisible();
-    // Phones lead with 「拍照添加」. In this step it only opens the add page on its
-    // default upload tab; opening the camera directly comes in step 4.
-    const addFromHome = page.getByRole("button", { name: "拍照添加", exact: true });
-    if (suffix === "phone") {
-      await addFromHome.click();
-      await expect(page.getByRole("tab", { name: "文件", exact: true })).toHaveAttribute("aria-selected", "true");
-      await page.goto("/");
-    } else await expect(addFromHome).toBeHidden();
+    // Desktops hide the phone-first 「拍照添加」 action (photo-import.e2e.mjs covers phones).
+    await expect(page.getByRole("button", { name: "拍照添加", exact: true })).toBeHidden();
     const recent = page.getByRole("region", { name: "最近阅读", exact: true });
     await expect(recent).toBeVisible();
     await expect(recent.getByRole("button", { name: `打开书籍：${book.title}`, exact: true })).toBeVisible();
-    await expect(recent.getByRole("button", { name: `继续阅读：${document.title}`, exact: true })).toBeVisible();
+    await expect(recent.getByRole("button", { name: `开始阅读：${document.title}`, exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({
       path: `artifacts/design-2026-10-28/homepage-${suffix}.png`,
@@ -421,11 +415,11 @@ test("首页继续阅读与最近阅读使用已保存书籍和材料并能正�
     await expect(page.getByLabel("书籍文章列表", { exact: true }).getByRole("listitem")).toHaveCount(1);
     await page.goto("/");
     const continuing = page.getByRole("region", { name: "继续阅读", exact: true });
-    await expect(recent.getByRole("button", { name: `继续阅读：${document.title}`, exact: true })).toBeVisible();
+    await expect(recent.getByRole("button", { name: `开始阅读：${document.title}`, exact: true })).toBeVisible();
     await expect(continuing.getByRole("heading", { name: document.title, exact: true })).toHaveCount(0);
     const opened = page.waitForResponse((response) => response.request().method() === "PUT"
       && response.url().endsWith(`/api/documents/${documentId}/reading-position`));
-    await recent.getByRole("button", { name: `继续阅读：${document.title}`, exact: true }).click();
+    await recent.getByRole("button", { name: `开始阅读：${document.title}`, exact: true }).click();
     await expect(page.getByRole("heading", { name: document.title, exact: true })).toBeVisible();
     expect((await opened).ok()).toBe(true);
     expect(await page.evaluate(() => location.hash)).toBe(`#${documentId}`);

@@ -62,6 +62,7 @@ export default function Sidebar({
           )}
           {shelfBooks.map((item) => (
             <button className={`document-link ${item.id === activeBookId ? "active" : ""}`} key={`book-${item.id}`}
+              aria-current={item.id === activeBookId ? (activeId === `book/${item.id}` ? "page" : "true") : undefined}
               type="button" disabled={saving || bookBusy} onClick={() => onOpenBook(item.id)}>
               <span className="document-link-top">
                 <span className="kind-dot book" />书籍
@@ -73,6 +74,7 @@ export default function Sidebar({
           ))}
           {documents.map((item) => (
             <button className={`document-link ${item.id === activeId ? "active" : ""}`} key={item.id}
+              aria-current={item.id === activeId ? "page" : undefined}
               type="button" disabled={saving} onClick={() => onOpenDocument(item.id)}>
               <span className="document-link-top">
                 <span className={`kind-dot ${item.kind}`} />

@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import Icon from "./Icon.jsx";
 import ErrorNotice from "./ErrorNotice.mjs";
 import { continueReading, recentEntries } from "../library-model.mjs";
@@ -6,6 +6,17 @@ import { continueReading, recentEntries } from "../library-model.mjs";
 // Home: continue reading, imports that need the reader, then recent reading.
 // Phones start with the photo action because they are mostly used for imports;
 // welcome.css reorders the blocks there.
+const phoneQuery = "(max-width: 760px)";
+function usePhoneLayout() {
+  const [phone, setPhone] = useState(() => { try { return window.matchMedia(phoneQuery).matches; } catch { return false; } });
+  useEffect(() => {
+    const query = window.matchMedia(phoneQuery), change = () => setPhone(query.matches);
+    query.addEventListener("change", change);
+    return () => query.removeEventListener("change", change);
+  }, []);
+  return phone;
+}
+
 export default function Welcome({
   books = [],
   documents = [],
@@ -22,6 +33,15 @@ export default function Welcome({
   const recent = recentEntries(books, documents);
   const empty = !current && !recent.length;
   const camera = useRef(null);
+  // Phones lead with the photo action, then what needs the reader; the DOM
+  // follows the visual order so keyboard and screen readers do too.
+  const phone = usePhoneLayout();
+  const tasks = attentionCount > 0 && (
+    <button className="home-task-card" type="button" onClick={onOpenTasks}>
+      <span>{attentionCount} 个导入需要你处理</span>
+      <span className="home-task-link">查看<Icon name="arrow" size={14} /></span>
+    </button>
+  );
   return (
     <section className="home" aria-label="阅读首页">
       <h1 className="sr-only">首页</h1>
@@ -32,6 +52,7 @@ export default function Welcome({
       <button className="home-photo-action" type="button" onClick={() => camera.current?.click()}>
         <span aria-hidden="true">📷</span>拍照添加
       </button>
+      {phone && tasks}
       {current ? (
         <section className="home-continue closed-book" aria-label="继续阅读">
           <div className="home-continue-copy">
@@ -62,12 +83,7 @@ export default function Welcome({
           </div>
         </div>
       )}
-      {attentionCount > 0 && (
-        <button className="home-task-card" type="button" onClick={onOpenTasks}>
-          <span>{attentionCount} 个导入需要你处理</span>
-          <span className="home-task-link">查看<Icon name="arrow" size={14} /></span>
-        </button>
-      )}
+      {!phone && tasks}
       {recent.length > 0 && (
         <section className="home-recent" aria-label="最近阅读">
           <h2 className="home-section-title">最近阅读</h2>
@@ -77,7 +93,7 @@ export default function Welcome({
                 key={`${item.entryType}-${item.id}`}
                 type="button"
                 className={`home-reading-card home-reading-card-${index % 3}`}
-                aria-label={`${item.entryType === "book" ? "打开书籍" : "继续阅读"}：${item.title}`}
+                aria-label={`${item.entryType === "book" ? "打开书籍" : item.openedAt ? "继续阅读" : "开始阅读"}：${item.title}`}
                 onClick={() => (item.entryType === "book" ? onOpenBook(item.id) : onOpenDocument(item.id))}
               >
                 <span className="home-reading-spine" aria-hidden="true">

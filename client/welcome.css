@@ -272,12 +272,8 @@
     width: calc(100% - 32px);
     padding: 20px 0 28px;
   }
-  .home > .error-notice {
-    order: -3;
-  }
   .home-photo-action {
     display: flex;
-    order: -2;
     align-items: center;
     justify-content: center;
     gap: 10px;
@@ -296,9 +292,6 @@
   }
   .home-photo-action > span {
     font-size: 22px;
-  }
-  .home-task-card {
-    order: -1;
   }
   .home-continue {
     padding: 24px 20px 20px 34px;

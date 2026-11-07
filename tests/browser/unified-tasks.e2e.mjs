@@ -1,6 +1,7 @@
 import {test,expect} from "@playwright/test";
 import {parseText} from "../../shared/document.mjs";
 import {applySentenceBoundaries,blocksToHtml} from "../../shared/article-html.mjs";
+import {taskAttention} from "../../shared/task-attention.mjs";
 
 const createdAt="2026-11-04T10:00:00Z";
 async function fixture(page) {
@@ -23,7 +24,7 @@ async function fixture(page) {
       const source=state.sources?.find(item=>path===`/documents/article/sources/${encodeURIComponent(item.id)}`);
       return source ? send(source) : send({error:"找不到这个正文来源。"},404);
     }
-    if(path==="/tasks"){const tasks=state.tasks || [state.task];return send({tasks:url.searchParams.get("type")==="image" ? [] : tasks,total:tasks.length,counts:{active:0,archived:0}});}
+    if(path==="/tasks"){const tasks=state.tasks || [state.task];return send({tasks:url.searchParams.get("type")==="image" ? [] : tasks,total:tasks.length,counts:{active:tasks.length,archived:0,attention:tasks.filter(task=>taskAttention(task)==="attention").length}});}
     const extraRetry=state.tasks && path.match(/^\/tasks\/([^/]+)\/retry$/);
     if(extraRetry && extraRetry[1]!=="prepare-14"){const task=state.tasks.find(item=>item.id===extraRetry[1]);Object.assign(task,{status:"queued",state:"queued",canRetry:false,version:task.version+1});return send(task);}
     if(path==="/tasks/prepare-14" && method==="GET")return send(state.task);
@@ -398,4 +399,23 @@ test("manual image annotation remains active while the native failed checkpoint 
   const detail=page.getByRole("region",{name:"任务状态",exact:true});
   await expect(detail).toContainText("当前手动注音仍在后台执行");
   await expect(detail.getByRole("button",{name:/校对|重试|删除任务/})).toHaveCount(0);
+});
+
+test("tasks that need the reader show on the sidebar, the home page and the book's article rows",async({page})=>{
+  const state=await fixture(page);
+  state.book={id:"book",title:"带任务的书",revision:1,pageCount:3,charCount:32,pages:[{id:"a",title:"出错的文章",charCount:10,rubyCount:0},{id:"b",title:"准备中的文章",charCount:10,rubyCount:0},{id:"c",title:"普通文章",charCount:12,rubyCount:0}]};
+  const task=(id,status,extra)=>({id,type:"preparation",title:id,status,state:status,version:1,createdAt,updatedAt:createdAt,steps:[],...extra});
+  state.tasks=[task("t-a","failed",{documentId:"a"}),task("t-b","running",{documentId:"b"}),task("t-d","draft",{type:"import",importId:"imp"})];
+  await page.goto("/");
+  await openShelf(page);
+  await expect(page.getByRole("button",{name:"任务，2 个需要处理",exact:true})).toBeVisible();
+  const close=page.getByRole("button",{name:"关闭书架",exact:true});
+  if(await close.isVisible())await close.click({position:{x:page.viewportSize().width-12,y:300}});
+  await page.getByRole("button",{name:/^2 个导入需要你处理/}).click();
+  await expect(page).toHaveURL(/#tasks$/);
+  await page.goto("/#book/book");
+  const rows=page.getByRole("list",{name:"书籍文章列表",exact:true});
+  await expect(rows.getByRole("listitem").filter({hasText:"出错的文章"})).toContainText("需要处理");
+  await expect(rows.getByRole("listitem").filter({hasText:"准备中的文章"})).toContainText("准备中");
+  await expect(rows.getByRole("listitem").filter({hasText:"普通文章"})).not.toContainText(/需要处理|准备中/);
 });
